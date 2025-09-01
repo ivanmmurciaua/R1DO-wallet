@@ -271,9 +271,13 @@ export default function Home() {
           // The user has changed device or deleted passkey from the device.
           // And I don't know if is worth to store again in SC overwriting the existing.
           // TRACE - DEBUG
+          setPopupMessage(
+            "If you are the owner of this wallet, please load it in the correct device",
+          );
           console.log(
             "Exists onchain but NOT exists in device, create new passkey",
           );
+          throw new Error("Exists onchain but NOT exists in device");
         }
       } else {
         // New user or same user with different platform (anyway don't matter because will create a new passkey)
