@@ -244,6 +244,7 @@ export default function Home() {
   // If calculated fingerprint is equal to the one onchain, we retrieve passkey data from SC BUT a new passkey is created in Google or the device.
   async function checkUserOnchain(username: string) {
     openPopup(`Looking for your wallet ${username}`);
+    let overwrite = false;
     let exists = false;
 
     const authKey = generateAuthKey(username);
@@ -270,10 +271,12 @@ export default function Home() {
           // VERY IMPORTANT. ASK USER BEFORE CONTINUE BECAUSE WILL OVERWRITE ONCHAIN REGISTRY.
           // The user has changed device or deleted passkey from the device.
           // And I don't know if is worth to store again in SC overwriting the existing.
-          // TRACE - DEBUG
+          exists = true;
+          overwrite = true;
           setPopupMessage(
             "If you are the owner of this wallet, please load it in the correct device",
           );
+          // TRACE - DEBUG
           console.log(
             "Exists onchain but NOT exists in device, create new passkey",
           );
@@ -288,7 +291,10 @@ export default function Home() {
       console.error(e);
     }
 
-    return exists;
+    return {
+      exists: exists,
+      overwrite: overwrite,
+    };
   }
 
   //1
@@ -305,27 +311,34 @@ export default function Home() {
       console.log("No fingerprint detected");
 
       // Check if user exists onchain and not locally
-      if (await checkUserOnchain(username)) {
-        // Retrieve data and load wallet.
-        fingerprint = localStorage.getItem(username);
-        // TRACE - DEBUG
-        console.log(fingerprint);
-        passkey = await formatPasskey(fingerprint!);
-        // TRACE - DEBUG
-        console.log("Retrieved passkey from onchain: ", passkey);
-        await handleWalletInit(passkey);
-      } else {
-        // New user
-        // TRACE - DEBUG
-        console.log("New user, creating passkey...");
-        openPopup("Creating new passkey");
-        ({ fingerprint, passkey } = await handleCreatePasskey(
-          username,
-          external,
-        ));
+      const { exists, overwrite } = await checkUserOnchain(username);
+      try {
+        if (exists) {
+          if (!overwrite) {
+            // Retrieve data and load wallet.
+            fingerprint = localStorage.getItem(username);
+            // TRACE - DEBUG
+            console.log(fingerprint);
+            passkey = await formatPasskey(fingerprint!);
+            // TRACE - DEBUG
+            console.log("Retrieved passkey from onchain: ", passkey);
+            await handleWalletInit(passkey);
+          }
+        } else {
+          // New user
+          // TRACE - DEBUG
+          console.log("New user, creating passkey...");
+          openPopup("Creating new passkey");
+          ({ fingerprint, passkey } = await handleCreatePasskey(
+            username,
+            external,
+          ));
 
-        const wallet = await handleWalletInit(passkey);
-        await handleStore(fingerprint!, passkey, wallet);
+          const wallet = await handleWalletInit(passkey);
+          await handleStore(fingerprint!, passkey, wallet);
+        }
+      } catch (e) {
+        console.error(e);
       }
     } else {
       // setStored(true);
