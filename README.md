@@ -1,2 +1,2 @@
 # safekey-wallet
-A very simple wallet for normies using Safe + Passkeys
+A very simple EVM wallet for normies using Safe + Passkeys
