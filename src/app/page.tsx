@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react"; //useEffect }
+import { useState, useEffect } from "react";
 import {
   createPasskey,
   existsPasskey,
@@ -42,6 +42,12 @@ export default function Home() {
     setShowPopup(false);
     setPopupMessage("");
   };
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && !window.PublicKeyCredential) {
+      openPopup("Credentials not supported on this device or browser.");
+    }
+  });
 
   // Not needed yet. If I need to do something everytime userPasskey changes.
   // useEffect(() => {
