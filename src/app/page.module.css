@@ -172,6 +172,7 @@ a.secondary {
 
 .footer p {
     margin: 0; /* Remueve márgenes del párrafo */
+    font-size: 14px;
 }
 
 /* Enable hover only on non-touch devices */
