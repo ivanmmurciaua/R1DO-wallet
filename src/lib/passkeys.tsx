@@ -5,12 +5,13 @@ import { registryABI } from "./registryAbi";
 import { REGISTRY_ADDRESS } from "@/app/constants";
 import { client } from "./client";
 import { PasskeyResponseType } from "@/types";
+import { log } from "./common";
 
 export const generateFingerprint = (userAuthKey: string) =>
   keccak256(toHex(userAuthKey));
 
 export const generateAuthKey = (username: string): string =>
-  `${username}_${navigator.platform.replace(/\s/g, "_")}_${navigator.maxTouchPoints > 0 ? "mobile" : "desktop"}`;
+  `${username}_${navigator.platform.split(" ")[0].toLowerCase()}_${navigator.maxTouchPoints > 0 ? "mobile" : "desktop"}`;
 
 // function generateAuthKey(username: string, credentials: Credential): string {
 //   // Fingerprint data
@@ -128,18 +129,7 @@ export async function createPasskey(
     console.error(e);
 
     // Server debug
-    try {
-      await fetch("/api/log-error", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error: e?.toString?.() || String(e),
-          context: "creating passkey at passkeys.tsx",
-        }),
-      });
-    } catch (apiErr) {
-      console.error("Failed to log error to server:", apiErr);
-    }
+    await log(e);
 
     return {
       fingerprint: "",
@@ -196,19 +186,7 @@ export async function load(test1: PasskeyArgType): Promise<boolean> {
     console.error("Error loading passkey:", e);
 
     // Server debug
-    try {
-      await fetch("/api/log-error", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error: e?.toString?.() || String(e),
-          context: "loading passkey at passkeys.tsx",
-        }),
-      });
-    } catch (apiErr) {
-      console.error("Failed to log error to server:", apiErr);
-    }
-
+    await log(e);
     return false;
   }
 }

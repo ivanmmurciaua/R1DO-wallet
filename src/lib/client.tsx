@@ -7,10 +7,10 @@ import {
 import { PasskeyArgType } from "@safe-global/protocol-kit";
 import { PaymasterOptions, Safe4337Pack } from "@safe-global/relay-kit";
 import { createPublicClient, http } from "viem"; //Address, createPublicClient, http } from "viem";
-import { sepolia } from "viem/chains";
+import { arbitrumSepolia } from "viem/chains";
 
 export const client = createPublicClient({
-  chain: sepolia,
+  chain: arbitrumSepolia,
   transport: http(),
 });
 

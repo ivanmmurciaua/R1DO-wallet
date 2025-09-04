@@ -1,6 +1,6 @@
-export const RPC_URL = "https://sepolia.drpc.org";
-export const CHAIN_NAME = "sepolia";
-export const PAYMASTER_ADDRESS = "0x0000000000325602a77416A16136FDafd04b299f";
+export const RPC_URL = "https://sepolia-rollup.arbitrum.io/rpc";
+export const CHAIN_NAME = "arbitrum-sepolia";
+export const PAYMASTER_ADDRESS = "0x888888888888Ec68A58AB8094Cc1AD20Ba3D2402";
 export const BUNDLER_URL = `https://api.pimlico.io/v1/${CHAIN_NAME}/rpc?add_balance_override&apikey=${process.env.NEXT_PUBLIC_PIMLICO_API_KEY}`;
 export const PAYMASTER_URL = `https://api.pimlico.io/v2/${CHAIN_NAME}/rpc?add_balance_override&apikey=${process.env.NEXT_PUBLIC_PIMLICO_API_KEY}`;
-export const REGISTRY_ADDRESS = "0xD6cC5C4ABa98c4AA41ced0555f96c76DF37971eB";
+export const REGISTRY_ADDRESS = "0x361af6EfDc737E4079D381aF8fD93760DaCACF4F";

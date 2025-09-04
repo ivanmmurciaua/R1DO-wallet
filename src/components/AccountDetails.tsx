@@ -1,13 +1,27 @@
 // import { Input, Stack, Typography } from "@mui/material";
-// import { Safe4337Pack } from "@safe-global/relay-kit";
+// import { Button } from "@mui/material";
+import { Safe4337Pack } from "@safe-global/relay-kit";
+import { useEffect, useState } from "react";
+import { formatEther } from "viem";
+import { BuildingNotice } from "./BuildingNotice";
 
 type props = {
-  //wallet: Safe4337Pack;
+  username: string;
+  wallet: Safe4337Pack;
   address: string;
 };
 
-export default function AccountDetails({ address }: props) {
-  //wallet, address }: props) {
+export default function AccountDetails({ username, wallet, address }: props) {
+  const [userBalance, setBalance] = useState<string>("0");
+
+  useEffect(() => {
+    const fetchBalance = async () => {
+      const balance = await wallet.protocolKit.getBalance();
+      setBalance(formatEther(balance));
+    };
+    fetchBalance();
+  }, [wallet]);
+
   return (
     <div>
       <h2>🎉 Your Wallet is ready!</h2>
@@ -23,51 +37,21 @@ export default function AccountDetails({ address }: props) {
         {address}
       </p>
       <br />
+      <p>Balance: {userBalance} ⧫</p>
       <br />
-      <p style={{ fontSize: "1.3em" }}>🏗️ Stay tunned for new updates 🏗️</p>
-      <br />
-      Feel free to contact me if you have any feedback:
-      <br />
-      <a
-        href="https://t.me/Ivanovish10"
-        target="_blank"
-        rel="noopener noreferrer"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: "7px",
-          marginTop: "1px",
-          textDecoration: "none",
-          background: "#229ED9",
-          color: "#fff",
-          borderRadius: "4px",
-          padding: "3px 12px",
-          fontWeight: 500,
-          fontSize: "1rem",
-          border: "none",
-          cursor: "pointer",
-        }}
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{ background: "none" }}
-        >
-          <path d="M22 2L11 13" />
-          <path d="M22 2L15 22L11 13L2 9L22 2Z" />
-        </svg>
-        Telegram
-      </a>
-      <br />
-      <br />
-      Thanks for testing
+      <div>
+        {parseFloat(userBalance) > 0 ? (
+          <div>
+            Send a few ⧫ to your friends!
+            {/*<Send />*/}
+          </div>
+        ) : (
+          <div>
+            Ask a few friends to send you some ⧫ using your username: {username}
+          </div>
+        )}
+      </div>
+      <BuildingNotice />
     </div>
   );
 }

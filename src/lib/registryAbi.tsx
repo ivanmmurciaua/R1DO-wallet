@@ -4,15 +4,9 @@ export const registryABI = [
     inputs: [
       {
         indexed: true,
-        internalType: "bytes32",
-        name: "fingerprint",
-        type: "bytes32",
-      },
-      {
-        indexed: false,
-        internalType: "bytes32",
+        internalType: "string",
         name: "rawId",
-        type: "bytes32",
+        type: "string",
       },
       {
         indexed: false,
@@ -23,30 +17,6 @@ export const registryABI = [
     ],
     name: "PasskeyRegistered",
     type: "event",
-  },
-  {
-    inputs: [
-      {
-        internalType: "bytes32",
-        name: "fingerprint",
-        type: "bytes32",
-      },
-    ],
-    name: "getCoordinates",
-    outputs: [
-      {
-        internalType: "bytes32",
-        name: "coordinateX",
-        type: "bytes32",
-      },
-      {
-        internalType: "bytes32",
-        name: "coordinateY",
-        type: "bytes32",
-      },
-    ],
-    stateMutability: "view",
-    type: "function",
   },
   {
     inputs: [
@@ -79,11 +49,6 @@ export const registryABI = [
             internalType: "uint256",
             name: "timestamp",
             type: "uint256",
-          },
-          {
-            internalType: "bool",
-            name: "exists",
-            type: "bool",
           },
         ],
         internalType: "struct PasskeyRegistry.PasskeyData",

@@ -1,11 +1,11 @@
 import {
-  Input,
+  // Input,
+  // Select,
+  // MenuItem,
   Button,
   Stack,
   Typography,
   FormControl,
-  Select,
-  MenuItem,
   Popover,
   IconButton,
   Box,
@@ -48,46 +48,31 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           SafeKey Wallet
         </Typography>
 
-        <Input
+        <input
           onChange={(e) => setUsername(e.target.value)}
           value={username}
           required
           placeholder="username"
-          sx={{
-            backgroundColor: (theme) =>
-              theme.palette.mode === "dark" ? "#222" : "#fff",
-            color: (theme) => (theme.palette.mode === "dark" ? "#fff" : "#222"),
+          style={{
+            fontSize: "1.2em",
             borderRadius: "4px",
-            input: {
-              backgroundColor: (theme) =>
-                theme.palette.mode === "dark" ? "#222" : "#fff",
-              color: (theme) =>
-                theme.palette.mode === "dark" ? "#fff" : "#222",
-            },
+            border: "1px solid #555",
+            width: "100%",
+            padding: "7px",
           }}
-        />
+        ></input>
 
-        <Box
-          sx={{
-            backgroundColor: (theme) =>
-              theme.palette.mode === "dark" ? "#222" : "#fff",
-          }}
-        >
+        <Box>
           <Box display="flex" alignItems="center" mb={-0.3}>
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              sx={{
-                color: (theme) =>
-                  theme.palette.mode === "dark" ? "#fff" : "#222",
-              }}
-            >
-              Storage Type
-            </Typography>
+            <Typography>Storage Type</Typography>
             <IconButton
               size="medium"
               onClick={handleInfoClick}
-              sx={{ ml: 1 }}
+              sx={{
+                ml: 1,
+                color: (theme) =>
+                  theme.palette.mode === "dark" ? "#fff" : "inherit",
+              }}
               aria-label="More info"
             >
               <InfoOutlinedIcon fontSize="medium" />
@@ -106,9 +91,9 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
                 maxWidth={250}
                 sx={{
                   backgroundColor: (theme) =>
-                    theme.palette.mode === "dark" ? "#222" : "#fff",
+                    theme.palette.mode === "dark" ? "#222" : "#3B3B3B",
                   color: (theme) =>
-                    theme.palette.mode === "dark" ? "#fff" : "#222",
+                    theme.palette.mode === "dark" ? "#fff" : "#fff", // Blanco en ambos casos
                 }}
               >
                 If you create and store your passkey on your device, you can use
@@ -119,30 +104,52 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             </Popover>
           </Box>
 
-          <FormControl
-            fullWidth
-            sx={{
-              backgroundColor: (theme) =>
-                theme.palette.mode === "dark" ? "#222" : "#fff",
-              color: (theme) =>
-                theme.palette.mode === "dark" ? "#fff" : "#222",
-              borderRadius: "4px",
-            }}
-          >
-            <Select
+          <FormControl fullWidth>
+            {/*<Select
               value={external ? "external" : "local"}
               onChange={(e) => setExternal(e.target.value === "external")}
               sx={{
                 backgroundColor: (theme) =>
-                  theme.palette.mode === "dark" ? "#222" : "#fff",
+                  theme.palette.mode === "dark" ? "#222" : "#f5f5f5", // Fondo claro en light mode
                 color: (theme) =>
-                  theme.palette.mode === "dark" ? "#fff" : "#222",
+                  theme.palette.mode === "dark" ? "#fff" : "#000", // Negro en light mode
                 borderRadius: "4px",
+                "& .MuiSelect-icon": {
+                  color: (theme) =>
+                    theme.palette.mode === "dark" ? "#fff" : "#000",
+                },
+              }}
+              MenuProps={{
+                PaperProps: {
+                  sx: {
+                    backgroundColor: (theme) =>
+                      theme.palette.mode === "dark" ? "#333" : "#fff",
+                    "& .MuiMenuItem-root": {
+                      color: (theme) =>
+                        theme.palette.mode === "dark" ? "#fff" : "#000",
+                    },
+                  },
+                },
               }}
             >
               <MenuItem value="local">On your device</MenuItem>
               <MenuItem value="external">External Provider</MenuItem>
-            </Select>
+            </Select>*/}
+            <select
+              value={external ? "external" : "local"}
+              onChange={(e) => setExternal(e.target.value === "external")}
+              style={{
+                width: "100%",
+                padding: "7px",
+                border: "1px solid #555",
+                borderRadius: "4px",
+                fontSize: "16px",
+                cursor: "pointer",
+              }}
+            >
+              <option value="local">On your device</option>
+              <option value="external">External Provider</option>
+            </select>
           </FormControl>
         </Box>
 
