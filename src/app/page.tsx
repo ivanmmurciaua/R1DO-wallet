@@ -137,7 +137,7 @@ export default function Home() {
     );
 
     // TRACE - DEBUG
-    console.log(tx);
+    // console.log(tx);
 
     // If everything is ok:
     setDeployed(true);
@@ -239,7 +239,7 @@ export default function Home() {
     } as PasskeyArgType;
 
     // TRACE - DEBUG
-    console.log(passkey);
+    // console.log(passkey);
 
     // setPasskey(passkey);
     return passkey;
@@ -255,11 +255,11 @@ export default function Home() {
 
     const authKey = generateAuthKey(username);
     // TRACE - DEBUG
-    console.log(authKey);
+    // console.log(authKey);
 
     const fingerprint = generateFingerprint(authKey);
     // TRACE - DEBUG
-    console.log(fingerprint);
+    // console.log(fingerprint);
 
     try {
       if (await existsPasskey(fingerprint)) {
@@ -269,7 +269,7 @@ export default function Home() {
         if (await load(passkey)) {
           // If user removes broswer data BUT still in the same device or Google synced.
           // TRACE - DEBUG
-          console.log("Exists in device");
+          // console.log("Exists in device");
           localStorage.setItem(username, fingerprint);
           exists = true;
         } else {
@@ -283,15 +283,15 @@ export default function Home() {
             "If you are the owner of this wallet, please load it in the correct device",
           );
           // TRACE - DEBUG
-          console.log(
-            "Exists onchain but NOT exists in device, create new passkey",
-          );
+          // console.log(
+          //   "Exists onchain but NOT exists in device, create new passkey",
+          // );
           throw new Error("Exists onchain but NOT exists in device");
         }
       } else {
         // New user or same user with different platform (anyway don't matter because will create a new passkey)
         // TRACE - DEBUG
-        console.log("NOT exists onchain, create new passkey");
+        // console.log("NOT exists onchain, create new passkey");
       }
     } catch (e) {
       console.error(e);
@@ -306,7 +306,7 @@ export default function Home() {
   //1
   async function createOrLoad(username: string, external: boolean) {
     // TRACE - DEBUG
-    console.log("External provider", external);
+    // console.log("External provider", external);
     let passkey;
     // setUser(username);
 
@@ -314,7 +314,7 @@ export default function Home() {
 
     if (!fingerprint) {
       // TRACE - DEBUG
-      console.log("No fingerprint detected");
+      // console.log("No fingerprint detected");
 
       // Check if user exists onchain and not locally
       const { exists, overwrite } = await checkUserOnchain(username);
@@ -324,16 +324,16 @@ export default function Home() {
             // Retrieve data and load wallet.
             fingerprint = localStorage.getItem(username);
             // TRACE - DEBUG
-            console.log(fingerprint);
+            // console.log(fingerprint);
             passkey = await formatPasskey(fingerprint!);
             // TRACE - DEBUG
-            console.log("Retrieved passkey from onchain: ", passkey);
+            // console.log("Retrieved passkey from onchain: ", passkey);
             await handleWalletInit(passkey);
           }
         } else {
           // New user
           // TRACE - DEBUG
-          console.log("New user, creating passkey...");
+          // console.log("New user, creating passkey...");
           openPopup("Creating new passkey");
           ({ fingerprint, passkey } = await handleCreatePasskey(
             username,
@@ -357,7 +357,7 @@ export default function Home() {
 
       // Load from fingerprint
       // TRACE - DEBUG
-      console.log("Fingerprint detected: ", fingerprint);
+      // console.log("Fingerprint detected: ", fingerprint);
 
       // Onchain check. If exists, load. If not, ERROR.
 
@@ -369,7 +369,7 @@ export default function Home() {
       // === MOCK ===
 
       // TRACE - DEBUG
-      console.log("Exists onchain?");
+      // console.log("Exists onchain?");
 
       if (!(await existsPasskey(fingerprint))) {
         openPopup(
@@ -379,14 +379,14 @@ export default function Home() {
       } else {
         passkey = await formatPasskey(fingerprint);
         // TRACE - DEBUG
-        console.log("Retrieved passkey from onchain: ", passkey);
+        // console.log("Retrieved passkey from onchain: ", passkey);
         if (await load(passkey)) {
           // TRACE - DEBUG
-          console.log("Everything OK");
+          // console.log("Everything OK");
           await handleWalletInit(passkey);
         } else {
           // TRACE - DEBUG
-          console.log("Onchain exists, storage exists but not in your device.");
+          // console.log("Onchain exists, storage exists but not in your device.");
           openPopup("Passkey could not be loaded in your device.");
           throw new Error("Not exists in device");
         }

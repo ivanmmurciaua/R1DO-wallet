@@ -50,7 +50,7 @@ export const registerPasskey = async (
   coordinateY: string,
 ): Promise<string> => {
   // TRACE -DEBUG
-  console.log("Storing on chain...");
+  // console.log("Storing on chain...");
 
   // 1) Create SafeOperation
   const storeTransaction = {
@@ -67,7 +67,7 @@ export const registerPasskey = async (
   const signedSafeOperation = await wallet.signSafeOperation(safeOperation);
 
   // TRACE - DEBUG
-  console.log("SafeOperation", signedSafeOperation);
+  // console.log("SafeOperation", signedSafeOperation);
 
   // 3) Execute SafeOperation
   const userOperationHash = await wallet.executeTransaction({

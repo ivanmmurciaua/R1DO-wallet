@@ -84,7 +84,7 @@ export async function generateCredential(
   const userAuthKey = generateAuthKey(displayName);
 
   // TRACE - DEBUG
-  console.log("Creating ", userAuthKey);
+  // console.log("Creating ", userAuthKey);
 
   return {
     passkeyCredential: passkeyCredential,
@@ -112,13 +112,13 @@ export async function createPasskey(
     localStorage.setItem(username, fingerprint);
 
     // TRACE - DEBUG
-    console.log("Creating ", fingerprint);
+    // console.log("Creating ", fingerprint);
 
     const passkey = await extractPasskeyData(passkeyCredential);
 
     // TRACE - DEBUG
-    console.log("Passkey generated: ");
-    console.log(passkey);
+    // console.log("Passkey generated: ");
+    // console.log(passkey);
 
     return {
       fingerprint: fingerprint,
