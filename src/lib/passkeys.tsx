@@ -66,7 +66,7 @@ export async function generateCredential(
       user: {
         displayName,
         id: crypto.getRandomValues(new Uint8Array(32)),
-        name: `${displayName}_${navigator.userAgent.replace(/\s/g, "")}`,
+        name: `${displayName}_${new Date().toISOString()}_${navigator.userAgent.replace(/\s/g, "")}`,
       },
       timeout: 60_000,
       attestation: "none",
@@ -101,21 +101,57 @@ export async function createPasskey(
   username: string,
   external: boolean = false,
 ): Promise<PasskeyResponseType> {
-  /////////////////////////////////////////////////////////////////////////////////////
-  const { passkeyCredential, userAuthKey } = await generateCredential(
-    username,
-    external,
-  );
+  try {
+    const { passkeyCredential, userAuthKey } = await generateCredential(
+      username,
+      external,
+    );
 
-  // Generate fingerprint
-  const fingerprint = generateFingerprint(userAuthKey);
-  localStorage.setItem(username, fingerprint);
+    // Generate fingerprint
+    const fingerprint = generateFingerprint(userAuthKey);
+    localStorage.setItem(username, fingerprint);
 
-  // TRACE - DEBUG
-  console.log("Creating ", fingerprint);
+    // TRACE - DEBUG
+    console.log("Creating ", fingerprint);
 
-  ////////////////////////////////////////////////////////////////////
-  const passkey = await extractPasskeyData(passkeyCredential);
+    const passkey = await extractPasskeyData(passkeyCredential);
+
+    // TRACE - DEBUG
+    console.log("Passkey generated: ");
+    console.log(passkey);
+
+    return {
+      fingerprint: fingerprint,
+      passkey: passkey,
+    };
+  } catch (e) {
+    console.error(e);
+
+    // Server debug
+    try {
+      await fetch("/api/log-error", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: e?.toString?.() || String(e),
+          context: "creating passkey at passkeys.tsx",
+        }),
+      });
+    } catch (apiErr) {
+      console.error("Failed to log error to server:", apiErr);
+    }
+
+    return {
+      fingerprint: "",
+      passkey: {
+        rawId: "",
+        coordinates: {
+          x: "",
+          y: "",
+        },
+      },
+    };
+  }
 
   // === MOCK ===
   // const result = {};
@@ -127,17 +163,6 @@ export async function createPasskey(
   //   passkey: result.passkey,
   // };
   // === MOCK ===
-
-  ////////////////////////////////////////////////////////////////////////////
-
-  // TRACE - DEBUG
-  console.log("Passkey generated: ");
-  console.log(passkey);
-
-  return {
-    fingerprint: fingerprint,
-    passkey: passkey,
-  };
 }
 
 export async function load(test1: PasskeyArgType): Promise<boolean> {
@@ -169,6 +194,21 @@ export async function load(test1: PasskeyArgType): Promise<boolean> {
     return true;
   } catch (e) {
     console.error("Error loading passkey:", e);
+
+    // Server debug
+    try {
+      await fetch("/api/log-error", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: e?.toString?.() || String(e),
+          context: "loading passkey at passkeys.tsx",
+        }),
+      });
+    } catch (apiErr) {
+      console.error("Failed to log error to server:", apiErr);
+    }
+
     return false;
   }
 }

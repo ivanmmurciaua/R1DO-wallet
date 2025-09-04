@@ -340,8 +340,14 @@ export default function Home() {
             external,
           ));
 
-          const wallet = await handleWalletInit(passkey);
-          await handleStore(fingerprint!, passkey, wallet);
+          if (fingerprint && passkey.rawId !== "") {
+            const wallet = await handleWalletInit(passkey);
+            await handleStore(fingerprint!, passkey, wallet);
+          } else {
+            openPopup(
+              "Your wallet cannot be created. Try again or change browser/device.",
+            );
+          }
         }
       } catch (e) {
         console.error(e);
