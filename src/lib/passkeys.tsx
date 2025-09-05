@@ -155,7 +155,7 @@ export async function createPasskey(
   // === MOCK ===
 }
 
-export async function load(test1: PasskeyArgType): Promise<boolean> {
+export async function load(rawId: string): Promise<boolean> {
   try {
     const credential = (await navigator.credentials.get({
       publicKey: {
@@ -163,7 +163,7 @@ export async function load(test1: PasskeyArgType): Promise<boolean> {
         allowCredentials: [
           {
             type: "public-key",
-            id: new Uint8Array(Buffer.from(test1.rawId, "hex")),
+            id: new Uint8Array(Buffer.from(rawId, "hex")),
           },
         ],
         userVerification: "preferred",

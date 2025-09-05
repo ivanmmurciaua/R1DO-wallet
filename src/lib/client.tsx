@@ -1,8 +1,12 @@
 import {
   BUNDLER_URL,
+  ENTRYPOINT_ADDRESS,
   PAYMASTER_ADDRESS,
   PAYMASTER_URL,
   RPC_URL,
+  SAFE_MODULES_ADDRESS,
+  SAFE_MODULES_VERSION,
+  SAFE_SW_VERSION,
 } from "@/app/constants";
 import { PasskeyArgType } from "@safe-global/protocol-kit";
 import { PaymasterOptions, Safe4337Pack } from "@safe-global/relay-kit";
@@ -27,8 +31,14 @@ export const safeClient = async (
     provider: RPC_URL,
     signer: owner,
     bundlerUrl: BUNDLER_URL,
+    safeModulesVersion: SAFE_MODULES_VERSION,
+    customContracts: {
+      entryPointAddress: ENTRYPOINT_ADDRESS,
+      safe4337ModuleAddress: SAFE_MODULES_ADDRESS,
+    },
     paymasterOptions,
     options: {
+      safeVersion: SAFE_SW_VERSION,
       owners: [],
       threshold: 1,
     },

@@ -132,7 +132,7 @@ export default function Home() {
         const passkey = await formatPasskey(fingerprint);
         // setUserAuthKey(authKey);
 
-        if (await load(passkey)) {
+        if (await load(passkey.rawId)) {
           // If user removes broswer data BUT still in the same device or Google synced.
           // TRACE - DEBUG
           // console.log("Exists in device");
@@ -217,18 +217,25 @@ export default function Home() {
         console.error(e);
       }
     } else {
+      // TRACE - DEBUG
+      // console.log("Fingerprint detected");
       openPopup(`Looking for your wallet ${username}`);
 
       if (!(await existsPasskey(fingerprint))) {
+        // Finded fingerprint, not exists onchain but I can import passkey if I'm the owner of it and exists in my device.
+        //TODO: IMPORT MECHANISM
         openPopup(
           "Something goes wrong. If you just deployed your wallet, please try again later.",
         );
-        throw new Error("Not exists onchain");
+        throw new Error(
+          "Exists fingerprint but not exists onchain neither user's device",
+        );
+        // }
       } else {
         passkey = await formatPasskey(fingerprint);
         // TRACE - DEBUG
         // console.log("Retrieved passkey from onchain: ", passkey);
-        if (await load(passkey)) {
+        if (await load(passkey.rawId)) {
           // TRACE - DEBUG
           // console.log("Everything OK");
           await handleWalletInit(passkey);
