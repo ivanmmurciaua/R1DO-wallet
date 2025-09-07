@@ -77,6 +77,15 @@ export const registerPasskey = async (
         executable: signedSafeOperation,
       });
 
+      let userOperationReceipt = null;
+
+      while (!userOperationReceipt) {
+        // Wait 2 seconds before checking the status again
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        userOperationReceipt =
+          await wallet.getUserOperationReceipt(userOperationHash);
+      }
+
       return userOperationHash;
     }
   } catch (e: unknown) {
