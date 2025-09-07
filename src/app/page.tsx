@@ -2,11 +2,10 @@
 import { useState, useEffect } from "react";
 import {
   createPasskey,
-  existsPasskey,
   generateAuthKey,
   generateFingerprint,
-  getPasskey,
-  load,
+  loadFromDevice,
+  readFromSC,
 } from "@/lib/passkeys";
 import { PasskeyArgType } from "@safe-global/protocol-kit";
 import LoginWithPasskey from "@/components/LoginWithPasskey";
@@ -40,9 +39,23 @@ export default function Home() {
     setPopupMessage("");
   };
 
+  const setLocalData = (
+    username: string,
+    fingerprint: string,
+    passkey: PasskeyArgType,
+  ) => {
+    localStorage.setItem(
+      username,
+      JSON.stringify({
+        fingerprint: fingerprint,
+        passkey: passkey,
+      }),
+    );
+  };
+
   useEffect(() => {
     if (typeof window !== "undefined" && !window.PublicKeyCredential) {
-      openPopup("Credentials not supported on this device or browser.");
+      openPopup("Credentials not supported on this device or browser");
     }
   });
 
@@ -51,7 +64,6 @@ export default function Home() {
     passkey: PasskeyArgType,
     wallet: Safe4337Pack,
   ) {
-    openPopup("Deploying your wallet");
     if (!fingerprint || !passkey || !wallet) {
       throw new Error("Missing data");
     }
@@ -70,8 +82,11 @@ export default function Home() {
         setDeployed(true);
         closePopup();
       }
-    } catch (e) {
-      await log(e);
+    } catch (e: unknown) {
+      await log("handleStore", e);
+      openPopup(
+        "Something went wrong with your credential manager. Your wallet is not created",
+      );
     }
   }
 
@@ -85,19 +100,20 @@ export default function Home() {
     const safeAddress: Address =
       (await wallet.protocolKit.getAddress()) as Address;
     setAddress(safeAddress);
+    // console.log(safeAddress);
 
     const isSafeDeployed = await wallet.protocolKit.isSafeDeployed();
     setDeployed(isSafeDeployed);
-
-    closePopup();
 
     return wallet;
   }
 
   async function formatPasskey(fingerprint: string): Promise<PasskeyArgType> {
-    const onchainPasskey = (await getPasskey(
+    const onchainPasskey = (await readFromSC(
+      "getPasskey",
       fingerprint,
     )) as PasskeyOnchainResponseType;
+
     const passkey = {
       rawId: onchainPasskey.rawId,
       coordinates: {
@@ -106,37 +122,104 @@ export default function Home() {
       },
     } as PasskeyArgType;
 
-    // TRACE - DEBUG
-    // console.log(passkey);
     return passkey;
   }
 
-  // Search onchain
-  // If delete broswer data, will check onchain and will retrieve passkey data if exists
-  // If calculated fingerprint is equal to the one onchain, we retrieve passkey data from SC BUT a new passkey is created in Google or the device.
-  async function checkUserOnchain(username: string) {
+  async function createOrLoad(username: string, external: boolean) {
+    // TRACE - DEBUG
+    // console.log("External provider", external);
+    setUsername(username);
+    let passkey;
+
+    const { fingerprint } = JSON.parse(localStorage.getItem(username) || "{}");
+    ({ passkey } = JSON.parse(localStorage.getItem(username) || "{}"));
+
+    if (!fingerprint) {
+      // TRACE - DEBUG
+      // console.log("No fingerprint detected");
+
+      if (passkey) {
+        // Created but not deployed
+        // Check locally and tell user forget it.
+        if (await loadFromDevice(passkey.rawId)) {
+          // in device but exists onchain?
+          await managePasskey(username, external, passkey);
+        } else {
+          const e =
+            "Your wallet is not created. Please remove your passkey from this device";
+          openPopup(e);
+          localStorage.removeItem(username);
+
+          await log("createOrLoad - 5,6,7", e);
+          throw Error(e);
+        }
+      } else {
+        await managePasskey(username, external);
+      }
+    } else {
+      // TRACE - DEBUG
+      // console.log("Fingerprint detected");
+      openPopup(`Looking for your wallet ${username}`);
+      if (!(await readFromSC("isRegistered", fingerprint)) as boolean) {
+        // Finded fingerprint, not exists onchain but I can import passkey if I'm the owner of it and exists in my device.
+        if (passkey) {
+          if (await loadFromDevice(passkey.rawId)) {
+            // Store it onchain
+            const wallet = await handleWalletInit(passkey);
+            await handleStore(fingerprint, passkey, wallet);
+          } else {
+            // localStorage.removeItem(username);
+            openPopup("Something went wrong. Please try again later");
+            const e = "Is registered onchain and is in LS, but not in device";
+            await log("loading wallet from LS.", e);
+            throw new Error(e);
+          }
+        } else {
+          // 1010
+          // Import message?
+          openPopup("Something goes wrong. Please try again later");
+          const e =
+            "Is registered onchain and exists fingerprint but NO passkey in LS.";
+          await log("loading wallet from LS.", e);
+          throw new Error(e);
+        }
+      } else {
+        passkey = await formatPasskey(fingerprint);
+        // TRACE - DEBUG
+        // console.log("Retrieved passkey from onchain: ", passkey);
+        if (await loadFromDevice(passkey.rawId)) {
+          // TRACE - DEBUG
+          // console.log("Everything OK");
+          setLocalData(username, fingerprint, passkey);
+          await handleWalletInit(passkey);
+          closePopup();
+        } else {
+          // localStorage.removeItem(username);
+          openPopup("Passkey could not be loaded in your device.");
+          const e = "Onchain exists, storage exists but not in your device";
+          await log("loading wallet from device", e);
+          throw new Error("Not exists in device");
+        }
+      }
+    }
+  }
+
+  async function existsOnchain(
+    username: string,
+    existsPasskey: boolean = false,
+  ) {
     openPopup(`Looking for your wallet ${username}`);
     let overwrite = false;
     let exists = false;
 
-    const authKey = generateAuthKey(username);
-    // TRACE - DEBUG
-    // console.log(authKey);
-
-    const fingerprint = generateFingerprint(authKey);
-    // TRACE - DEBUG
-    // console.log(fingerprint);
+    const fingerprint = generateFingerprint(generateAuthKey(username));
 
     try {
-      if (await existsPasskey(fingerprint)) {
+      if ((await readFromSC("isRegistered", fingerprint)) as boolean) {
         const passkey = await formatPasskey(fingerprint);
-        // setUserAuthKey(authKey);
 
-        if (await load(passkey.rawId)) {
-          // If user removes broswer data BUT still in the same device or Google synced.
-          // TRACE - DEBUG
-          // console.log("Exists in device");
-          localStorage.setItem(username, fingerprint);
+        if (existsPasskey) {
+          setLocalData(username, fingerprint, passkey);
           exists = true;
         } else {
           //TODO
@@ -145,21 +228,22 @@ export default function Home() {
           // And I don't know if is worth to store again in SC overwriting the existing.
           exists = true;
           overwrite = true;
-          setPopupMessage(
-            "If you are the owner of this wallet, please load it in the correct device",
-          );
-          // TRACE - DEBUG
-          // console.log(
-          //   "Exists onchain but NOT exists in device, create new passkey",
-          // );
-          throw new Error("Exists onchain but NOT exists in device");
+          if (await loadFromDevice(passkey.rawId)) {
+            openPopup(
+              "You're one step away from recovering your wallet. Import your backup",
+            );
+            const e = "Exists onchain and device, needs import";
+            await log("existsOnchain - 4", e);
+          } else {
+            openPopup("Sorry, you lost your wallet :(");
+            const e = "Exists onchain but NOT exists in device";
+            await log("existsOnchain - 2", e);
+            throw new Error(e);
+          }
         }
-      } else {
-        // New user or same user with different platform (anyway don't matter because will create a new passkey)
-        // TRACE - DEBUG
-        // console.log("NOT exists onchain, create new passkey");
-      }
-    } catch (e) {
+      } // else NOT exists onchain
+    } catch (e: unknown) {
+      await log("existsOnchain", e);
       console.error(e);
     }
 
@@ -169,83 +253,60 @@ export default function Home() {
     };
   }
 
-  async function createOrLoad(username: string, external: boolean) {
-    // TRACE - DEBUG
-    // console.log("External provider", external);
-    let passkey;
-    let fingerprint = localStorage.getItem(username);
-    setUsername(username);
+  async function managePasskey(
+    username: string,
+    external: boolean,
+    passkey: PasskeyArgType | null = null,
+  ) {
+    let exists, overwrite: boolean;
 
-    if (!fingerprint) {
-      // TRACE - DEBUG
-      // console.log("No fingerprint detected");
+    if (passkey) {
+      ({ exists, overwrite } = await existsOnchain(username, true));
+    } else {
+      ({ exists, overwrite } = await existsOnchain(username));
+    }
 
-      // Check if user exists onchain and not locally
-      const { exists, overwrite } = await checkUserOnchain(username);
-      try {
-        if (exists) {
-          if (!overwrite) {
-            // Retrieve data and load wallet.
-            fingerprint = localStorage.getItem(username);
-            // TRACE - DEBUG
-            // console.log(fingerprint);
-            passkey = await formatPasskey(fingerprint!);
-            // TRACE - DEBUG
-            // console.log("Retrieved passkey from onchain: ", passkey);
-            await handleWalletInit(passkey);
-          }
+    try {
+      if (exists) {
+        if (!overwrite) {
+          // Retrieve data and load wallet.
+          const { passkey } = JSON.parse(
+            localStorage.getItem(username) || "{}",
+          );
+          await handleWalletInit(passkey);
+          closePopup();
         } else {
-          // New user
-          // TRACE - DEBUG
-          // console.log("New user, creating passkey...");
+        }
+      } else {
+        if (passkey) {
+          // console.log("Not deployed");
+          const fingerprint = generateFingerprint(generateAuthKey(username));
+          const wallet = await handleWalletInit(passkey);
+          setLocalData(username, fingerprint, passkey);
+          await handleStore(fingerprint, passkey, wallet);
+        } else {
+          // New user, if not exists onchain, could exists locally ????
           openPopup("Creating new passkey");
-          ({ fingerprint, passkey } = await handleCreatePasskey(
+          const { fingerprint, passkey } = await handleCreatePasskey(
             username,
             external,
-          ));
+          );
 
-          if (fingerprint && passkey.rawId !== "") {
+          if (passkey.rawId !== "") {
             const wallet = await handleWalletInit(passkey);
+            //TODO: Check this
+            // setLocalData(username, fingerprint, passkey);
             await handleStore(fingerprint!, passkey, wallet);
           } else {
             openPopup(
-              "Your wallet cannot be created. Try again or change browser/device.",
+              "Your wallet cannot be created. Try again or change browser or device",
             );
           }
         }
-      } catch (e) {
-        console.error(e);
       }
-    } else {
-      // TRACE - DEBUG
-      // console.log("Fingerprint detected");
-      openPopup(`Looking for your wallet ${username}`);
-
-      if (!(await existsPasskey(fingerprint))) {
-        // Finded fingerprint, not exists onchain but I can import passkey if I'm the owner of it and exists in my device.
-        //TODO: IMPORT MECHANISM
-        openPopup(
-          "Something goes wrong. If you just deployed your wallet, please try again later.",
-        );
-        throw new Error(
-          "Exists fingerprint but not exists onchain neither user's device",
-        );
-        // }
-      } else {
-        passkey = await formatPasskey(fingerprint);
-        // TRACE - DEBUG
-        // console.log("Retrieved passkey from onchain: ", passkey);
-        if (await load(passkey.rawId)) {
-          // TRACE - DEBUG
-          // console.log("Everything OK");
-          await handleWalletInit(passkey);
-        } else {
-          // TRACE - DEBUG
-          // console.log("Onchain exists, storage exists but not in your device.");
-          openPopup("Passkey could not be loaded in your device.");
-          throw new Error("Not exists in device");
-        }
-      }
+    } catch (e: unknown) {
+      await log("managePasskey", e);
+      console.error(e);
     }
   }
 

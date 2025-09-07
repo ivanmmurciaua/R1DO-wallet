@@ -4,7 +4,7 @@ import { PasskeyArgType, extractPasskeyData } from "@safe-global/protocol-kit";
 import { registryABI } from "./registryAbi";
 import { REGISTRY_ADDRESS } from "@/app/constants";
 import { client } from "./client";
-import { PasskeyResponseType } from "@/types";
+import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
 import { log } from "./common";
 
 export const generateFingerprint = (userAuthKey: string) =>
@@ -12,30 +12,6 @@ export const generateFingerprint = (userAuthKey: string) =>
 
 export const generateAuthKey = (username: string): string =>
   `${username}_${navigator.platform.split(" ")[0].toLowerCase()}_${navigator.maxTouchPoints > 0 ? "mobile" : "desktop"}`;
-
-// function generateAuthKey(username: string, credentials: Credential): string {
-//   // Fingerprint data
-//   const platform = navigator.maxTouchPoints > 0 ? "mobile" : "desktop";
-
-//   // Aquí tienes info del authenticator:
-//   const transports = credentials?.response.getTransports();
-//   // // TRACE - DEBUG
-//   console.log(transports); // → ["usb", "nfc", "ble", "internal"]
-
-//   const attachment = credentials?.authenticatorAttachment;
-//   // // TRACE - DEBUG
-//   console.log(attachment); // → "platform" (biometría del dispositivo) → "cross-platform" (YubiKey, etc)
-
-//   const authType =
-//     transports.length > 0
-//       ? `${attachment}_${transports.sort().join("-")}`
-//       : attachment;
-
-//   // // TRACE - DEBUG
-//   console.log(authType);
-
-//   return `${username}_${platform}_${authType}`;
-// }
 
 export async function generateCredential(
   displayName: string,
@@ -81,7 +57,6 @@ export async function generateCredential(
   // // TRACE - DEBUG
   // console.log(passkeyCredential);
 
-  // const userAuthKey = generateAuthKey(displayName, passkeyCredential);
   const userAuthKey = generateAuthKey(displayName);
 
   // TRACE - DEBUG
@@ -110,26 +85,37 @@ export async function createPasskey(
 
     // Generate fingerprint
     const fingerprint = generateFingerprint(userAuthKey);
-    localStorage.setItem(username, fingerprint);
-
     // TRACE - DEBUG
     // console.log("Creating ", fingerprint);
 
-    const passkey = await extractPasskeyData(passkeyCredential);
-
+    const passkey = (await extractPasskeyData(
+      passkeyCredential,
+    )) as PasskeyArgType;
     // TRACE - DEBUG
     // console.log("Passkey generated: ");
     // console.log(passkey);
+
+    localStorage.setItem(
+      username,
+      JSON.stringify({
+        fingerprint: "",
+        passkey: {
+          rawId: passkey.rawId,
+          coordinates: {
+            x: passkey.coordinates.x,
+            y: passkey.coordinates.y,
+          },
+        },
+      }),
+    );
 
     return {
       fingerprint: fingerprint,
       passkey: passkey,
     };
-  } catch (e) {
+  } catch (e: unknown) {
     console.error(e);
-
-    // Server debug
-    await log(e);
+    await log("creatingPasskey", e);
 
     return {
       fingerprint: "",
@@ -142,20 +128,9 @@ export async function createPasskey(
       },
     };
   }
-
-  // === MOCK ===
-  // const result = {};
-
-  // const { fingerprint, passkey } = result;
-
-  // return {
-  //   userAuthKey: result.userAuthKey,
-  //   passkey: result.passkey,
-  // };
-  // === MOCK ===
 }
 
-export async function load(rawId: string): Promise<boolean> {
+export async function loadFromDevice(rawId: string): Promise<boolean> {
   try {
     const credential = (await navigator.credentials.get({
       publicKey: {
@@ -171,46 +146,36 @@ export async function load(rawId: string): Promise<boolean> {
       },
     })) as PublicKeyCredential;
 
-    // // TRACE - DEBUG
     const assertionResponse =
       credential.response as AuthenticatorAssertionResponse;
-    // TRACE - DEBUG
     if (assertionResponse) {
       // TRACE - DEBUG
-      console.log(assertionResponse);
+      // console.log(assertionResponse);
       console.log("OK");
     }
-
     return true;
-  } catch (e) {
+  } catch (e: unknown) {
     console.error("Error loading passkey:", e);
-
-    // Server debug
-    await log(e);
+    await log("Error loading passkey:", e);
     return false;
   }
 }
 
-//TODO: Merge in one function to read from SC
-export async function existsPasskey(fingerprint: string): Promise<boolean> {
-  const data = (await client.readContract({
-    address: REGISTRY_ADDRESS,
-    abi: registryABI,
-    functionName: "isRegistered",
-    args: [fingerprint],
-  })) as boolean;
-
-  return data;
-}
-
-//TODO: Type that
-export async function getPasskey(fingerprint: string) {
-  const data = await client.readContract({
-    address: REGISTRY_ADDRESS,
-    abi: registryABI,
-    functionName: "getPasskey",
-    args: [fingerprint],
-  });
-
-  return data;
+export async function readFromSC(
+  functionName: string,
+  fingerprint: string,
+): Promise<boolean | PasskeyOnchainResponseType | null> {
+  try {
+    const data = (await client.readContract({
+      address: REGISTRY_ADDRESS,
+      abi: registryABI,
+      functionName: functionName,
+      args: [fingerprint],
+    })) as boolean | PasskeyOnchainResponseType;
+    return data;
+  } catch (e: unknown) {
+    console.error(e);
+    await log(functionName, e);
+    return null;
+  }
 }

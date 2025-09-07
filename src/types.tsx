@@ -10,5 +10,4 @@ export type PasskeyOnchainResponseType = {
   coordinateX: string;
   coordinateY: string;
   timestamp: number;
-  exists: boolean;
 };

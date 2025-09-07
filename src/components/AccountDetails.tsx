@@ -4,6 +4,7 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { useEffect, useState } from "react";
 import { formatEther } from "viem";
 import { BuildingNotice } from "./BuildingNotice";
+// import { makeTx } from "@/lib/deploy";
 
 type props = {
   username: string;
@@ -37,19 +38,23 @@ export default function AccountDetails({ username, wallet, address }: props) {
         {address}
       </p>
       <br />
+      <p>Username: {username}</p>
       <p>Balance: {userBalance} ⧫</p>
       <br />
       <div>
+        {/*<div>
         {parseFloat(userBalance) > 0 ? (
           <div>
             Send a few ⧫ to your friends!
-            {/*<Send />*/}
+
           </div>
         ) : (
           <div>
             Ask a few friends to send you some ⧫ using your username: {username}
+            <button onClick={async () => makeTx(wallet)}>TX</button>
           </div>
         )}
+      </div>*/}
       </div>
       <BuildingNotice />
     </div>
