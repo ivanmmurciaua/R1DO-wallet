@@ -18,8 +18,8 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
 import AccountDetails from "@/components/AccountDetails";
 import { log } from "@/lib/common";
-import ImportPasskey from "@/components/ImportPasskey";
-import { Box, Button, Stack } from "@mui/material";
+// import ImportPasskey from "@/components/ImportPasskey";
+// import { Box, Button, Stack } from "@mui/material";
 
 export default function Home() {
   const [deployed, setDeployed] = useState(false);
@@ -28,7 +28,7 @@ export default function Home() {
   const [userWallet, setWallet] = useState<Safe4337Pack | null>(null);
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
-  const [recovery, setRecovery] = useState(false);
+  // const [recovery, setRecovery] = useState(false);
 
   const openPopup = (message: string) => {
     if (!showPopup) {
@@ -42,17 +42,17 @@ export default function Home() {
     setPopupMessage("");
   };
 
-  const openRecoveryMessage = (message: string) => {
-    setShowPopup(true);
-    setPopupMessage(message);
-    //TODO: Check logic
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        setShowPopup(false);
-        resolve();
-      }, 2000);
-    });
-  };
+  // const openRecoveryMessage = (message: string) => {
+  //   setShowPopup(true);
+  //   setPopupMessage(message);
+  //   //TODO: Check logic
+  //   return new Promise<void>((resolve) => {
+  //     setTimeout(() => {
+  //       setShowPopup(false);
+  //       resolve();
+  //     }, 2000);
+  //   });
+  // };
 
   const setLocalData = (
     username: string,
@@ -234,9 +234,9 @@ export default function Home() {
     try {
       if ((await readFromSC("isRegistered", fingerprint)) as boolean) {
         const passkey = await formatPasskey(fingerprint);
+        setLocalData(username, fingerprint, passkey);
 
         if (existsPasskey) {
-          setLocalData(username, fingerprint, passkey);
           exists = true;
         } else {
           //TODO
@@ -246,15 +246,12 @@ export default function Home() {
           exists = true;
           overwrite = true;
           if (await loadFromDevice(passkey.rawId)) {
-            openRecoveryMessage(
-              "You can recover your wallet by importing it below",
-            );
-            setRecovery(true);
+            await handleWalletInit(passkey);
+            closePopup();
           } else {
-            openPopup(
-              "Sorry something went wrong, try again but it seems you've lost your wallet :(",
-            );
+            openPopup("Your wallet could not be loaded");
             const e = "Exists onchain but NOT exists in device";
+            // Rotate keys mechanism
             await log("existsOnchain - 2", e);
             throw new Error(e);
           }
@@ -347,7 +344,7 @@ export default function Home() {
         ) : (
           <>
             <LoginWithPasskey createOrLoad={createOrLoad} />
-            <Button
+            {/*<Button
               variant="text"
               color="error"
               onClick={() =>
@@ -362,7 +359,7 @@ export default function Home() {
                   <ImportPasskey onImport={() => setRecovery(false)} />
                 </Box>
               </Stack>
-            )}
+            )}*/}
           </>
         )}
 
