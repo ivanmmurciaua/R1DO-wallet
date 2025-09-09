@@ -10,8 +10,7 @@ import { log } from "./common";
 export const generateFingerprint = (userAuthKey: string) =>
   keccak256(toHex(userAuthKey));
 
-export const generateAuthKey = (username: string): string =>
-  `${username}_${navigator.platform.split(" ")[0].toLowerCase()}_${navigator.maxTouchPoints > 0 ? "mobile" : "desktop"}`;
+// export const generateAuthKey = (username: string): string => `${username}_${navigator.platform.split(" ")[0].toLowerCase()}_${navigator.maxTouchPoints > 0 ? "mobile" : "desktop"}`;
 
 export async function generateCredential(
   displayName: string,
@@ -57,14 +56,14 @@ export async function generateCredential(
   // // TRACE - DEBUG
   // console.log(passkeyCredential);
 
-  const userAuthKey = generateAuthKey(displayName);
+  // const userAuthKey = displayName;
 
   // TRACE - DEBUG
   // console.log("Creating ", userAuthKey);
 
   return {
     passkeyCredential: passkeyCredential,
-    userAuthKey: userAuthKey,
+    userAuthKey: displayName,
   };
 }
 

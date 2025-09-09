@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import {
   createPasskey,
-  generateAuthKey,
+  // generateAuthKey
   generateFingerprint,
   loadFromDevice,
   readFromSC,
@@ -229,7 +229,7 @@ export default function Home() {
     let overwrite = false;
     let exists = false;
 
-    const fingerprint = generateFingerprint(generateAuthKey(username));
+    const fingerprint = generateFingerprint(username);
 
     try {
       if ((await readFromSC("isRegistered", fingerprint)) as boolean) {
@@ -298,7 +298,7 @@ export default function Home() {
       } else {
         if (passkey) {
           // console.log("Not deployed");
-          const fingerprint = generateFingerprint(generateAuthKey(username));
+          const fingerprint = generateFingerprint(username);
           const wallet = await handleWalletInit(passkey);
           await handleStore(username, fingerprint, passkey, wallet);
         } else {
