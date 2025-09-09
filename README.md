@@ -34,12 +34,35 @@ This maintains user's privacy while storing the information on a public server t
 
 ### Technologies
 - Next.js
+    - viem for web3, @mui for UI.
+
 - EVM-compatible chains (Ethereum and compatibles)
-- Passkeys / WebAuthn (Secure Enclave / Secure Element)
+    - Safe as SW provider & Pimlico as ERC4337 infra.
+
+- Passkeys (Secure Enclave / Secure Element)
+    - Webauthn lib.
 
 ### Get Started
+Install packages:
 ```bash
 npm install
+```
+
+Create .env file:
+```bash
+cp .env.example .env
+```
+
+Change .env with your keys:
+```js
+NEXT_PUBLIC_PIMLICO_API_KEY = "<PIMLICO_API_KEY>"
+
+// current dev version at 0x4a333cd8807d32e4773c76C467Aa4EF55EFf2A92
+NEXT_PUBLIC_REGISTRY_ADDRESS = "<SC_REGISTRY_ADDRESS>"
+```
+
+Run:
+```bash
 npm run dev
 ```
 
