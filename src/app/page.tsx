@@ -19,7 +19,7 @@ import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
 import AccountDetails from "@/components/AccountDetails";
 import { log } from "@/lib/common";
 import ImportPasskey from "@/components/ImportPasskey";
-import { Box, Stack } from "@mui/material";
+import { Box, Button, Stack } from "@mui/material";
 
 export default function Home() {
   const [deployed, setDeployed] = useState(false);
@@ -347,6 +347,15 @@ export default function Home() {
         ) : (
           <>
             <LoginWithPasskey createOrLoad={createOrLoad} />
+            <Button
+              variant="text"
+              color="error"
+              onClick={() =>
+                recovery ? setRecovery(false) : setRecovery(true)
+              }
+            >
+              LOST WALLET ACCESS?
+            </Button>
             {recovery && (
               <Stack>
                 <Box>

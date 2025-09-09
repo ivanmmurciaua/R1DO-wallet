@@ -85,7 +85,7 @@ const ImportPasskey: React.FC<ImportPasskeyProps> = ({ onImport }) => {
       />
 
       <Typography variant="body2">
-        Click this button and select a valid backup file to restore your wallet.
+        Click this button and select a valid backup file to restore your wallet
       </Typography>
 
       <Button
