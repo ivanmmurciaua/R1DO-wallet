@@ -18,6 +18,8 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
 import AccountDetails from "@/components/AccountDetails";
 import { log } from "@/lib/common";
+import ImportPasskey from "@/components/ImportPasskey";
+import { Box, Stack } from "@mui/material";
 
 export default function Home() {
   const [deployed, setDeployed] = useState(false);
@@ -26,6 +28,7 @@ export default function Home() {
   const [userWallet, setWallet] = useState<Safe4337Pack | null>(null);
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
+  const [recovery, setRecovery] = useState(false);
 
   const openPopup = (message: string) => {
     if (!showPopup) {
@@ -37,6 +40,18 @@ export default function Home() {
   const closePopup = () => {
     setShowPopup(false);
     setPopupMessage("");
+  };
+
+  const openRecoveryMessage = (message: string) => {
+    setShowPopup(true);
+    setPopupMessage(message);
+    //TODO: Check logic
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        setShowPopup(false);
+        resolve();
+      }, 2000);
+    });
   };
 
   const setLocalData = (
@@ -60,6 +75,7 @@ export default function Home() {
   });
 
   async function handleStore(
+    username: string,
     fingerprint: string,
     passkey: PasskeyArgType,
     wallet: Safe4337Pack,
@@ -79,6 +95,7 @@ export default function Home() {
       );
 
       if (tx) {
+        setLocalData(username, fingerprint, passkey);
         setDeployed(true);
         closePopup();
       }
@@ -166,7 +183,7 @@ export default function Home() {
           if (await loadFromDevice(passkey.rawId)) {
             // Store it onchain
             const wallet = await handleWalletInit(passkey);
-            await handleStore(fingerprint, passkey, wallet);
+            await handleStore(username, fingerprint, passkey, wallet);
           } else {
             // localStorage.removeItem(username);
             openPopup("Something went wrong. Please try again later");
@@ -229,13 +246,14 @@ export default function Home() {
           exists = true;
           overwrite = true;
           if (await loadFromDevice(passkey.rawId)) {
-            openPopup(
-              "You're one step away from recovering your wallet. Import your backup",
+            openRecoveryMessage(
+              "You can recover your wallet by importing it below",
             );
-            const e = "Exists onchain and device, needs import";
-            await log("existsOnchain - 4", e);
+            setRecovery(true);
           } else {
-            openPopup("Sorry, you lost your wallet :(");
+            openPopup(
+              "Sorry something went wrong, try again but it seems you've lost your wallet :(",
+            );
             const e = "Exists onchain but NOT exists in device";
             await log("existsOnchain - 2", e);
             throw new Error(e);
@@ -282,8 +300,7 @@ export default function Home() {
           // console.log("Not deployed");
           const fingerprint = generateFingerprint(generateAuthKey(username));
           const wallet = await handleWalletInit(passkey);
-          setLocalData(username, fingerprint, passkey);
-          await handleStore(fingerprint, passkey, wallet);
+          await handleStore(username, fingerprint, passkey, wallet);
         } else {
           // New user, if not exists onchain, could exists locally ????
           openPopup("Creating new passkey");
@@ -296,10 +313,10 @@ export default function Home() {
             const wallet = await handleWalletInit(passkey);
             //TODO: Check this
             // setLocalData(username, fingerprint, passkey);
-            await handleStore(fingerprint!, passkey, wallet);
+            await handleStore(username, fingerprint!, passkey, wallet);
           } else {
             openPopup(
-              "Your wallet cannot be created. Try again or change browser or device",
+              "Your wallet could not be created. Try again or change browser/device",
             );
           }
         }
@@ -328,7 +345,16 @@ export default function Home() {
             address={address}
           />
         ) : (
-          <LoginWithPasskey createOrLoad={createOrLoad} />
+          <>
+            <LoginWithPasskey createOrLoad={createOrLoad} />
+            {recovery && (
+              <Stack>
+                <Box>
+                  <ImportPasskey onImport={() => setRecovery(false)} />
+                </Box>
+              </Stack>
+            )}
+          </>
         )}
 
         {showPopup && popupMessage && (

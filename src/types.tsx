@@ -11,3 +11,10 @@ export type PasskeyOnchainResponseType = {
   coordinateY: string;
   timestamp: number;
 };
+
+export type ImportedUserData = {
+  [username: string]: {
+    fingerprint: string;
+    passkey: PasskeyArgType;
+  };
+};

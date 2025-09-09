@@ -1,7 +1,4 @@
 import {
-  // Input,
-  // Select,
-  // MenuItem,
   Button,
   Stack,
   Typography,
@@ -52,7 +49,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           onChange={(e) => setUsername(e.target.value)}
           value={username}
           required
-          placeholder="username"
+          placeholder="Type your username"
           style={{
             fontSize: "1.2em",
             borderRadius: "4px",
@@ -105,36 +102,6 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           </Box>
 
           <FormControl fullWidth>
-            {/*<Select
-              value={external ? "external" : "local"}
-              onChange={(e) => setExternal(e.target.value === "external")}
-              sx={{
-                backgroundColor: (theme) =>
-                  theme.palette.mode === "dark" ? "#222" : "#f5f5f5", // Fondo claro en light mode
-                color: (theme) =>
-                  theme.palette.mode === "dark" ? "#fff" : "#000", // Negro en light mode
-                borderRadius: "4px",
-                "& .MuiSelect-icon": {
-                  color: (theme) =>
-                    theme.palette.mode === "dark" ? "#fff" : "#000",
-                },
-              }}
-              MenuProps={{
-                PaperProps: {
-                  sx: {
-                    backgroundColor: (theme) =>
-                      theme.palette.mode === "dark" ? "#333" : "#fff",
-                    "& .MuiMenuItem-root": {
-                      color: (theme) =>
-                        theme.palette.mode === "dark" ? "#fff" : "#000",
-                    },
-                  },
-                },
-              }}
-            >
-              <MenuItem value="local">On your device</MenuItem>
-              <MenuItem value="external">External Provider</MenuItem>
-            </Select>*/}
             <select
               value={external ? "external" : "local"}
               onChange={(e) => setExternal(e.target.value === "external")}
@@ -162,22 +129,8 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             setExternal(false);
             createOrLoad(user.toLowerCase(), ext);
           }}
-          variant="outlined"
-          sx={{
-            marginTop: "10px",
-            marginBottom: "24px",
-            backgroundColor: (theme) =>
-              theme.palette.mode === "dark" ? "#222" : "#fff",
-            color: (theme) => (theme.palette.mode === "dark" ? "#fff" : "#222"),
-            borderColor: (theme) =>
-              theme.palette.mode === "dark" ? "#fff" : "#222",
-            "&:hover": {
-              backgroundColor: (theme) =>
-                theme.palette.mode === "dark" ? "#333" : "#f0f0f0",
-              borderColor: (theme) =>
-                theme.palette.mode === "dark" ? "#fff" : "#222",
-            },
-          }}
+          variant="contained"
+          color="info"
           disabled={!username.trim()}
         >
           Login or Register
