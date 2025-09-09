@@ -4,9 +4,9 @@ export const registryABI = [
     inputs: [
       {
         indexed: true,
-        internalType: "string",
-        name: "rawId",
-        type: "string",
+        internalType: "address",
+        name: "owner",
+        type: "address",
       },
       {
         indexed: false,
@@ -17,6 +17,19 @@ export const registryABI = [
     ],
     name: "PasskeyRegistered",
     type: "event",
+  },
+  {
+    inputs: [],
+    name: "getFingerprint",
+    outputs: [
+      {
+        internalType: "bytes32",
+        name: "",
+        type: "bytes32",
+      },
+    ],
+    stateMutability: "view",
+    type: "function",
   },
   {
     inputs: [
