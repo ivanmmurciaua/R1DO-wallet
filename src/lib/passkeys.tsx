@@ -43,7 +43,7 @@ export async function generateCredential(
       user: {
         displayName,
         id: crypto.getRandomValues(new Uint8Array(32)),
-        name: `${displayName}_${new Date().toISOString()}_${navigator.userAgent.replace(/\s/g, "")}`,
+        name: `${displayName}_${new Date().toISOString()}`,
       },
       timeout: 60_000,
       attestation: "none",
