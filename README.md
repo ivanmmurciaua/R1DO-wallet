@@ -16,7 +16,7 @@ Although less dangerous than other services, this is still risky because your id
 
 For several years now, the [FIDO Alliance](https://fidoalliance.org/overview/), an open association made up of leading technology companies, has been looking for ways to eliminate passwords from our lives in order to reduce phishing and various security breaches.
 
-Among the most important milestones is the creation of [passkeys](https://fidoalliance.org/passkeys/), which allow users to sign in to apps and websites using the same process they use to unlock their device (biometrics, PIN, or pattern). 
+Among the most important milestones is the creation of [passkeys](https://fidoalliance.org/passkeys/), which allow users to sign in to apps and websites using the same process they use to unlock their device (biometrics, PIN, or pattern).
 
 Now, with the [precompilation of the secp256r1 curve](https://eips.ethereum.org/EIPS/eip-7951) in EVM networks, the door is open to the option of having a smart wallet thanks to passkeys.
 
@@ -29,7 +29,7 @@ Relying on passwords mean trust in a server trusting a server. A server that you
 
 This maintains user's privacy while storing the information on a public server that everyone can see, but no one can decrypt. Even so, one potential danger is that they know your public key and the address derived from it. This is not a problem in itself due to the very nature of [asymmetric key cryptography](https://en.wikipedia.org/wiki/Public-key_cryptography).
 
-> [!WARNING]  
+> [!WARNING]
 > If you do not choose the external providers option, you will not be able to manage your passkey, as it is generated internally on your device and **if you lose it or change it, you will lose complete access to your wallet**.
 
 ### Technologies
@@ -51,13 +51,13 @@ npm run dev
 - UX edge-cases: **native authentication prompts can confuse** non-technical users.
 
 ### Roadmap
-- [ ] Import passkeys to SC.
-- [ ] Improve SC.
-- [ ] UX/UI improvements for non-technical users (guided onboarding).
+- [X] Improve cross-browser and device compatibility.
+- [X] Import passkeys.
+- [X] Improve SC.
 - [ ] Integrate recovery flows (social recovery, ZKProofs to recover funds, Key rotation on chain).
+- [ ] UX/UI improvements for non-technical users (guided onboarding).
 - [ ] Integrate DeFi options.
 - [ ] More privacy, integrate stealth mechanisms.
-- [ ] Improve cross-browser and device compatibility.
 - [ ] E2E tests and security audit
 - ...
 
