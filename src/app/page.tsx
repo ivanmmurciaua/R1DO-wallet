@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   createPasskey,
   // generateAuthKey
@@ -29,6 +29,34 @@ export default function Home() {
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
   // const [recovery, setRecovery] = useState(false);
+
+  // PWA install prompt state
+  const [showInstall, setShowInstall] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const deferredPrompt = useRef<any>(null);
+
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handler = (e: any) => {
+      e.preventDefault();
+      deferredPrompt.current = e;
+      setShowInstall(true);
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handler);
+    };
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (deferredPrompt.current) {
+      deferredPrompt.current.prompt();
+      await deferredPrompt.current.userChoice;
+      deferredPrompt.current = null;
+      setShowInstall(false);
+    }
+  };
 
   const openPopup = (message: string) => {
     if (!showPopup) {
@@ -335,6 +363,37 @@ export default function Home() {
   return (
     <div className={styles.page}>
       <main className={styles.main}>
+        {/* Custom PWA Install Button */}
+        {showInstall && (
+          <div
+            style={{
+              position: "fixed",
+              bottom: 24,
+              left: 0,
+              right: 0,
+              display: "flex",
+              justifyContent: "center",
+              zIndex: 1000,
+            }}
+          >
+            <button
+              style={{
+                background: "#1a1a1a",
+                color: "#fff",
+                border: "none",
+                borderRadius: 8,
+                padding: "12px 24px",
+                fontSize: "1rem",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                cursor: "pointer",
+              }}
+              onClick={handleInstallClick}
+            >
+              Install SafeKey Wallet
+            </button>
+          </div>
+        )}
+
         {!showPopup && userWallet && address && deployed ? (
           <AccountDetails
             username={userName}
