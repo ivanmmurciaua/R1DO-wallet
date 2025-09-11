@@ -386,7 +386,7 @@ export default function Home() {
               }}
               onClick={handleInstallClick}
             >
-              Add to your device
+              Install SafeKey Wallet
             </button>
           </div>
         )}
