@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   createPasskey,
   // generateAuthKey
@@ -35,19 +35,20 @@ export default function Home() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deferredPrompt = useRef<any>(null);
 
-  useEffect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const handler = (e: any) => {
-      e.preventDefault();
-      deferredPrompt.current = e;
-      setShowInstall(true);
-    };
-    window.addEventListener("beforeinstallprompt", handler);
+  const openPopup = useCallback(
+    (message: string) => {
+      if (!showPopup) {
+        setShowPopup(true);
+      }
+      setPopupMessage(message);
+    },
+    [showPopup],
+  );
 
-    return () => {
-      window.removeEventListener("beforeinstallprompt", handler);
-    };
-  }, []);
+  const closePopup = () => {
+    setShowPopup(false);
+    setPopupMessage("");
+  };
 
   const handleInstallClick = async () => {
     if (deferredPrompt.current) {
@@ -56,18 +57,6 @@ export default function Home() {
       deferredPrompt.current = null;
       setShowInstall(false);
     }
-  };
-
-  const openPopup = (message: string) => {
-    if (!showPopup) {
-      setShowPopup(true);
-    }
-    setPopupMessage(message);
-  };
-
-  const closePopup = () => {
-    setShowPopup(false);
-    setPopupMessage("");
   };
 
   // const openRecoveryMessage = (message: string) => {
@@ -82,6 +71,26 @@ export default function Home() {
   //   });
   // };
 
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handler = (e: any) => {
+      e.preventDefault();
+      deferredPrompt.current = e;
+      setShowInstall(true);
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handler);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && !window.PublicKeyCredential) {
+      openPopup("Credentials not supported on this device or browser");
+    }
+  }, [openPopup]);
+
   const setLocalData = (
     username: string,
     fingerprint: string,
@@ -95,12 +104,6 @@ export default function Home() {
       }),
     );
   };
-
-  useEffect(() => {
-    if (typeof window !== "undefined" && !window.PublicKeyCredential) {
-      openPopup("Credentials not supported on this device or browser");
-    }
-  });
 
   async function handleStore(
     username: string,
