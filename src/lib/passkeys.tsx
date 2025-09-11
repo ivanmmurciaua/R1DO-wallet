@@ -6,6 +6,7 @@ import { REGISTRY_ADDRESS } from "@/app/constants";
 import { client } from "./client";
 import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
 import { log } from "./common";
+import { setLocalData } from "./localstorage";
 
 export const generateFingerprint = (userAuthKey: string) =>
   keccak256(toHex(userAuthKey));
@@ -94,19 +95,13 @@ export async function createPasskey(
     // console.log("Passkey generated: ");
     // console.log(passkey);
 
-    localStorage.setItem(
-      username,
-      JSON.stringify({
-        fingerprint: "",
-        passkey: {
-          rawId: passkey.rawId,
-          coordinates: {
-            x: passkey.coordinates.x,
-            y: passkey.coordinates.y,
-          },
-        },
-      }),
-    );
+    setLocalData(username, "", {
+      rawId: passkey.rawId,
+      coordinates: {
+        x: passkey.coordinates.x,
+        y: passkey.coordinates.y,
+      },
+    });
 
     return {
       fingerprint: fingerprint,

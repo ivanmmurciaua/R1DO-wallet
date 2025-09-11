@@ -18,8 +18,12 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
 import AccountDetails from "@/components/AccountDetails";
 import { log } from "@/lib/common";
-// import ImportPasskey from "@/components/ImportPasskey";
-// import { Box, Button, Stack } from "@mui/material";
+import {
+  getLocalData,
+  removeLocalData,
+  setLocalData,
+  updateLocalData,
+} from "@/lib/localstorage";
 
 export default function Home() {
   const [deployed, setDeployed] = useState(false);
@@ -34,6 +38,16 @@ export default function Home() {
   const [showInstall, setShowInstall] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deferredPrompt = useRef<any>(null);
+
+  const openInstallOption = () => {
+    setShowInstall(true);
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        setShowInstall(false);
+        resolve();
+      }, 10000);
+    });
+  };
 
   const openPopup = useCallback(
     (message: string) => {
@@ -59,24 +73,12 @@ export default function Home() {
     }
   };
 
-  // const openRecoveryMessage = (message: string) => {
-  //   setShowPopup(true);
-  //   setPopupMessage(message);
-  //   //TODO: Check logic
-  //   return new Promise<void>((resolve) => {
-  //     setTimeout(() => {
-  //       setShowPopup(false);
-  //       resolve();
-  //     }, 2000);
-  //   });
-  // };
-
   useEffect(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const handler = (e: any) => {
       e.preventDefault();
       deferredPrompt.current = e;
-      setShowInstall(true);
+      openInstallOption();
     };
     window.addEventListener("beforeinstallprompt", handler);
 
@@ -90,20 +92,6 @@ export default function Home() {
       openPopup("Credentials not supported on this device or browser");
     }
   }, [openPopup]);
-
-  const setLocalData = (
-    username: string,
-    fingerprint: string,
-    passkey: PasskeyArgType,
-  ) => {
-    localStorage.setItem(
-      username,
-      JSON.stringify({
-        fingerprint: fingerprint,
-        passkey: passkey,
-      }),
-    );
-  };
 
   async function handleStore(
     username: string,
@@ -126,7 +114,7 @@ export default function Home() {
       );
 
       if (tx) {
-        setLocalData(username, fingerprint, passkey);
+        updateLocalData(username, fingerprint, passkey);
         setDeployed(true);
         closePopup();
       }
@@ -179,24 +167,25 @@ export default function Home() {
     setUsername(username);
     let passkey;
 
-    const { fingerprint } = JSON.parse(localStorage.getItem(username) || "{}");
-    ({ passkey } = JSON.parse(localStorage.getItem(username) || "{}"));
+    const wallet = getLocalData(username);
+    const fingerprint = wallet?.fingerprint || "";
+    passkey = wallet?.passkey || {};
 
-    if (!fingerprint) {
+    if (fingerprint === "") {
       // TRACE - DEBUG
       // console.log("No fingerprint detected");
 
-      if (passkey) {
+      if (Object.keys(passkey).length !== 0) {
         // Created but not deployed
         // Check locally and tell user forget it.
-        if (await loadFromDevice(passkey.rawId)) {
+        if (await loadFromDevice(passkey.rawId!)) {
           // in device but exists onchain?
-          await managePasskey(username, external, passkey);
+          await managePasskey(username, external, passkey as PasskeyArgType);
         } else {
           const e =
             "Your wallet is not created. Please remove your passkey from this device";
           openPopup(e);
-          localStorage.removeItem(username);
+          removeLocalData(username);
 
           await log("createOrLoad - 5,6,7", e);
           throw Error(e);
@@ -211,10 +200,15 @@ export default function Home() {
       if (!(await readFromSC("isRegistered", fingerprint)) as boolean) {
         // Finded fingerprint, not exists onchain but I can import passkey if I'm the owner of it and exists in my device.
         if (passkey) {
-          if (await loadFromDevice(passkey.rawId)) {
+          if (await loadFromDevice(passkey.rawId!)) {
             // Store it onchain
-            const wallet = await handleWalletInit(passkey);
-            await handleStore(username, fingerprint, passkey, wallet);
+            const wallet = await handleWalletInit(passkey as PasskeyArgType);
+            await handleStore(
+              username,
+              fingerprint,
+              passkey as PasskeyArgType,
+              wallet,
+            );
           } else {
             // localStorage.removeItem(username);
             openPopup("Something went wrong. Please try again later");
@@ -238,12 +232,14 @@ export default function Home() {
         if (await loadFromDevice(passkey.rawId)) {
           // TRACE - DEBUG
           // console.log("Everything OK");
-          setLocalData(username, fingerprint, passkey);
+          updateLocalData(username, fingerprint, passkey);
           await handleWalletInit(passkey);
           closePopup();
         } else {
           // localStorage.removeItem(username);
           openPopup("Passkey could not be loaded in your device.");
+          removeLocalData(username);
+
           const e = "Onchain exists, storage exists but not in your device";
           await log("loading wallet from device", e);
           throw new Error("Not exists in device");
@@ -265,7 +261,6 @@ export default function Home() {
     try {
       if ((await readFromSC("isRegistered", fingerprint)) as boolean) {
         const passkey = await formatPasskey(fingerprint);
-        setLocalData(username, fingerprint, passkey);
 
         if (existsPasskey) {
           exists = true;
@@ -277,6 +272,7 @@ export default function Home() {
           exists = true;
           overwrite = true;
           if (await loadFromDevice(passkey.rawId)) {
+            setLocalData(username, fingerprint, passkey);
             await handleWalletInit(passkey);
             closePopup();
           } else {
@@ -316,9 +312,7 @@ export default function Home() {
       if (exists) {
         if (!overwrite) {
           // Retrieve data and load wallet.
-          const { passkey } = JSON.parse(
-            localStorage.getItem(username) || "{}",
-          );
+          const { passkey } = getLocalData(username)!;
           await handleWalletInit(passkey);
           closePopup();
         } else {
@@ -340,7 +334,7 @@ export default function Home() {
           if (passkey.rawId !== "") {
             const wallet = await handleWalletInit(passkey);
             //TODO: Check this
-            // setLocalData(username, fingerprint, passkey);
+            // updateLocalData(username, fingerprint, passkey);
             await handleStore(username, fingerprint!, passkey, wallet);
           } else {
             openPopup(
@@ -392,7 +386,7 @@ export default function Home() {
               }}
               onClick={handleInstallClick}
             >
-              Install SafeKey Wallet
+              Add to your device
             </button>
           </div>
         )}

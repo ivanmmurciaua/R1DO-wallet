@@ -12,9 +12,8 @@ export type PasskeyOnchainResponseType = {
   timestamp: number;
 };
 
-export type ImportedUserData = {
-  [username: string]: {
-    fingerprint: string;
-    passkey: PasskeyArgType;
-  };
+export type LocalStorageData = {
+  username: string;
+  fingerprint: string;
+  passkey: PasskeyArgType;
 };

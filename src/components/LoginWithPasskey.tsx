@@ -8,13 +8,18 @@ import {
   Box,
 } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { getAllWallets } from "@/lib/localstorage";
+import { LocalStorageData } from "@/types";
 
 type props = {
   createOrLoad: (username: string, external: boolean) => object;
 };
 
 export default function LoginWithPasskey({ createOrLoad }: props) {
+  const hasAutoLoaded = useRef(false);
+  const [wallets, setWallets] = useState<LocalStorageData[]>([]);
+  const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState("");
   const [external, setExternal] = useState(false);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
@@ -23,13 +28,27 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
     setAnchorEl(event.currentTarget);
   };
 
+  useEffect(() => {
+    if (hasAutoLoaded.current) return;
+    const wallets = getAllWallets();
+    if (wallets.length > 0) {
+      setWallets(wallets);
+      hasAutoLoaded.current = true;
+      // Autoload the wallet
+      // if (wallets.length === 1) {
+      //   createOrLoad(wallets[0].username.toLowerCase(), false);
+      // }
+    }
+    setLoading(false);
+  }, [setLoading]);
+
   const handlePopoverClose = () => {
     setAnchorEl(null);
   };
 
   const open = Boolean(anchorEl);
 
-  return (
+  return wallets.length === 0 && !loading ? (
     <div>
       <Stack
         spacing={2}
@@ -135,6 +154,68 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
         >
           Login or Register
         </Button>
+      </Stack>
+    </div>
+  ) : (
+    <div>
+      <Stack>
+        {/*loading || wallets.length < 2 ? (*/}
+        {loading ? (
+          <Typography
+            textAlign={"center"}
+            marginBottom={8}
+            marginTop={8}
+            variant="h4"
+          >
+            Loading your wallets...
+          </Typography>
+        ) : (
+          <Stack>
+            <Typography
+              textAlign={"center"}
+              marginBottom={8}
+              marginTop={8}
+              variant="h4"
+            >
+              Select a wallet
+            </Typography>
+            <Box
+              sx={{
+                border: "1px solid",
+                borderColor: "divider",
+                borderRadius: 2,
+                p: 2,
+                maxWidth: "100%",
+              }}
+            >
+              {wallets.map((wallet: LocalStorageData, index: number) => (
+                <Typography
+                  key={index}
+                  variant="body1"
+                  sx={{
+                    p: 1,
+                    textAlign: "center",
+                    cursor: "pointer",
+                    "&:hover": { backgroundColor: "action.hover" },
+                    borderRadius: 1,
+                    "&:not(:last-child)": { mb: 1 },
+                  }}
+                  onClick={() =>
+                    createOrLoad(wallet.username.toLowerCase(), false)
+                  }
+                >
+                  {wallet.username.toUpperCase()}
+                </Typography>
+              ))}
+            </Box>
+            <Typography textAlign={"center"} marginBottom={1} marginTop={8}>
+              Or create a new one
+            </Typography>
+            <Button variant="contained" onClick={() => setWallets([])}>
+              Create Wallet
+            </Button>
+          </Stack>
+        )}
       </Stack>
     </div>
   );
