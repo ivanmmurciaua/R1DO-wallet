@@ -36,13 +36,29 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
 
+  // Network-first for HTML pages
+  if (event.request.headers.get("accept")?.includes("text/html")) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          // Optionally update cache
+          const responseClone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseClone);
+          });
+          return response;
+        })
+        .catch(() => caches.match(event.request)),
+    );
+    return;
+  }
+
+  // Cache-first for other assets
   event.respondWith(
     caches.match(event.request).then((response) => {
-      // Return cached response if found, else fetch from network
       return (
         response ||
         fetch(event.request).then((networkResponse) => {
-          // Optionally cache new requests here
           return networkResponse;
         })
       );
