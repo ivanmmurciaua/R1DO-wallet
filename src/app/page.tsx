@@ -196,7 +196,7 @@ export default function Home() {
     } else {
       // TRACE - DEBUG
       // console.log("Fingerprint detected");
-      openPopup(`Looking for your wallet ${username}`);
+      openPopup(`Looking for your wallet`);
       if (!(await readFromSC("isRegistered", fingerprint)) as boolean) {
         // Finded fingerprint, not exists onchain but I can import passkey if I'm the owner of it and exists in my device.
         if (passkey) {
@@ -252,7 +252,7 @@ export default function Home() {
     username: string,
     existsPasskey: boolean = false,
   ) {
-    openPopup(`Looking for your wallet ${username}`);
+    openPopup(`Looking for your wallet`);
     let overwrite = false;
     let exists = false;
 

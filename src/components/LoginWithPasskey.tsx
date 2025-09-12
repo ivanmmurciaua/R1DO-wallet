@@ -6,6 +6,7 @@ import {
   Popover,
   IconButton,
   Box,
+  CircularProgress,
 } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import { useEffect, useRef, useState } from "react";
@@ -161,19 +162,27 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
       <Stack>
         {/*loading || wallets.length < 2 ? (*/}
         {loading ? (
-          <Typography
-            textAlign={"center"}
-            marginBottom={8}
-            marginTop={8}
-            variant="h4"
-          >
-            Loading your wallets...
-          </Typography>
+          <div style={{ textAlign: "center" }}>
+            <Typography
+              marginBottom={1}
+              marginTop={1}
+              variant="h4"
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 2,
+              }}
+            >
+              Loading wallets...
+            </Typography>
+            <CircularProgress size={50} sx={{ mb: 2, mt: 3 }} />
+          </div>
         ) : (
           <Stack>
             <Typography
               textAlign={"center"}
-              marginBottom={8}
+              marginBottom={3}
               marginTop={8}
               variant="h4"
             >
@@ -181,38 +190,44 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             </Typography>
             <Box
               sx={{
-                border: "1px solid",
-                borderColor: "divider",
                 borderRadius: 2,
                 p: 2,
                 maxWidth: "100%",
               }}
             >
               {wallets.map((wallet: LocalStorageData, index: number) => (
-                <Typography
+                <div
                   key={index}
-                  variant="body1"
-                  sx={{
-                    p: 1,
-                    textAlign: "center",
-                    cursor: "pointer",
-                    "&:hover": { backgroundColor: "action.hover" },
-                    borderRadius: 1,
-                    "&:not(:last-child)": { mb: 1 },
+                  style={{
+                    border: "1px solid",
+                    borderColor: "divider",
+                    marginBottom: "7px",
                   }}
-                  onClick={() =>
-                    createOrLoad(wallet.username.toLowerCase(), false)
-                  }
                 >
-                  {wallet.username.toUpperCase()}
-                </Typography>
+                  <Typography
+                    variant="body1"
+                    sx={{
+                      p: 1,
+                      textAlign: "center",
+                      cursor: "pointer",
+                      "&:hover": { backgroundColor: "action.hover" },
+                      borderRadius: 1,
+                      "&:not(:last-child)": { mb: 1 },
+                    }}
+                    onClick={() =>
+                      createOrLoad(wallet.username.toLowerCase(), false)
+                    }
+                  >
+                    {wallet.username.toUpperCase()}
+                  </Typography>
+                </div>
               ))}
             </Box>
             <Typography textAlign={"center"} marginBottom={1} marginTop={8}>
-              Or create a new one
+              Or
             </Typography>
             <Button variant="contained" onClick={() => setWallets([])}>
-              Create Wallet
+              Create / Load new wallet
             </Button>
           </Stack>
         )}
