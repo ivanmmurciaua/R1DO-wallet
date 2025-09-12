@@ -1,10 +1,11 @@
 export const BuildingNotice = () => {
   return (
-    <div style={{ marginTop: "9em" }}>
-      <p style={{ fontSize: "1.3em" }}>🏗️ Stay tunned for new updates 🏗️</p>
+    <div style={{ marginTop: "20em" }}>
+      <p style={{ fontSize: "0.77em" }}>🏗️ Stay tunned for new updates 🏗️</p>
       <br />
-      <span>Feel free to contact me if you have any feedback:</span>
-      <br />
+      <p style={{ fontSize: "0.77em" }}>
+        Feel free to contact me if you have any feedback:
+      </p>
       <a
         href="https://t.me/Ivanovish10"
         target="_blank"
@@ -20,15 +21,15 @@ export const BuildingNotice = () => {
           borderRadius: "4px",
           padding: "3px 12px",
           fontWeight: 500,
-          fontSize: "1rem",
+          fontSize: "0.77rem",
           border: "none",
           cursor: "pointer",
         }}
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
-          width="20"
-          height="20"
+          width="10"
+          height="10"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -44,7 +45,7 @@ export const BuildingNotice = () => {
       </a>
       <br />
       <br />
-      <span>Thanks for testing</span>
+      <p style={{ fontSize: "0.77em" }}>Thanks for testing</p>
     </div>
   );
 };
