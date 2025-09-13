@@ -437,8 +437,8 @@ export default function Home() {
             aria-hidden
             src="/ethereum-badge.svg"
             alt="Powered by Ethereum"
-            width={100}
-            height={50}
+            width={77}
+            height={33}
           />
         </a>
         <div>

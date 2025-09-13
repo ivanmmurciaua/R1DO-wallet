@@ -1,8 +1,6 @@
 export const BuildingNotice = () => {
   return (
-    <div style={{ marginTop: "20em" }}>
-      <p style={{ fontSize: "0.77em" }}>🏗️ Stay tunned for new updates 🏗️</p>
-      <br />
+    <div style={{ marginTop: "17em" }}>
       <p style={{ fontSize: "0.77em" }}>
         Feel free to contact me if you have any feedback:
       </p>
@@ -45,7 +43,7 @@ export const BuildingNotice = () => {
       </a>
       <br />
       <br />
-      <p style={{ fontSize: "0.77em" }}>Thanks for testing</p>
+      <p style={{ fontSize: "0.77em" }}>Thx for testing it</p>
     </div>
   );
 };
