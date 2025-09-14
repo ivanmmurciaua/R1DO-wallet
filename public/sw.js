@@ -1,4 +1,4 @@
-const CACHE_NAME = "safekey-wallet-cache-v1";
+const CACHE_NAME = "r1do-wallet-cache-v1";
 const urlsToCache = [
   "/",
   "/favicon.ico",

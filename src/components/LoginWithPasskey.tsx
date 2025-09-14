@@ -62,7 +62,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           marginTop={8}
           variant="h4"
         >
-          SafeKey Wallet
+          R1DO Wallet
         </Typography>
 
         <input

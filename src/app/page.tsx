@@ -386,7 +386,7 @@ export default function Home() {
               }}
               onClick={handleInstallClick}
             >
-              Install SafeKey Wallet
+              Install R1DO Wallet
             </button>
           </div>
         )}

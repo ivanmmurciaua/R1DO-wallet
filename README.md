@@ -1,9 +1,9 @@
-## SafeKey Wallet
+## R1DO Wallet
 
-SafeKey Wallet is a dApp for normies that creates a very simple EVM smart wallet using a passkey and [Safe{Core} SDK](https://github.com/safe-global/safe-core-sdk). It preserves decentralization and self-custody without relying on external providers like Privy, Web3Auth, or Magic.
+R1DO Wallet is a dApp for normies that creates a very simple EVM smart wallet using a passkey and [Safe{Core} SDK](https://github.com/safe-global/safe-core-sdk). It preserves decentralization and self-custody without relying on external providers like Privy, Web3Auth, or Magic.
 
 ### Description
-**SafeKey Wallet** generates keys and an EVM-compatible smart wallet using the device passkey (Secure Enclave / Secure Element). Designed for non-technical users who want full control of their assets without sacrificing usability.
+**R1DO Wallet** generates keys and an EVM-compatible smart wallet using the device passkey (Secure Enclave / Secure Element). Designed for non-technical users who want full control of their assets without sacrificing usability.
 
 > [!CAUTION]
 > This is a very lightweight version of a wallet. Please, don't use it to store the savings of your entire life.
@@ -22,7 +22,7 @@ Now, with the [precompilation of the secp256r1 curve](https://eips.ethereum.org/
 
 This method is simple and clean for users who are not used to dealing with seed phrases, while maintaining self-custody.
 
-> I don't want normie users to depend on third services that may trade their data just to create a wallet and interact with it, that's not why I entered this wonderful world of web3. And although traditional methods (seed phrases, passphrases, dice, paper) **are the most recommended**, SafeKey Wallet aims to give control back to the user and offers an easy and simple way to interact with a wallet with no other requirements than a username (accepting the responsibilities and risks of self-custody).
+> I don't want normie users to depend on third services that may trade their data just to create a wallet and interact with it, that's not why I entered this wonderful world of web3. And although traditional methods (seed phrases, passphrases, dice, paper) **are the most recommended**, R1DO Wallet aims to give control back to the user and offers an easy and simple way to interact with a wallet with no other requirements than a username (accepting the responsibilities and risks of self-custody).
 
 ### Why not passwords?
 Relying on passwords mean trust in a server trusting a server. A server that you don't manage. Why choose passkeys? Easy, [KISS](https://en.wikipedia.org/wiki/KISS_principle). Instead of trusting a **private** server, you are storing your **public** key coordinates in a public smart contract related to your user (stored as a hashed fingerprint).

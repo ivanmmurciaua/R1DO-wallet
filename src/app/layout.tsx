@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SafeKey Wallet",
-  description: "SafeKey Wallet PoC",
+  title: "R1DO Wallet",
+  description: "R1DO Wallet",
 };
 
 export default function RootLayout({
@@ -44,7 +44,7 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/icons/icon-192x192.png" />
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-        <meta name="apple-mobile-web-app-title" content="SafeKey Wallet" />
+        <meta name="apple-mobile-web-app-title" content="R1DO Wallet" />
 
         {/* PWA registration script */}
         <script

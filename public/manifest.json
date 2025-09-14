@@ -1,7 +1,7 @@
 {
-  "name": "SafeKey Wallet",
-  "short_name": "SafeKey",
-  "description": "SafeKey Wallet PoC",
+  "name": "R1DO Wallet",
+  "short_name": "R1DO",
+  "description": "R1DO Wallet - a s1mple wallet",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#1a1a1a",
