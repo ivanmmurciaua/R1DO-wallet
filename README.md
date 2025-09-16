@@ -57,7 +57,7 @@ Change .env with your keys:
 ```js
 NEXT_PUBLIC_PIMLICO_API_KEY = "<PIMLICO_API_KEY>"
 
-// current dev version at 0x4a333cd8807d32e4773c76C467Aa4EF55EFf2A92
+// current dev version at 0xD7504892EeA860fe54b87c05af70Bba51446449f
 NEXT_PUBLIC_REGISTRY_ADDRESS = "<SC_REGISTRY_ADDRESS>"
 ```
 

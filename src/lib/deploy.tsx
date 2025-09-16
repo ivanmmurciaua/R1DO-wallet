@@ -1,6 +1,6 @@
 import { REGISTRY_ADDRESS } from "@/app/constants";
 import { Safe4337Pack } from "@safe-global/relay-kit";
-import { encodeFunctionData, zeroAddress } from "viem";
+import { encodeFunctionData } from "viem";
 import { log } from "./common";
 
 /**
@@ -9,16 +9,20 @@ import { log } from "./common";
  * @returns {Promise<void>}
  * @throws {Error} If the operation fails.
  */
-export const makeTx = async (wallet: Safe4337Pack): Promise<string> => {
+export const makeTx = async (
+  wallet: Safe4337Pack,
+  destinationAddress: string,
+  amount: string,
+): Promise<string> => {
   // // TRACE -DEBUG
-  // console.log("Making test tx...");
+  console.log("Making tx...");
 
   try {
     // 1) Create SafeOperation
     const rawTx = {
-      to: zeroAddress,
-      data: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      value: "0",
+      to: destinationAddress,
+      data: "0x00",
+      value: amount,
     };
 
     const safeOperation = await wallet.createTransaction({
@@ -34,8 +38,15 @@ export const makeTx = async (wallet: Safe4337Pack): Promise<string> => {
         executable: signedSafeOperation,
       });
 
-      console.log(userOperationHash);
-      return userOperationHash;
+      let userOperationReceipt = null;
+
+      while (!userOperationReceipt) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        userOperationReceipt =
+          await wallet.getUserOperationReceipt(userOperationHash);
+      }
+
+      return userOperationReceipt.receipt.transactionHash;
     }
   } catch (e: unknown) {
     console.error(e);

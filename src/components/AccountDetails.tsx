@@ -1,22 +1,17 @@
-// import { Button } from "@mui/material";
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { useEffect, useState } from "react";
-// import { formatEther } from "viem";
+import { Snackbar, Alert } from "@mui/material";
 import { BuildingNotice } from "./BuildingNotice";
-// import { UserMenu } from "./UserMenu";
-// import { SendEth } from "./SendEth";
-// import { PasskeyArgType } from "@safe-global/protocol-kit";
-// import { ImportedUserData } from "@/types";
-// import { makeTx } from "@/lib/deploy";
+import { UserMenu } from "./UserMenu";
 
 type props = {
-  username: string;
   wallet: Safe4337Pack;
   address: string;
 };
 
-export default function AccountDetails({ username, wallet, address }: props) {
+export default function AccountDetails({ wallet, address }: props) {
   const [userBalance, setBalance] = useState<string>("0");
+  const [showCopySuccess, setShowCopySuccess] = useState(false);
 
   useEffect(() => {
     if (!wallet) return;
@@ -41,43 +36,60 @@ export default function AccountDetails({ username, wallet, address }: props) {
     };
   }, [wallet, address]);
 
+  const handleCopyAddress = async () => {
+    try {
+      await navigator.clipboard.writeText(address);
+      setShowCopySuccess(true);
+    } catch (err) {
+      console.error("Failed to copy address:", err);
+      // Fallback for older browsers
+      const textArea = document.createElement("textarea");
+      textArea.value = address;
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand("copy");
+        setShowCopySuccess(true);
+      } catch (fallbackErr) {
+        console.error("Fallback copy failed:", fallbackErr);
+      }
+      document.body.removeChild(textArea);
+    }
+  };
+
   return (
     <div>
+      {/*<h2>👋 Welcome back {username}!</h2>*/}
       <div style={{ textAlign: "center" }}>
-        <h2> {userBalance} ⧫ </h2>
+        <h2
+          onClick={handleCopyAddress}
+          style={{
+            cursor: "pointer",
+            userSelect: "none",
+            transition: "transform 0.1s ease",
+          }}
+          onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.95)")}
+          onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          title="Click to copy address"
+        >
+          {userBalance} ⧫
+        </h2>
         <br />
         <div style={{ marginTop: "11px" }}>
           {parseFloat(userBalance) > 0 ? (
             <div>
-              {/*<UserMenu />*/}
-              <span>Hey {username}, I see you have ⧫ in your wallet!</span>
-              <p style={{ marginTop: "3px" }}>
-                <span>Now, stay tunned for new features ;)</span>
-              </p>
+              <UserMenu wallet={wallet} />
             </div>
           ) : (
             <div>
               <p>
                 Ow... you don`t have any ⧫... so sad :( <br />
-                Ask a few friends to send you some using
+                <br />
+                Ask a few friends to send you some using your address by
+                clicking your balance
               </p>
-              {/*<p>your username: {username}</p>*/}
-              {/*<span>or</span>*/}
-              <br />
-              <p>your address:</p>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: "8px",
-                  flexWrap: "wrap",
-                }}
-              >
-                <span style={{ fontSize: "0.9em", wordBreak: "break-all" }}>
-                  {address}
-                </span>
-              </div>
             </div>
           )}
         </div>
@@ -85,6 +97,21 @@ export default function AccountDetails({ username, wallet, address }: props) {
       <div>
         <BuildingNotice />
       </div>
+
+      <Snackbar
+        open={showCopySuccess}
+        autoHideDuration={2000}
+        onClose={() => setShowCopySuccess(false)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert
+          onClose={() => setShowCopySuccess(false)}
+          severity="success"
+          variant="filled"
+        >
+          Address copied to clipboard!
+        </Alert>
+      </Snackbar>
     </div>
   );
 }

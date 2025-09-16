@@ -24,11 +24,11 @@ import {
   setLocalData,
   updateLocalData,
 } from "@/lib/localstorage";
+import Popup from "@/components/Popup";
 
 export default function Home() {
   const [deployed, setDeployed] = useState(false);
   const [address, setAddress] = useState<Address | null>(null);
-  const [userName, setUsername] = useState("");
   const [userWallet, setWallet] = useState<Safe4337Pack | null>(null);
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
@@ -164,7 +164,6 @@ export default function Home() {
   async function createOrLoad(username: string, external: boolean) {
     // TRACE - DEBUG
     // console.log("External provider", external);
-    setUsername(username);
     let passkey;
 
     const wallet = getLocalData(username);
@@ -392,41 +391,13 @@ export default function Home() {
         )}
 
         {!showPopup && userWallet && address && deployed ? (
-          <AccountDetails
-            username={userName}
-            wallet={userWallet}
-            address={address}
-          />
+          <AccountDetails wallet={userWallet} address={address} />
         ) : (
-          <>
-            <LoginWithPasskey createOrLoad={createOrLoad} />
-            {/*<Button
-              variant="text"
-              color="error"
-              onClick={() =>
-                recovery ? setRecovery(false) : setRecovery(true)
-              }
-            >
-              LOST WALLET ACCESS?
-            </Button>
-            {recovery && (
-              <Stack>
-                <Box>
-                  <ImportPasskey onImport={() => setRecovery(false)} />
-                </Box>
-              </Stack>
-            )}*/}
-          </>
+          <LoginWithPasskey createOrLoad={createOrLoad} />
         )}
-
-        {showPopup && popupMessage && (
-          <div className={styles.popupOverlay}>
-            <div className={styles.popup}>
-              <h3>{popupMessage}</h3>
-            </div>
-          </div>
-        )}
+        {showPopup && popupMessage && <Popup popupMessage={popupMessage} />}
       </main>
+
       <footer className={styles.footer}>
         <a
           href="https://ethereum.org"
