@@ -21,7 +21,7 @@ export const makeTx = async (
     // 1) Create SafeOperation
     const rawTx = {
       to: destinationAddress,
-      data: "0x00",
+      data: "0x",
       value: amount,
     };
 
