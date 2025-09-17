@@ -1,6 +1,6 @@
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { useEffect, useState } from "react";
-import { Snackbar, Alert } from "@mui/material";
+import { Snackbar, Alert, CircularProgress } from "@mui/material";
 import { BuildingNotice } from "./BuildingNotice";
 import { UserMenu } from "./UserMenu";
 
@@ -10,6 +10,7 @@ type props = {
 };
 
 export default function AccountDetails({ wallet, address }: props) {
+  const [isLoaded, setLoaded] = useState(false);
   const [userBalance, setBalance] = useState<string>("0");
   const [showCopySuccess, setShowCopySuccess] = useState(false);
 
@@ -25,6 +26,7 @@ export default function AccountDetails({ wallet, address }: props) {
       } catch (err) {
         console.error("fetchBalance error", err);
       }
+      if (!isLoaded) setLoaded(true);
     };
 
     fetchBalance();
@@ -34,7 +36,7 @@ export default function AccountDetails({ wallet, address }: props) {
       mounted = false;
       clearInterval(id);
     };
-  }, [wallet, address]);
+  }, [wallet, address, isLoaded]);
 
   const handleCopyAddress = async () => {
     try {
@@ -58,7 +60,7 @@ export default function AccountDetails({ wallet, address }: props) {
     }
   };
 
-  return (
+  return isLoaded ? (
     <div>
       {/*<h2>👋 Welcome back {username}!</h2>*/}
       <div style={{ textAlign: "center" }}>
@@ -113,5 +115,7 @@ export default function AccountDetails({ wallet, address }: props) {
         </Alert>
       </Snackbar>
     </div>
+  ) : (
+    <CircularProgress size={50} sx={{ alignItems: "center", mb: 2, mt: 3 }} />
   );
 }

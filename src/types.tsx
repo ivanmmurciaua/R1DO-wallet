@@ -1,4 +1,5 @@
 import { PasskeyArgType } from "@safe-global/protocol-kit";
+import { Address } from "viem";
 
 export type PasskeyResponseType = {
   fingerprint: string;
@@ -9,6 +10,7 @@ export type PasskeyOnchainResponseType = {
   rawId: string;
   coordinateX: string;
   coordinateY: string;
+  userAddress: Address;
   timestamp: number;
 };
 

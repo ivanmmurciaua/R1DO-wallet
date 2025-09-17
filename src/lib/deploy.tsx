@@ -15,7 +15,7 @@ export const makeTx = async (
   amount: string,
 ): Promise<string> => {
   // // TRACE -DEBUG
-  console.log("Making tx...");
+  // console.log("Making tx...");
 
   try {
     // 1) Create SafeOperation
@@ -49,7 +49,6 @@ export const makeTx = async (
       return userOperationReceipt.receipt.transactionHash;
     }
   } catch (e: unknown) {
-    console.error(e);
     await log("makeTx", e);
   }
   return "";

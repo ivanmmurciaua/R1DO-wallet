@@ -59,6 +59,11 @@ export const registryABI = [
             type: "bytes32",
           },
           {
+            internalType: "address",
+            name: "userAddress",
+            type: "address",
+          },
+          {
             internalType: "uint256",
             name: "timestamp",
             type: "uint256",
