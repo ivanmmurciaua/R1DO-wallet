@@ -5,11 +5,12 @@ import { BuildingNotice } from "./BuildingNotice";
 import { UserMenu } from "./UserMenu";
 
 type props = {
+  username: string;
   wallet: Safe4337Pack;
   address: string;
 };
 
-export default function AccountDetails({ wallet, address }: props) {
+export default function AccountDetails({ username, wallet, address }: props) {
   const [isLoaded, setLoaded] = useState(false);
   const [userBalance, setBalance] = useState<string>("0");
   const [showCopySuccess, setShowCopySuccess] = useState(false);
@@ -85,13 +86,15 @@ export default function AccountDetails({ wallet, address }: props) {
               <UserMenu wallet={wallet} />
             </div>
           ) : (
-            <div>
+            <div style={{ marginBottom: "-25px" }}>
               <p>
                 Ow... you don`t have any ⧫... so sad :( <br />
                 <br />
-                Ask a few friends to send you some using your address by
-                clicking your balance
+                Ask a few friends to send you some using your username:{" "}
+                {username}
               </p>
+              <br />
+              <p>or your address by clicking your balance</p>
             </div>
           )}
         </div>

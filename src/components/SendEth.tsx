@@ -80,7 +80,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
       <Stack
         spacing={1.7}
         direction="column"
-        sx={{ width: "100%", maxWidth: 400, mx: "auto" }}
+        sx={{ width: "100%", maxWidth: 400, mx: "auto", mb: -25 }}
       >
         {/*
         <Box sx={{ display: "flex", alignItems: "center", mb: 1 }}>

@@ -47,6 +47,10 @@ export const safeClient = async (
   return safe4337Pack;
 };
 
+export const getLastBlock = async (): Promise<string> => {
+  return (await client.getBlockNumber()).toString();
+};
+
 // // TODO: Test it to load an existing wallet.
 // const existingSafeClient = async (
 //   passkey: PasskeyArgType,

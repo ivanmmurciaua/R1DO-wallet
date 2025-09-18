@@ -27,6 +27,7 @@ import {
 import Popup from "@/components/Popup";
 
 export default function Home() {
+  const [username, setUsername] = useState("");
   const [deployed, setDeployed] = useState(false);
   const [address, setAddress] = useState<Address | null>(null);
   const [userWallet, setWallet] = useState<Safe4337Pack | null>(null);
@@ -165,6 +166,7 @@ export default function Home() {
     // TRACE - DEBUG
     // console.log("External provider", external);
     let passkey;
+    setUsername(username);
 
     const wallet = getLocalData(username);
     const fingerprint = wallet?.fingerprint || "";
@@ -390,8 +392,12 @@ export default function Home() {
           </div>
         )}
 
-        {!showPopup && userWallet && address && deployed ? (
-          <AccountDetails wallet={userWallet} address={address} />
+        {!showPopup && userWallet && username && address && deployed ? (
+          <AccountDetails
+            username={username}
+            wallet={userWallet}
+            address={address}
+          />
         ) : (
           <LoginWithPasskey createOrLoad={createOrLoad} />
         )}
