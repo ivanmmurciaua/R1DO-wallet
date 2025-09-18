@@ -9,8 +9,9 @@ import {
   CircularProgress,
 } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import DeleteIcon from "@mui/icons-material/Delete";
 import { useEffect, useRef, useState } from "react";
-import { getAllWallets } from "@/lib/localstorage";
+import { getAllWallets, removeLocalData } from "@/lib/localstorage";
 import { LocalStorageData } from "@/types";
 
 type props = {
@@ -199,27 +200,55 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
                 <div
                   key={index}
                   style={{
-                    border: "1px solid",
-                    borderColor: "divider",
+                    display: "flex",
+                    alignItems: "center",
                     marginBottom: "7px",
+                    gap: "8px",
                   }}
                 >
-                  <Typography
-                    variant="body1"
-                    sx={{
-                      p: 1,
-                      textAlign: "center",
-                      cursor: "pointer",
-                      "&:hover": { backgroundColor: "action.hover" },
-                      borderRadius: 1,
-                      "&:not(:last-child)": { mb: 1 },
+                  <div
+                    style={{
+                      border: "1px solid",
+                      borderColor: "divider",
+                      flex: 1,
                     }}
-                    onClick={() =>
-                      createOrLoad(wallet.username.toLowerCase(), false)
-                    }
                   >
-                    {wallet.username.toUpperCase()}
-                  </Typography>
+                    <Typography
+                      variant="body1"
+                      sx={{
+                        p: 1,
+                        textAlign: "center",
+                        cursor: "pointer",
+                        "&:hover": { backgroundColor: "action.hover" },
+                        borderRadius: 1,
+                        "&:not(:last-child)": { mb: 1 },
+                      }}
+                      onClick={() =>
+                        createOrLoad(wallet.username.toLowerCase(), false)
+                      }
+                    >
+                      {wallet.username.toUpperCase()}
+                    </Typography>
+                  </div>
+                  <IconButton
+                    size="small"
+                    sx={{
+                      color: "error.main",
+                      "&:hover": { color: "error.dark" },
+                      minWidth: "40px",
+                      height: "40px",
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeLocalData(wallet.username.toLowerCase());
+                      const updatedWallets = wallets.filter(
+                        (_, i) => i !== index,
+                      );
+                      setWallets(updatedWallets);
+                    }}
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
                 </div>
               ))}
             </Box>
