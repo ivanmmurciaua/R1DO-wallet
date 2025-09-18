@@ -34,7 +34,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
     }
 
     setIsLoading(true);
-    console.log(`Sending ${amount} diamonds to ${recipient}`);
+    console.log(`Sending ${amount} ⧫ to ${recipient}`);
 
     let recipientAddress = "";
 
@@ -69,7 +69,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
       }
     } catch (error) {
       console.error("Send transaction error:", error);
-      handleBackToMenu("Failed to send diamonds. Please try again.");
+      handleBackToMenu("Failed to send ⧫. Please try again.");
     } finally {
       setIsLoading(false);
     }

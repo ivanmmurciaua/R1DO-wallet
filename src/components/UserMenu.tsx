@@ -10,7 +10,6 @@ import {
   CircularProgress,
   IconButton,
 } from "@mui/material";
-import DiamondIcon from "@mui/icons-material/Diamond";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -56,9 +55,7 @@ type EtherscanResponse = {
 export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
-  const [currentView, setCurrentView] = useState<"menu" | "sendDiamonds">(
-    "menu",
-  );
+  const [currentView, setCurrentView] = useState<"menu" | "sendEth">("menu");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -73,11 +70,11 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
     });
   };
 
-  const handleSendDiamonds = () => {
-    setCurrentView("sendDiamonds");
+  const handleSendEth = () => {
+    setCurrentView("sendEth");
   };
 
-  const handleEarnMoreDiamonds = () => {
+  const handleEarnMoreEth = () => {
     // TODO: Implement
     handleShowPopup("Easy there, cowboy—this'll be implemented soon 🐴");
   };
@@ -152,7 +149,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
     }
   }, [wallet, fetchTransactions]);
 
-  if (currentView === "sendDiamonds") {
+  if (currentView === "sendEth") {
     return <SendEth wallet={wallet} onBack={handleBackToMenu} />;
   }
 
@@ -166,7 +163,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
         <Button
           variant="contained"
           color="primary"
-          onClick={handleSendDiamonds}
+          onClick={handleSendEth}
           sx={{
             py: 1.5,
             fontSize: "1rem",
@@ -177,18 +174,16 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
         </Button>
 
         <Button
-          variant="outlined"
+          variant="contained"
           color="secondary"
-          startIcon={<DiamondIcon />}
-          endIcon={<DiamondIcon />}
-          onClick={handleEarnMoreDiamonds}
+          onClick={handleEarnMoreEth}
           sx={{
             py: 1.5,
             fontSize: "1rem",
             borderRadius: 2,
           }}
         >
-          Earn more
+          Put yours ⧫ to work
         </Button>
 
         <div>
