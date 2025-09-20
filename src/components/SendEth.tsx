@@ -5,6 +5,7 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { makeTx } from "@/lib/deploy";
 import { generateFingerprint, readFromSC } from "@/lib/passkeys";
 import { PasskeyOnchainResponseType } from "@/types";
+import { getDecimals } from "@/lib/localstorage";
 // import { zeroAddress } from "viem";
 
 type SendEthProps = {
@@ -24,6 +25,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
   };
 
   const handleSendTransaction = async () => {
+    const totalAmount = parseFloat(amount) * 10 ** getDecimals();
     if (
       !wallet ||
       !recipient.trim() ||
@@ -32,8 +34,6 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
     ) {
       return;
     }
-
-    //Convert to wei
 
     setIsLoading(true);
     console.log(`Sending ${amount} ⧫ to ${recipient}`);
@@ -55,9 +55,9 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
 
       // console.log(wallet);
       // console.log(recipientAddress);
-      // console.log(amount);
+      // console.log(totalAmount);
 
-      const tx = await makeTx(wallet, recipientAddress, amount);
+      const tx = await makeTx(wallet, recipientAddress, totalAmount.toString());
 
       if (tx) {
         // console.log(tx);

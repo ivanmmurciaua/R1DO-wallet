@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Snackbar, Alert, CircularProgress } from "@mui/material";
 import { BuildingNotice } from "./BuildingNotice";
 import { UserMenu } from "./UserMenu";
-import { getAmountConfig } from "@/lib/localstorage";
+import { getDecimals } from "@/lib/localstorage";
 
 type props = {
   username: string;
@@ -45,7 +45,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
 
   useEffect(() => {
     //Get ⧫ config from LocalStorage
-    const dec = getAmountConfig();
+    const dec = getDecimals();
     setDecimals(dec);
   }, []);
 

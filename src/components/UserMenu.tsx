@@ -17,6 +17,7 @@ import { SendEth } from "./SendEth";
 import Popup from "./Popup";
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { getLastBlock } from "@/lib/client";
+import { getDecimals } from "@/lib/localstorage";
 
 type UserMenuProps = {
   wallet: Safe4337Pack;
@@ -106,13 +107,15 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
           (tx) => tx.type === "call",
         );
 
-        const amounts = filteredTransactions.map((tx) => parseInt(tx.value));
+        const amounts = filteredTransactions.map(
+          (tx) => parseInt(tx.value) / 10 ** getDecimals(),
+        );
         const maxAmount = Math.max(...amounts);
         const minAmount = Math.min(...amounts);
 
         const mappedTransactions: Transaction[] = filteredTransactions.map(
           (tx) => {
-            const amount = parseInt(tx.value);
+            const amount = parseInt(tx.value) / 10 ** getDecimals();
             // Calculate proportional intensity (20% to 100% range)
             const proportion =
               maxAmount > minAmount
