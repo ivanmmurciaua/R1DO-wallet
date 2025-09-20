@@ -33,14 +33,14 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
       return;
     }
 
+    //Convert to wei
+
     setIsLoading(true);
     console.log(`Sending ${amount} ⧫ to ${recipient}`);
 
     let recipientAddress = "";
 
     try {
-      //TODO: Implement search for username or fallback to address
-
       const onchainResponse = (await readFromSC(
         "getPasskey",
         generateFingerprint(recipient),

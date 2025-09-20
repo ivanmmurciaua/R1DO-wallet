@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Snackbar, Alert, CircularProgress } from "@mui/material";
 import { BuildingNotice } from "./BuildingNotice";
 import { UserMenu } from "./UserMenu";
+import { getAmountConfig } from "@/lib/localstorage";
 
 type props = {
   username: string;
@@ -11,8 +12,9 @@ type props = {
 };
 
 export default function AccountDetails({ username, wallet, address }: props) {
+  const [decimals, setDecimals] = useState<number>(15);
   const [isLoaded, setLoaded] = useState(false);
-  const [userBalance, setBalance] = useState<string>("0");
+  const [userBalance, setBalance] = useState<number>(0.0);
   const [showCopySuccess, setShowCopySuccess] = useState(false);
 
   useEffect(() => {
@@ -23,7 +25,9 @@ export default function AccountDetails({ username, wallet, address }: props) {
       try {
         const bal = await wallet.protocolKit.getBalance();
         if (!mounted) return;
-        setBalance(bal.toString());
+        setBalance(
+          parseFloat((parseInt(bal.toString()) / 10 ** decimals).toFixed(2)),
+        );
       } catch (err) {
         console.error("fetchBalance error", err);
       }
@@ -37,7 +41,13 @@ export default function AccountDetails({ username, wallet, address }: props) {
       mounted = false;
       clearInterval(id);
     };
-  }, [wallet, address, isLoaded]);
+  }, [wallet, isLoaded, decimals]);
+
+  useEffect(() => {
+    //Get ⧫ config from LocalStorage
+    const dec = getAmountConfig();
+    setDecimals(dec);
+  }, []);
 
   const handleCopyAddress = async () => {
     try {
@@ -61,7 +71,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
     }
   };
 
-  return isLoaded ? (
+  return isLoaded && decimals > 0 ? (
     <div>
       {/*<h2>👋 Welcome back {username}!</h2>*/}
       <div style={{ textAlign: "center" }}>
@@ -81,7 +91,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
         </h2>
         <br />
         <div style={{ marginTop: "11px" }}>
-          {parseFloat(userBalance) > 0 ? (
+          {userBalance > 0.0 ? (
             <div>
               <UserMenu wallet={wallet} />
             </div>

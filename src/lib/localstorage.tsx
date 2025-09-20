@@ -77,3 +77,13 @@ export const updateLocalData = (
 
   localStorage.setItem(LOCAL_WALLET_LIST, JSON.stringify(updatedWalletList));
 };
+
+export const getAmountConfig = (): number => {
+  const amountConfig = localStorage.getItem("LOCAL_AMOUNT_CONFIG");
+  if (!amountConfig) {
+    localStorage.setItem("LOCAL_AMOUNT_CONFIG", "15");
+    return 15;
+  }
+
+  return parseInt(amountConfig);
+};
