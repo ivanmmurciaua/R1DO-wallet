@@ -1,7 +1,8 @@
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { useEffect, useState } from "react";
 import { Snackbar, Alert, CircularProgress } from "@mui/material";
-import { BuildingNotice } from "./BuildingNotice";
+import { formatUnits } from "viem";
+import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
 import { getDecimals } from "@/lib/localstorage";
 
@@ -26,7 +27,11 @@ export default function AccountDetails({ username, wallet, address }: props) {
         const bal = await wallet.protocolKit.getBalance();
         if (!mounted) return;
         setBalance(
-          parseFloat((parseInt(bal.toString()) / 10 ** decimals).toFixed(2)),
+          parseFloat(
+            parseFloat(formatUnits(BigInt(bal.toString()), decimals)).toFixed(
+              2,
+            ),
+          ),
         );
       } catch (err) {
         console.error("fetchBalance error", err);
@@ -109,9 +114,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
           )}
         </div>
       </div>
-      <div>
-        <BuildingNotice />
-      </div>
+      <Settings />
 
       <Snackbar
         open={showCopySuccess}

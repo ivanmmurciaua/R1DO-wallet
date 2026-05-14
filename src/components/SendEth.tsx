@@ -6,7 +6,7 @@ import { makeTx } from "@/lib/deploy";
 import { generateFingerprint, readFromSC } from "@/lib/passkeys";
 import { PasskeyOnchainResponseType } from "@/types";
 import { getDecimals } from "@/lib/localstorage";
-// import { zeroAddress } from "viem";
+import { parseUnits, zeroAddress } from "viem";
 
 type SendEthProps = {
   wallet: Safe4337Pack;
@@ -25,13 +25,20 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
   };
 
   const handleSendTransaction = async () => {
-    const totalAmount = parseFloat(amount) * 10 ** getDecimals();
     if (
       !wallet ||
       !recipient.trim() ||
       !amount.trim() ||
       parseFloat(amount) <= 0
     ) {
+      return;
+    }
+
+    let totalAmount: bigint;
+    try {
+      totalAmount = parseUnits(amount, getDecimals());
+    } catch {
+      handleBackToMenu("Invalid amount.");
       return;
     }
 
@@ -46,16 +53,12 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
         generateFingerprint(recipient),
       )) as PasskeyOnchainResponseType;
 
-      if (onchainResponse) {
+      if (onchainResponse && onchainResponse.userAddress !== zeroAddress) {
         recipientAddress = onchainResponse.userAddress;
       } else {
-        //Fallback to user input
+        // Fallback to user input (username not registered onchain)
         recipientAddress = recipient;
       }
-
-      // console.log(wallet);
-      // console.log(recipientAddress);
-      // console.log(totalAmount);
 
       const tx = await makeTx(wallet, recipientAddress, totalAmount.toString());
 
@@ -80,7 +83,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
       <Stack
         spacing={1.7}
         direction="column"
-        sx={{ width: "100%", maxWidth: 400, mx: "auto", mb: -25 }}
+        sx={{ width: "100%", maxWidth: 400, mx: "auto" }}
       >
         {/*
         <Box sx={{ display: "flex", alignItems: "center", mb: 1 }}>
@@ -108,15 +111,24 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
             type="text"
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
-            placeholder="Enter username or wallet address"
+            placeholder="_ username or 0x address"
             style={{
               fontSize: "1rem",
-              borderRadius: "4px",
-              border: "1px solid #555",
+              fontFamily: "var(--font-geist-mono), monospace",
+              borderRadius: "2px",
+              border: "1px solid currentColor",
+              background: "transparent",
+              color: "inherit",
               width: "100%",
-              padding: "11px",
+              padding: "12px 14px",
               boxSizing: "border-box",
+              outline: "none",
+              letterSpacing: "0.04em",
+              opacity: 0.7,
+              transition: "opacity 0.15s",
             }}
+            onFocus={(e) => (e.target.style.opacity = "1")}
+            onBlur={(e) => (e.target.style.opacity = "0.7")}
           />
         </Box>
 
@@ -134,12 +146,21 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
             step="0.01"
             style={{
               fontSize: "1rem",
-              borderRadius: "4px",
-              border: "1px solid #555",
+              fontFamily: "var(--font-geist-mono), monospace",
+              borderRadius: "2px",
+              border: "1px solid currentColor",
+              background: "transparent",
+              color: "inherit",
               width: "100%",
-              padding: "11px",
+              padding: "12px 14px",
               boxSizing: "border-box",
+              outline: "none",
+              letterSpacing: "0.04em",
+              opacity: 0.7,
+              transition: "opacity 0.15s",
             }}
+            onFocus={(e) => (e.target.style.opacity = "1")}
+            onBlur={(e) => (e.target.style.opacity = "0.7")}
           />
         </Box>
 

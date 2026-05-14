@@ -16,9 +16,10 @@ import { LocalStorageData } from "@/types";
 
 type props = {
   createOrLoad: (username: string, external: boolean) => object;
+  isRestoring?: boolean;
 };
 
-export default function LoginWithPasskey({ createOrLoad }: props) {
+export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: props) {
   const hasAutoLoaded = useRef(false);
   const [wallets, setWallets] = useState<LocalStorageData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,7 +51,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
 
   const open = Boolean(anchorEl);
 
-  return wallets.length === 0 && !loading ? (
+  return wallets.length === 0 && !loading && !isRestoring ? (
     <div>
       <Stack
         spacing={2}
@@ -70,15 +71,31 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           onChange={(e) => setUsername(e.target.value)}
           value={username}
           required
-          placeholder="Type your username"
+          placeholder="_ type your username"
           style={{
-            fontSize: "1.2em",
-            borderRadius: "4px",
-            border: "1px solid #555",
+            fontSize: "1rem",
+            fontFamily: "var(--font-geist-mono), monospace",
+            borderRadius: "2px",
+            border: "1px solid currentColor",
+            background: "transparent",
+            color: "inherit",
             width: "100%",
-            padding: "7px",
+            padding: "12px 14px",
+            outline: "none",
+            boxSizing: "border-box",
+            letterSpacing: "0.04em",
+            opacity: 0.7,
+            transition: "opacity 0.15s",
           }}
-        ></input>
+          onFocus={(e) => {
+            e.target.style.borderColor = "currentColor";
+            e.target.style.opacity = "1";
+          }}
+          onBlur={(e) => {
+            e.target.style.borderColor = "currentColor";
+            e.target.style.opacity = "0.7";
+          }}
+        />
 
         <Box>
           <Box display="flex" alignItems="center" mb={-0.3}>
@@ -128,11 +145,17 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
               onChange={(e) => setExternal(e.target.value === "external")}
               style={{
                 width: "100%",
-                padding: "7px",
-                border: "1px solid #555",
-                borderRadius: "4px",
-                fontSize: "16px",
+                padding: "12px 14px",
+                border: "1px solid currentColor",
+                borderRadius: "2px",
+                fontSize: "1rem",
+                fontFamily: "var(--font-geist-mono), monospace",
                 cursor: "pointer",
+                background: "transparent",
+                color: "inherit",
+                outline: "none",
+                letterSpacing: "0.04em",
+                opacity: 0.7,
               }}
             >
               <option value="local">On your device</option>
@@ -162,7 +185,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
     <div>
       <Stack>
         {/*loading || wallets.length < 2 ? (*/}
-        {loading ? (
+        {loading || isRestoring ? (
           <div style={{ textAlign: "center" }}>
             <Typography
               marginBottom={1}

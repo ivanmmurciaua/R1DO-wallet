@@ -24,15 +24,19 @@ import {
   setLocalData,
   updateLocalData,
 } from "@/lib/localstorage";
+import { LOCAL_LAST_USER } from "@/app/constants";
 import Popup from "@/components/Popup";
+import { useThemeMode } from "@/components/ThemeRegistry";
 
 export default function Home() {
+  const { isDark, toggleTheme } = useThemeMode();
   const [username, setUsername] = useState("");
   const [deployed, setDeployed] = useState(false);
   const [address, setAddress] = useState<Address | null>(null);
   const [userWallet, setWallet] = useState<Safe4337Pack | null>(null);
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
+  const [isRestoring, setIsRestoring] = useState(false);
   // const [recovery, setRecovery] = useState(false);
 
   // PWA install prompt state
@@ -94,6 +98,44 @@ export default function Home() {
     }
   }, [openPopup]);
 
+  // Persist active session so F5 restores it
+  useEffect(() => {
+    if (deployed && address && username) {
+      localStorage.setItem(LOCAL_LAST_USER, username);
+    }
+  }, [deployed, address, username]);
+
+  // Restore session on mount
+  const sessionRestored = useRef(false);
+  useEffect(() => {
+    if (sessionRestored.current) return;
+    sessionRestored.current = true;
+
+    const lastUser = localStorage.getItem(LOCAL_LAST_USER);
+    if (!lastUser) return;
+
+    const data = getLocalData(lastUser);
+    if (!data?.fingerprint || !data?.passkey?.rawId) {
+      localStorage.removeItem(LOCAL_LAST_USER);
+      return;
+    }
+
+    setIsRestoring(true);
+    handleWalletInit(data.passkey as PasskeyArgType, true)
+      .then(() => {
+        setUsername(lastUser);
+        setDeployed(true);
+        closePopup();
+      })
+      .catch((e: unknown) => {
+        console.error("[restore] error:", e);
+        localStorage.removeItem(LOCAL_LAST_USER);
+        closePopup();
+      })
+      .finally(() => setIsRestoring(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function handleStore(
     username: string,
     fingerprint: string,
@@ -129,8 +171,9 @@ export default function Home() {
 
   async function handleWalletInit(
     passkey: PasskeyArgType,
+    silent = false,
   ): Promise<Safe4337Pack> {
-    openPopup(`Loading your wallet`);
+    if (!silent) openPopup(`Loading your wallet`);
     const wallet = await safeClient(passkey);
     setWallet(wallet);
 
@@ -149,7 +192,11 @@ export default function Home() {
     const onchainPasskey = (await readFromSC(
       "getPasskey",
       fingerprint,
-    )) as PasskeyOnchainResponseType;
+    )) as PasskeyOnchainResponseType | null;
+
+    if (!onchainPasskey || !onchainPasskey.rawId) {
+      throw new Error("Could not read passkey from registry");
+    }
 
     const passkey = {
       rawId: onchainPasskey.rawId,
@@ -316,8 +363,8 @@ export default function Home() {
           const { passkey } = getLocalData(username)!;
           await handleWalletInit(passkey);
           closePopup();
-        } else {
         }
+        // overwrite === true: existsOnchain already loaded the wallet and closed the popup.
       } else {
         if (passkey) {
           // console.log("Not deployed");
@@ -358,8 +405,69 @@ export default function Home() {
     return response;
   }
 
+  function handleLogout() {
+    localStorage.removeItem(LOCAL_LAST_USER);
+    setUsername("");
+    setAddress(null);
+    setWallet(null);
+    setDeployed(false);
+    closePopup();
+  }
+
   return (
     <div className={styles.page}>
+      <button
+        onClick={toggleTheme}
+        title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+        style={{
+          position: "fixed",
+          top: 16,
+          right: 16,
+          zIndex: 999,
+          background: "transparent",
+          border: "1px solid currentColor",
+          color: isDark ? "#4a8f5c" : "#2d6a3f",
+          fontFamily: "var(--font-geist-mono), monospace",
+          fontSize: "0.75rem",
+          letterSpacing: "0.08em",
+          padding: "5px 10px",
+          cursor: "pointer",
+          opacity: 0.6,
+          transition: "opacity 0.15s",
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+        onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.6")}
+      >
+        {isDark ? "[LIGHT]" : "[DARK]"}
+      </button>
+
+      {deployed && address && (
+        <button
+          onClick={handleLogout}
+          title="Logout"
+          style={{
+            position: "fixed",
+            top: 16,
+            left: 16,
+            zIndex: 999,
+            background: "transparent",
+            border: "1px solid currentColor",
+            color: isDark ? "#4a8f5c" : "#2d6a3f",
+            fontFamily: "var(--font-geist-mono), monospace",
+            fontSize: "0.75rem",
+            letterSpacing: "0.08em",
+            padding: "5px 10px",
+            cursor: "pointer",
+            opacity: 0.6,
+            transition: "opacity 0.15s",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+          onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.6")}
+        >
+          [LOGOUT]
+        </button>
+      )}
+
       <main className={styles.main}>
         {/* Custom PWA Install Button */}
         {showInstall && (
@@ -399,7 +507,7 @@ export default function Home() {
             address={address}
           />
         ) : (
-          <LoginWithPasskey createOrLoad={createOrLoad} />
+          <LoginWithPasskey createOrLoad={createOrLoad} isRestoring={isRestoring} />
         )}
         {showPopup && popupMessage && <Popup popupMessage={popupMessage} />}
       </main>

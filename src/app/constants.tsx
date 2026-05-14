@@ -1,6 +1,7 @@
 import { Address } from "viem";
 
 export const LOCAL_WALLET_LIST = "SAFE_KEY_WALLET_LIST";
+export const LOCAL_LAST_USER = "SAFE_LAST_USER";
 export const RPC_URL = "https://sepolia-rollup.arbitrum.io/rpc";
 export const CHAIN_NAME = "arbitrum-sepolia";
 export const BUNDLER_URL = `https://api.pimlico.io/v1/${CHAIN_NAME}/rpc?add_balance_override&apikey=${process.env.NEXT_PUBLIC_PIMLICO_API_KEY}`;

@@ -16,6 +16,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import { SendEth } from "./SendEth";
 import Popup from "./Popup";
 import { Safe4337Pack } from "@safe-global/relay-kit";
+import { formatUnits } from "viem";
 import { getLastBlock } from "@/lib/client";
 import { getDecimals } from "@/lib/localstorage";
 
@@ -75,12 +76,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
     setCurrentView("sendEth");
   };
 
-  const handleEarnMoreEth = () => {
-    // TODO: Implement
-    handleShowPopup("Easy there, cowboy—this'll be implemented soon 🐴");
-  };
-
-  const handleBackToMenu = (message: string = "") => {
+const handleBackToMenu = (message: string = "") => {
     if (message !== "") {
       handleShowPopup(message);
     }
@@ -102,20 +98,21 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
 
       if (data.status === "1" && data.result) {
         const userAddress = address.toLowerCase();
+        const decimals = getDecimals();
 
         const filteredTransactions = data.result.filter(
           (tx) => tx.type === "call",
         );
 
-        const amounts = filteredTransactions.map(
-          (tx) => parseInt(tx.value) / 10 ** getDecimals(),
+        const amounts = filteredTransactions.map((tx) =>
+          parseFloat(formatUnits(BigInt(tx.value), decimals)),
         );
         const maxAmount = Math.max(...amounts);
         const minAmount = Math.min(...amounts);
 
         const mappedTransactions: Transaction[] = filteredTransactions.map(
           (tx) => {
-            const amount = parseInt(tx.value) / 10 ** getDecimals();
+            const amount = parseFloat(formatUnits(BigInt(tx.value), decimals));
             // Calculate proportional intensity (20% to 100% range)
             const proportion =
               maxAmount > minAmount
@@ -157,7 +154,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
   }
 
   return (
-    <Box sx={{ mt: 2, mb: -25 }}>
+    <Box sx={{ mt: 2 }}>
       <Stack
         spacing={2}
         direction="column"
@@ -176,18 +173,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
           Send ⧫ to your friends
         </Button>
 
-        <Button
-          variant="contained"
-          color="secondary"
-          onClick={handleEarnMoreEth}
-          sx={{
-            py: 1.5,
-            fontSize: "1rem",
-            borderRadius: 2,
-          }}
-        >
-          Put yours ⧫ to work
-        </Button>
+        {/* Put yours ⧫ to work — hidden until implemented */}
 
         <div>
           <Box

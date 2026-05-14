@@ -3,6 +3,24 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { encodeFunctionData } from "viem";
 import { log } from "./common";
 
+// Bundler receipt polling: 30 attempts * 2s = 60s timeout
+const RECEIPT_POLL_INTERVAL_MS = 2000;
+const RECEIPT_POLL_MAX_ATTEMPTS = 30;
+
+const waitForUserOpReceipt = async (
+  wallet: Safe4337Pack,
+  userOperationHash: string,
+) => {
+  for (let i = 0; i < RECEIPT_POLL_MAX_ATTEMPTS; i++) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, RECEIPT_POLL_INTERVAL_MS),
+    );
+    const receipt = await wallet.getUserOperationReceipt(userOperationHash);
+    if (receipt) return receipt;
+  }
+  throw new Error("Timed out waiting for user operation receipt");
+};
+
 /**
  * Send 0 to Zero Address.
  * @param {Safe4337Pack} wallet - Wallet built by Safe client.
@@ -38,12 +56,13 @@ export const makeTx = async (
         executable: signedSafeOperation,
       });
 
-      let userOperationReceipt = null;
+      const userOperationReceipt = await waitForUserOpReceipt(
+        wallet,
+        userOperationHash,
+      );
 
-      while (!userOperationReceipt) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        userOperationReceipt =
-          await wallet.getUserOperationReceipt(userOperationHash);
+      if (!userOperationReceipt.success) {
+        throw new Error("Transaction reverted on-chain");
       }
 
       return userOperationReceipt.receipt.transactionHash;
@@ -87,13 +106,10 @@ export const registerPasskey = async (
         executable: signedSafeOperation,
       });
 
-      let userOperationReceipt = null;
+      const receipt = await waitForUserOpReceipt(wallet, userOperationHash);
 
-      while (!userOperationReceipt) {
-        // Wait 2 seconds before checking the status again
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        userOperationReceipt =
-          await wallet.getUserOperationReceipt(userOperationHash);
+      if (!receipt.success) {
+        throw new Error("Passkey registration transaction reverted");
       }
 
       return userOperationHash;
