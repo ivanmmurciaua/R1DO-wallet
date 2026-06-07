@@ -1,15 +1,56 @@
 "use client";
 import { useState } from "react";
 import SettingsIcon from "@mui/icons-material/Settings";
-import { IconButton, Paper } from "@mui/material";
+import { IconButton, Paper, TextField } from "@mui/material";
+import {
+  getSymbol,
+  setSymbolConfig,
+  getDecimals,
+  setDecimalsConfig,
+  DEFAULT_SYMBOL,
+  DEFAULT_DECIMALS,
+} from "@/lib/localstorage";
+
+const inputSx = {
+  "& .MuiInputBase-input": {
+    fontFamily: "var(--font-geist-mono), monospace",
+    fontSize: "0.85rem",
+  },
+  "& .MuiInputLabel-root": {
+    fontFamily: "var(--font-geist-mono), monospace",
+    fontSize: "0.75rem",
+  },
+};
 
 export function Settings() {
   const [open, setOpen] = useState(false);
+  const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
+  const [decimals, setDecimals] = useState(DEFAULT_DECIMALS);
+
+  const handleOpen = () => {
+    setSymbol(getSymbol());
+    setDecimals(getDecimals());
+    setOpen(true);
+  };
+
+  const handleSymbolChange = (value: string) => {
+    const trimmed = value.slice(0, 7);
+    setSymbol(trimmed);
+    setSymbolConfig(trimmed || DEFAULT_SYMBOL);
+  };
+
+  const handleDecimalsChange = (value: string) => {
+    const parsed = parseInt(value);
+    if (Number.isNaN(parsed)) return;
+    const clamped = Math.min(Math.max(parsed, 0), 18);
+    setDecimals(clamped);
+    setDecimalsConfig(clamped);
+  };
 
   return (
     <>
       <IconButton
-        onClick={() => setOpen(true)}
+        onClick={handleOpen}
         title="Settings"
         size="small"
         sx={{
@@ -59,8 +100,32 @@ export function Settings() {
             </p>
 
             <div>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px" }}>
+                Unit display
+              </p>
+              <div style={{ display: "flex", gap: "0.8rem" }}>
+                <TextField
+                  label="Symbol"
+                  size="small"
+                  value={symbol}
+                  onChange={(e) => handleSymbolChange(e.target.value)}
+                  sx={{ ...inputSx, width: 110 }}
+                />
+                <TextField
+                  label="Decimals"
+                  size="small"
+                  type="number"
+                  value={decimals}
+                  onChange={(e) => handleDecimalsChange(e.target.value)}
+                  inputProps={{ min: 0, max: 18 }}
+                  sx={{ ...inputSx, width: 110 }}
+                />
+              </div>
+            </div>
+
+            <div>
               <p style={{ fontSize: "0.8rem" }}>
-                Feel free to contact me if you have any feedback:
+                Feel free to contact me if you have any question or feedback:
               </p>
               <a
                 href="https://t.me/Ivanovish10"
@@ -97,10 +162,6 @@ export function Settings() {
                 Telegram
               </a>
             </div>
-
-            <p style={{ fontSize: "0.78rem" }}>
-              Thx for testing it ❤️
-            </p>
 
             <button
               onClick={() => setOpen(false)}

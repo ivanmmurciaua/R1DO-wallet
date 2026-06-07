@@ -1,10 +1,11 @@
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { useEffect, useState } from "react";
 import { Snackbar, Alert, CircularProgress } from "@mui/material";
-import { formatUnits } from "viem";
+import { formatUnits, createPublicClient, http } from "viem";
+import { sepolia } from "viem/chains";
 import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
-import { getDecimals } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getLocalData, getStealthUTXOs } from "@/lib/localstorage";
 
 type props = {
   username: string;
@@ -12,11 +13,28 @@ type props = {
   address: string;
 };
 
+const COMPACT_BALANCE_THRESHOLD = 100_000;
+const compactFormatter = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 2 });
+
+const formatBalance = (value: number): string => {
+  if (Math.abs(value) >= COMPACT_BALANCE_THRESHOLD) {
+    return compactFormatter.format(value);
+  }
+  return parseFloat(value.toFixed(4)).toString();
+};
+
 export default function AccountDetails({ username, wallet, address }: props) {
   const [decimals, setDecimals] = useState<number>(15);
+  const [symbol, setSymbol] = useState<string>("⧫");
   const [isLoaded, setLoaded] = useState(false);
   const [userBalance, setBalance] = useState<number>(0.0);
+  const [stealthTotal, setStealthTotal] = useState<number>(0.0);
   const [showCopySuccess, setShowCopySuccess] = useState(false);
+  const [copyWarning, setCopyWarning] = useState(false);
+
+  const privacy = getLocalData(username)?.privacy ?? false;
+
+  const publicClient = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
 
   useEffect(() => {
     if (!wallet) return;
@@ -49,18 +67,45 @@ export default function AccountDetails({ username, wallet, address }: props) {
   }, [wallet, isLoaded, decimals]);
 
   useEffect(() => {
-    //Get ⧫ config from LocalStorage
-    const dec = getDecimals();
-    setDecimals(dec);
+    setDecimals(getDecimals());
+    setSymbol(getSymbol());
   }, []);
 
+  useEffect(() => {
+    if (!privacy) return;
+    let mounted = true;
+
+    const fetchStealthBalances = async () => {
+      const utxos = getStealthUTXOs(username);
+      if (utxos.length === 0) return;
+
+      const balances = await Promise.all(
+        utxos.map(async (utxo) => {
+          const raw = await publicClient.getBalance({ address: utxo.stealthAddress });
+          return parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4));
+        }),
+      );
+
+      if (!mounted) return;
+      setStealthTotal(balances.reduce((sum, b) => sum + b, 0));
+    };
+
+    fetchStealthBalances();
+    const id = setInterval(fetchStealthBalances, 15000);
+    return () => { mounted = false; clearInterval(id); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [privacy, username, decimals]);
+
   const handleCopyAddress = async () => {
+    if (privacy) {
+      setCopyWarning(true);
+      return;
+    }
     try {
       await navigator.clipboard.writeText(address);
       setShowCopySuccess(true);
     } catch (err) {
-      console.error("Failed to copy address:", err);
-      // Fallback for older browsers
+      console.error("Failed to copy:", err);
       const textArea = document.createElement("textarea");
       textArea.value = address;
       document.body.appendChild(textArea);
@@ -69,9 +114,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
       try {
         document.execCommand("copy");
         setShowCopySuccess(true);
-      } catch (fallbackErr) {
-        console.error("Fallback copy failed:", fallbackErr);
-      }
+      } catch { /* ignore */ }
       document.body.removeChild(textArea);
     }
   };
@@ -90,26 +133,48 @@ export default function AccountDetails({ username, wallet, address }: props) {
           onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.95)")}
           onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
           onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
-          title="Click to copy address"
+          title={
+            Math.abs(userBalance + stealthTotal) >= COMPACT_BALANCE_THRESHOLD
+              ? `${(userBalance + stealthTotal).toFixed(4)} ${symbol} — click to copy address`
+              : "Click to copy address"
+          }
         >
-          {userBalance} ⧫
+          {formatBalance(userBalance + stealthTotal)} {symbol}
         </h2>
         <br />
         <div style={{ marginTop: "11px" }}>
-          {userBalance > 0.0 ? (
+          {userBalance + stealthTotal > 0.0 ? (
             <div>
-              <UserMenu wallet={wallet} />
+              <UserMenu wallet={wallet} username={username} balance={userBalance + stealthTotal} />
             </div>
           ) : (
-            <div style={{ marginBottom: "-25px" }}>
-              <p>
-                Ow... you don`t have any ⧫... so sad :( <br />
-                <br />
-                Ask a few friends to send you some using your username:{" "}
+            <div
+              style={{
+                fontFamily: "var(--font-geist-mono), monospace",
+                fontSize: "0.8rem",
+                lineHeight: 1.7,
+                opacity: 0.75,
+                maxWidth: 320,
+                margin: "0 auto",
+              }}
+            >
+              <p style={{ letterSpacing: "0.04em" }}>No balance yet.</p>
+              <p style={{ marginTop: "1rem" }}>Share your username to receive {symbol}:</p>
+              <p
+                style={{
+                  marginTop: "0.5rem",
+                  border: "1px solid currentColor",
+                  borderRadius: "2px",
+                  padding: "6px 12px",
+                  display: "inline-block",
+                  letterSpacing: "0.06em",
+                }}
+              >
                 {username}
               </p>
-              <br />
-              <p>or your address by clicking your balance</p>
+              <p style={{ marginTop: "1rem", fontSize: "0.72rem", opacity: 0.7 }}>
+                or your address — tap your balance above
+              </p>
             </div>
           )}
         </div>
@@ -122,12 +187,23 @@ export default function AccountDetails({ username, wallet, address }: props) {
         onClose={() => setShowCopySuccess(false)}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <Alert
-          onClose={() => setShowCopySuccess(false)}
-          severity="success"
-          variant="filled"
-        >
+        <Alert onClose={() => setShowCopySuccess(false)} severity="success" variant="filled">
           Address copied to clipboard!
+        </Alert>
+      </Snackbar>
+
+      <Snackbar
+        open={copyWarning}
+        onClose={(_e, reason) => { if (reason === "clickaway") return; }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert
+          onClose={() => setCopyWarning(false)}
+          severity="error"
+          variant="filled"
+          sx={{ backgroundColor: "#c0392b" }}
+        >
+          Copying your <strong>public</strong> address is disabled in privacy mode — sharing it would let others trace your on-chain activity.
         </Alert>
       </Snackbar>
     </div>

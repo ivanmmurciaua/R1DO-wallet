@@ -1,36 +1,91 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Box, Button, Stack, Typography } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
 import { Safe4337Pack } from "@safe-global/relay-kit";
-import { makeTx } from "@/lib/deploy";
+import { smartSend } from "@/lib/deploy";
 import { generateFingerprint, readFromSC } from "@/lib/passkeys";
 import { PasskeyOnchainResponseType } from "@/types";
-import { getDecimals } from "@/lib/localstorage";
-import { parseUnits, zeroAddress } from "viem";
+import { getDecimals, getSymbol } from "@/lib/localstorage";
+import { parseUnits, formatUnits, zeroAddress } from "viem";
+import { getStealthMetaAddress } from "@/lib/stealth";
 
 type SendEthProps = {
   wallet: Safe4337Pack;
+  username: string;
+  balance: number;
   onBack: (message: string) => void;
 };
 
-export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
+type PrivacyStatus = "unknown" | "checking" | "private" | "public";
+
+export const SendEth: React.FC<SendEthProps> = ({ wallet, username, balance, onBack }) => {
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [privacyStatus, setPrivacyStatus] = useState<PrivacyStatus>("unknown");
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const symbol = getSymbol();
 
   const handleBackToMenu = (message: string = "") => {
     setRecipient("");
     setAmount("");
+    setPrivacyStatus("unknown");
     onBack(message);
   };
 
+  // Resolve recipient to Safe address
+  const resolveRecipient = async (input: string): Promise<string | null> => {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+
+    if (trimmed.startsWith("0x") && trimmed.length === 42) {
+      return trimmed;
+    }
+
+    const onchainResponse = (await readFromSC(
+      "getPasskey",
+      generateFingerprint(trimmed),
+    )) as PasskeyOnchainResponseType;
+
+    if (onchainResponse && onchainResponse.safeAddress !== zeroAddress) {
+      return onchainResponse.safeAddress;
+    }
+    if (onchainResponse && onchainResponse.userAddress !== zeroAddress) {
+      return onchainResponse.userAddress;
+    }
+    return null;
+  };
+
+  // Check privacy status after user stops typing
+  useEffect(() => {
+    if (!recipient.trim()) {
+      setPrivacyStatus("unknown");
+      return;
+    }
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(async () => {
+      setPrivacyStatus("checking");
+      try {
+        const addr = await resolveRecipient(recipient);
+        if (!addr) { setPrivacyStatus("public"); return; }
+        const meta = await getStealthMetaAddress(addr);
+        setPrivacyStatus(meta ? "private" : "public");
+      } catch {
+        setPrivacyStatus("public");
+      }
+    }, 600);
+
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recipient]);
+
   const handleSendTransaction = async () => {
-    if (
-      !wallet ||
-      !recipient.trim() ||
-      !amount.trim() ||
-      parseFloat(amount) <= 0
-    ) {
+    if (!wallet || !recipient.trim() || !amount.trim() || parseFloat(amount) <= 0) return;
+
+    if (parseFloat(amount) > balance) {
+      handleBackToMenu(`Amount exceeds your balance (${balance} ${symbol}).`);
       return;
     }
 
@@ -43,36 +98,36 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
     }
 
     setIsLoading(true);
-    console.log(`Sending ${amount} ⧫ to ${recipient}`);
-
-    let recipientAddress = "";
+    console.log(`[SendEth] Sending ${amount} ${symbol} to ${recipient} | privacy: ${privacyStatus}`);
 
     try {
-      const onchainResponse = (await readFromSC(
-        "getPasskey",
-        generateFingerprint(recipient),
-      )) as PasskeyOnchainResponseType;
-
-      if (onchainResponse && onchainResponse.userAddress !== zeroAddress) {
-        recipientAddress = onchainResponse.userAddress;
-      } else {
-        // Fallback to user input (username not registered onchain)
-        recipientAddress = recipient;
+      const recipientAddress = await resolveRecipient(recipient);
+      if (!recipientAddress) {
+        handleBackToMenu("Recipient not found.");
+        return;
       }
 
-      const tx = await makeTx(wallet, recipientAddress, totalAmount.toString());
+      const metaAddress = privacyStatus === "private" ? await getStealthMetaAddress(recipientAddress) : null;
 
-      if (tx) {
-        // console.log(tx);
-        handleBackToMenu(`Successfully sent ${amount} ⧫ to ${recipient}`);
+      const result = await smartSend(
+        wallet,
+        recipientAddress as `0x${string}`,
+        totalAmount,
+        username,
+        metaAddress,
+      );
+
+      if (result.success) {
+        handleBackToMenu(`Sent ${amount} ${symbol}${metaAddress ? " privately" : ""} to ${recipient}`);
+      } else if (result.sentAmount > 0n) {
+        const sentFormatted = formatUnits(result.sentAmount, getDecimals());
+        handleBackToMenu(`Sent ${sentFormatted} of ${amount} ${symbol} to ${recipient} — try again to send the rest.`);
       } else {
-        handleBackToMenu(
-          `Failed to send ${amount} ⧫ to ${recipient}. Try again later`,
-        );
+        handleBackToMenu(result.error ?? `Failed to send ${amount} ${symbol} to ${recipient}. Try again later`);
       }
     } catch (error) {
       console.error("Send transaction error:", error);
-      handleBackToMenu("Failed to send ⧫. Please try again.");
+      handleBackToMenu(`Failed to send ${symbol}. Please try again.`);
     } finally {
       setIsLoading(false);
     }
@@ -85,23 +140,6 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
         direction="column"
         sx={{ width: "100%", maxWidth: 400, mx: "auto" }}
       >
-        {/*
-        <Box sx={{ display: "flex", alignItems: "center", mb: 1 }}>
-          <IconButton
-            onClick={handleBackToMenu}
-            sx={{ mr: 1 }}
-            aria-label="Back to menu"
-          >
-            <ArrowBackIcon />
-          </IconButton>
-          <Typography
-            variant="h6"
-            sx={{ flexGrow: 1, textAlign: "center", mr: 5 }}
-          >
-            Send
-          </Typography>
-        </Box>*/}
-
         {/* Recipient input */}
         <Box>
           <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
@@ -135,7 +173,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
         {/* Amount input */}
         <Box>
           <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
-            Amount (⧫)
+            Amount ({symbol})
           </Typography>
           <input
             type="number"
@@ -170,15 +208,14 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
           color="primary"
           startIcon={<SendIcon />}
           onClick={handleSendTransaction}
-          disabled={isLoading || !recipient.trim() || !amount.trim()}
-          sx={{
-            py: 1.5,
-            fontSize: "1rem",
-            borderRadius: 2,
-            mt: 3,
-          }}
+          disabled={isLoading || !recipient.trim() || !amount.trim() || privacyStatus === "checking"}
+          sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 3 }}
         >
-          {isLoading ? "Sending..." : `Send ${amount || "0"} ⧫`}
+          {isLoading
+            ? "Sending..."
+            : privacyStatus === "private"
+              ? `Send ${amount || "0"} ${symbol} privately`
+              : `Send ${amount || "0"} ${symbol}`}
         </Button>
 
         {/* Cancel button */}
@@ -186,10 +223,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, onBack }) => {
           variant="text"
           color="secondary"
           onClick={() => handleBackToMenu()}
-          sx={{
-            py: 1,
-            fontSize: "0.9rem",
-          }}
+          sx={{ py: 1, fontSize: "0.9rem" }}
         >
           Cancel
         </Button>

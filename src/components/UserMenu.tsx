@@ -14,21 +14,28 @@ import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { SendEth } from "./SendEth";
+import { SpendStealthUTXO } from "./SpendStealthUTXO";
 import Popup from "./Popup";
 import { Safe4337Pack } from "@safe-global/relay-kit";
-import { formatUnits } from "viem";
+import { formatUnits, createPublicClient, http } from "viem";
+import { sepolia } from "viem/chains";
 import { getLastBlock } from "@/lib/client";
-import { getDecimals } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getStealthUTXOs, getLocalData, saveStealthScan, getLastScannedBlock } from "@/lib/localstorage";
+import { loadFromDevice } from "@/lib/passkeys";
+import { derivePQKeysFromPRF, scanAnnouncements, type StealthUTXO } from "@/lib/stealth";
 
 type UserMenuProps = {
   wallet: Safe4337Pack;
+  username: string;
+  balance: number;
 };
 
 type Transaction = {
   id: string;
-  type: "sent" | "received";
+  type: "sent" | "received" | "private";
   amount: number;
   proportion?: number;
+  stealthAddress?: string;
 };
 
 type EtherscanTransaction = {
@@ -54,12 +61,15 @@ type EtherscanResponse = {
   result: EtherscanTransaction[];
 };
 
-export const UserMenu: React.FC<UserMenuProps> = ({ wallet }) => {
+export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance }) => {
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
-  const [currentView, setCurrentView] = useState<"menu" | "sendEth">("menu");
+  const [currentView, setCurrentView] = useState<"menu" | "sendEth" | "spendUtxo">("menu");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [stealthTxs, setStealthTxs] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
+  const [selectedUtxo, setSelectedUtxo] = useState<StealthUTXO | null>(null);
+  const [selectedBalance, setSelectedBalance] = useState<number>(0);
 
   const handleShowPopup = (message: string) => {
     setShowPopup(true);
@@ -83,7 +93,20 @@ const handleBackToMenu = (message: string = "") => {
     setCurrentView("menu");
   };
 
+  const handleOpenSpend = (transaction: Transaction) => {
+    if (transaction.type !== "private" || !transaction.stealthAddress) return;
+    const utxo = getStealthUTXOs(username).find((u) => u.stealthAddress === transaction.stealthAddress);
+    if (!utxo) return;
+    setSelectedUtxo(utxo);
+    setSelectedBalance(transaction.amount);
+    setCurrentView("spendUtxo");
+  };
+
+  const privacy = getLocalData(username)?.privacy ?? false;
+  const symbol = getSymbol();
+
   const fetchTransactions = useCallback(async () => {
+    if (privacy) return; // private wallet — no Etherscan
     setLoading(true);
     try {
       const address = await wallet.protocolKit.getAddress();
@@ -91,7 +114,7 @@ const handleBackToMenu = (message: string = "") => {
       const block = await getLastBlock();
 
       const response = await fetch(
-        `https://api.etherscan.io/v2/api?chainid=421614&module=account&action=txlistinternal&address=${address}&startblock=0&endblock=${block}&page=1&offset=10&sort=desc&apikey=${apiKey}`,
+        `https://api.etherscan.io/v2/api?chainid=11155111&module=account&action=txlistinternal&address=${address}&startblock=0&endblock=${block}&page=1&offset=10&sort=desc&apikey=${apiKey}`,
       );
 
       const data: EtherscanResponse = await response.json();
@@ -99,58 +122,122 @@ const handleBackToMenu = (message: string = "") => {
       if (data.status === "1" && data.result) {
         const userAddress = address.toLowerCase();
         const decimals = getDecimals();
-
-        const filteredTransactions = data.result.filter(
-          (tx) => tx.type === "call",
-        );
-
-        const amounts = filteredTransactions.map((tx) =>
-          parseFloat(formatUnits(BigInt(tx.value), decimals)),
-        );
+        const filteredTransactions = data.result.filter((tx) => tx.type === "call");
+        const amounts = filteredTransactions.map((tx) => parseFloat(formatUnits(BigInt(tx.value), decimals)));
         const maxAmount = Math.max(...amounts);
         const minAmount = Math.min(...amounts);
 
-        const mappedTransactions: Transaction[] = filteredTransactions.map(
-          (tx) => {
-            const amount = parseFloat(formatUnits(BigInt(tx.value), decimals));
-            // Calculate proportional intensity (20% to 100% range)
-            const proportion =
-              maxAmount > minAmount
-                ? 0.2 + (0.8 * (amount - minAmount)) / (maxAmount - minAmount)
-                : 1;
-
-            return {
-              id: tx.hash,
-              type: tx.from.toLowerCase() === userAddress ? "sent" : "received",
-              amount: amount,
-              proportion: proportion,
-            };
-          },
-        );
-
-        setTransactions(mappedTransactions);
+        setTransactions(filteredTransactions.map((tx) => {
+          const amount = parseFloat(formatUnits(BigInt(tx.value), decimals));
+          const proportion = maxAmount > minAmount
+            ? 0.2 + (0.8 * (amount - minAmount)) / (maxAmount - minAmount)
+            : 1;
+          return {
+            id: tx.hash,
+            type: tx.from.toLowerCase() === userAddress ? "sent" : "received",
+            amount,
+            proportion,
+          };
+        }));
       }
     } catch (error) {
       console.error("Error fetching transactions:", error);
     } finally {
       setLoading(false);
     }
-  }, [wallet]);
+  }, [wallet, privacy]);
 
   useEffect(() => {
     if (wallet) {
       fetchTransactions();
-
-      const interval = setInterval(() => {
-        fetchTransactions();
-      }, 90000);
-
+      const interval = setInterval(fetchTransactions, 90000);
       return () => clearInterval(interval);
     }
   }, [wallet, fetchTransactions]);
 
+  const fetchStealthBalances = useCallback(async () => {
+    const utxos = getStealthUTXOs(username);
+    if (utxos.length === 0) return;
+    const decimals = getDecimals();
+    const pub = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
+    const results = await Promise.all(
+      utxos.map(async (utxo) => {
+        const raw = await pub.getBalance({ address: utxo.stealthAddress });
+        return {
+          id: utxo.stealthAddress,
+          type: "private" as const,
+          amount: parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4)),
+          stealthAddress: utxo.stealthAddress,
+        };
+      }),
+    );
+    setStealthTxs(results.filter((tx) => tx.amount > 0));
+  }, [username]);
+
+  const handleBackFromSpend = (message: string = "") => {
+    setSelectedUtxo(null);
+    handleBackToMenu(message);
+    fetchStealthBalances();
+  };
+
+  const refreshPrivate = useCallback(async () => {
+    const data = getLocalData(username);
+    if (!data?.passkey?.rawId) return;
+    setLoading(true);
+    try {
+      const prf = await loadFromDevice(data.passkey.rawId);
+      if (!prf || prf.length === 0) {
+        await fetchStealthBalances();
+        return;
+      }
+      const keys = await derivePQKeysFromPRF(prf);
+      const lastBlock = getLastScannedBlock(username);
+      const pub = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
+      const fromBlock = lastBlock ?? (await pub.getBlockNumber() - 21600n);
+      const { utxos: newUtxos, latestBlock } = await scanAnnouncements(
+        keys.spendingPrivateKey,
+        keys.viewingPrivateKey,
+        keys.mlkemDecapsKey,
+        fromBlock,
+      );
+      const existing = getStealthUTXOs(username);
+      const merged = [
+        ...existing,
+        ...newUtxos.filter(u => !existing.some(e => e.stealthAddress === u.stealthAddress)),
+      ];
+      saveStealthScan(username, merged, latestBlock);
+      await fetchStealthBalances();
+    } catch (e) {
+      console.error("[refreshPrivate] error:", e);
+      await fetchStealthBalances();
+    } finally {
+      setLoading(false);
+    }
+  }, [username, fetchStealthBalances]);
+
+  useEffect(() => {
+    if (!privacy) return;
+    fetchStealthBalances();
+    // The login-time scan (runStealthScan) writes new UTXOs to localStorage in
+    // the background — poll so the list picks them up once it lands, instead
+    // of staying frozen at whatever was there when this component mounted.
+    const id = setInterval(fetchStealthBalances, 15000);
+    return () => clearInterval(id);
+  }, [privacy, fetchStealthBalances]);
+
   if (currentView === "sendEth") {
-    return <SendEth wallet={wallet} onBack={handleBackToMenu} />;
+    return <SendEth wallet={wallet} username={username} balance={balance} onBack={handleBackToMenu} />;
+  }
+
+  if (currentView === "spendUtxo" && selectedUtxo) {
+    return (
+      <SpendStealthUTXO
+        utxo={selectedUtxo}
+        balance={selectedBalance}
+        username={username}
+        onBack={handleBackFromSpend}
+      />
+    );
   }
 
   return (
@@ -170,10 +257,10 @@ const handleBackToMenu = (message: string = "") => {
             borderRadius: 2,
           }}
         >
-          Send ⧫ to your friends
+          Send {symbol} to your friends
         </Button>
 
-        {/* Put yours ⧫ to work — hidden until implemented */}
+        {/* Put yours {symbol} to work — hidden until implemented */}
 
         <div>
           <Box
@@ -194,12 +281,10 @@ const handleBackToMenu = (message: string = "") => {
               Recent Transactions
             </Typography>
             <IconButton
-              onClick={fetchTransactions}
+              onClick={privacy ? refreshPrivate : fetchTransactions}
               disabled={loading}
               size="small"
-              sx={{
-                color: "primary.main",
-              }}
+              sx={{ color: "primary.main" }}
             >
               <RefreshIcon fontSize="small" />
             </IconButton>
@@ -225,79 +310,77 @@ const handleBackToMenu = (message: string = "") => {
                 >
                   <CircularProgress size={24} />
                 </Box>
-              ) : transactions.length === 0 ? (
-                <Box
-                  sx={{
-                    display: "flex",
-                    justifyContent: "center",
-                    p: 4,
-                  }}
-                >
+              ) : (privacy ? stealthTxs : transactions).length === 0 ? (
+                <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}>
                   <Typography variant="body2" color="text.secondary">
                     No transactions found
                   </Typography>
                 </Box>
               ) : (
-                transactions.map((transaction) => (
+                (privacy ? stealthTxs : transactions).map((transaction) => (
                   <ListItem
                     key={transaction.id}
-                    component="a"
-                    href={`https://sepolia.arbiscan.io/tx/${transaction.id}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                    component={transaction.type !== "private" ? "a" : "div"}
+                    href={transaction.type !== "private" ? `https://sepolia.etherscan.io/tx/${transaction.id}` : undefined}
+                    target={transaction.type !== "private" ? "_blank" : undefined}
+                    rel={transaction.type !== "private" ? "noopener noreferrer" : undefined}
+                    onClick={transaction.type === "private" ? () => handleOpenSpend(transaction) : undefined}
                     sx={{
-                      py: 0.5,
-                      px: 1,
+                      py: 0.5, px: 1,
                       borderBottom: "1px solid #f5f5f5",
-                      "&:last-child": {
-                        borderBottom: "none",
-                      },
+                      "&:last-child": { borderBottom: "none" },
                       cursor: "pointer",
                       textDecoration: "none",
                       color: "inherit",
-                      "&:hover": {
-                        backgroundColor: "rgba(0, 0, 0, 0.04)",
-                      },
+                      "&:hover": { backgroundColor: "rgba(0, 0, 0, 0.04)" },
                     }}
+                    title={transaction.type === "private" ? "Tap to spend from this stealth balance" : undefined}
                   >
-                    <Box
-                      sx={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: "100%",
-                        gap: 1,
-                      }}
-                    >
+                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%", gap: 1 }}>
                       {transaction.type === "sent" ? (
-                        <ArrowForwardIcon
-                          sx={{ color: "primary.main", fontSize: "1.2rem" }}
-                        />
+                        <ArrowForwardIcon sx={{ color: "primary.main", fontSize: "1.2rem" }} />
+                      ) : transaction.type === "received" ? (
+                        <ArrowBackIcon sx={{ color: "secondary.main", fontSize: "1.2rem" }} />
                       ) : (
-                        <ArrowBackIcon
-                          sx={{ color: "secondary.main", fontSize: "1.2rem" }}
-                        />
+                        <Typography sx={{ fontSize: "1.1rem", fontFamily: "var(--font-geist-mono), monospace", opacity: 0.6, lineHeight: 1 }}>
+                          ◈
+                        </Typography>
                       )}
-                      <Box
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          width: "100%",
-                          maxWidth: "200px",
-                          backgroundColor:
-                            transaction.type === "sent"
+                      {transaction.type === "private" ? (
+                        <Box
+                          sx={{
+                            display: "flex", alignItems: "center", justifyContent: "space-between",
+                            width: "100%", maxWidth: "200px",
+                            background: "transparent",
+                            border: "1px dashed currentColor",
+                            opacity: 0.7,
+                            borderRadius: "2px", py: 0.5, px: 1,
+                            fontFamily: "var(--font-geist-mono), monospace",
+                          }}
+                        >
+                          <Typography variant="caption" sx={{ fontFamily: "inherit", letterSpacing: "0.04em" }}>
+                            {transaction.stealthAddress?.slice(0, 6)}…{transaction.stealthAddress?.slice(-4)}
+                          </Typography>
+                          <Typography variant="body2" sx={{ fontFamily: "inherit", letterSpacing: "0.04em", fontWeight: 500 }}>
+                            {transaction.amount} {symbol}
+                          </Typography>
+                        </Box>
+                      ) : (
+                        <Box
+                          sx={{
+                            display: "flex", alignItems: "center", justifyContent: "space-between",
+                            width: "100%", maxWidth: "200px",
+                            backgroundColor: transaction.type === "sent"
                               ? `rgba(25, 118, 210, ${(transaction.proportion || 1) * 0.3})`
                               : `rgba(156, 39, 176, ${(transaction.proportion || 1) * 0.3})`,
-                          borderRadius: 1,
-                          py: 0.5,
-                          px: 1,
-                        }}
-                      >
-                        <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                          {transaction.amount} ⧫
-                        </Typography>
-                      </Box>
+                            borderRadius: 1, py: 0.5, px: 1,
+                          }}
+                        >
+                          <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                            {transaction.amount} {symbol}
+                          </Typography>
+                        </Box>
+                      )}
                     </Box>
                   </ListItem>
                 ))

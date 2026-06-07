@@ -15,7 +15,7 @@ import { getAllWallets, removeLocalData } from "@/lib/localstorage";
 import { LocalStorageData } from "@/types";
 
 type props = {
-  createOrLoad: (username: string, external: boolean) => object;
+  createOrLoad: (username: string, external: boolean, privacy?: boolean) => object;
   isRestoring?: boolean;
 };
 
@@ -25,6 +25,7 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState("");
   const [external, setExternal] = useState(false);
+  const [privacy, setPrivacy] = useState(false);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   const handleInfoClick = (event: React.MouseEvent<HTMLElement>) => {
@@ -164,14 +165,37 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
           </FormControl>
         </Box>
 
+        <Box display="flex" alignItems="center" gap={1.5} sx={{ opacity: 0.75 }}>
+          <input
+            type="checkbox"
+            id="privacy-toggle"
+            checked={privacy}
+            onChange={(e) => setPrivacy(e.target.checked)}
+            style={{ width: 16, height: 16, cursor: "pointer", accentColor: "currentColor" }}
+          />
+          <label
+            htmlFor="privacy-toggle"
+            style={{
+              fontFamily: "var(--font-geist-mono), monospace",
+              fontSize: "0.9rem",
+              cursor: "pointer",
+              letterSpacing: "0.04em",
+            }}
+          >
+            Enable privacy
+          </label>
+        </Box>
+
         <Button
           onClick={async () => {
             if (!username.trim()) return;
             const user = username;
             const ext = external;
+            const priv = privacy;
             setUsername("");
             setExternal(false);
-            createOrLoad(user.toLowerCase(), ext);
+            setPrivacy(false);
+            createOrLoad(user.toLowerCase(), ext, priv);
           }}
           variant="contained"
           color="info"

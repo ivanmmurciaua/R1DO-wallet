@@ -1,5 +1,6 @@
 import { keccak256, toHex } from "viem";
 import { PasskeyArgType, extractPasskeyData } from "@safe-global/protocol-kit";
+import { PACKED_VERIFIERS_HEX } from "@/app/constants";
 
 import { registryABI } from "./registryAbi";
 import { REGISTRY_ADDRESS } from "@/app/constants";
@@ -11,7 +12,39 @@ import { setLocalData } from "./localstorage";
 export const generateFingerprint = (userAuthKey: string) =>
   keccak256(toHex(userAuthKey));
 
+export const checkPRFSupport = async (): Promise<boolean> => {
+  try {
+    if (typeof PublicKeyCredential === "undefined") {
+      console.log("[PRF] WebAuthn not available");
+      return false;
+    }
+
+    // getClientCapabilities is available in Chrome 132+ / Edge 132+
+    if (!("getClientCapabilities" in PublicKeyCredential)) {
+      console.log("[PRF] getClientCapabilities not supported in this browser");
+      return false;
+    }
+
+    const caps = await (
+      PublicKeyCredential as unknown as {
+        getClientCapabilities: () => Promise<Record<string, unknown>>;
+      }
+    ).getClientCapabilities();
+
+    const prfSupported = caps["extension:prf"] === true;
+    console.log("[PRF] Client capabilities:", caps);
+    console.log("[PRF] PRF extension supported:", prfSupported);
+    return prfSupported;
+  } catch (e) {
+    console.error("[PRF] Error checking capabilities:", e);
+    return false;
+  }
+};
+
 // export const generateAuthKey = (username: string): string => `${username}_${navigator.platform.split(" ")[0].toLowerCase()}_${navigator.maxTouchPoints > 0 ? "mobile" : "desktop"}`;
+
+// Deterministic PRF salt — domain separator for R1DO stealth key derivation
+const PRF_SALT = new TextEncoder().encode("r1do-stealth-v1").buffer;
 
 export async function generateCredential(
   displayName: string,
@@ -28,12 +61,7 @@ export async function generateCredential(
 
   const passkeyCredential = await navigator.credentials.create({
     publicKey: {
-      pubKeyCredParams: [
-        {
-          alg: -7,
-          type: "public-key",
-        },
-      ],
+      pubKeyCredParams: [{ alg: -7, type: "public-key" }],
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       authenticatorSelection,
       rp: {
@@ -47,6 +75,9 @@ export async function generateCredential(
       },
       timeout: 60_000,
       attestation: "none",
+      extensions: {
+        prf: { eval: { first: PRF_SALT } },
+      } as AuthenticationExtensionsClientInputs,
     },
   });
 
@@ -54,17 +85,21 @@ export async function generateCredential(
     throw Error("Passkey creation failed: No credential was returned.");
   }
 
-  // // TRACE - DEBUG
-  // console.log(passkeyCredential);
+  const extResults = (passkeyCredential as PublicKeyCredential).getClientExtensionResults() as
+    AuthenticationExtensionsClientOutputs & {
+      prf?: { results?: { first?: ArrayBuffer } };
+    };
 
-  // const userAuthKey = displayName;
+  const prfOutput = extResults.prf?.results?.first
+    ? new Uint8Array(extResults.prf.results.first)
+    : undefined;
 
-  // TRACE - DEBUG
-  // console.log("Creating ", userAuthKey);
+  console.log(`[generateCredential] PRF extension result: ${prfOutput ? `✓ enabled (${prfOutput.length} bytes)` : "✗ not supported by this authenticator"}`);
 
   return {
-    passkeyCredential: passkeyCredential,
+    passkeyCredential,
     userAuthKey: displayName,
+    prfOutput,
   };
 }
 
@@ -78,7 +113,7 @@ export async function createPasskey(
   external: boolean = false,
 ): Promise<PasskeyResponseType> {
   try {
-    const { passkeyCredential, userAuthKey } = await generateCredential(
+    const { passkeyCredential, userAuthKey, prfOutput } = await generateCredential(
       username,
       external,
     );
@@ -88,24 +123,18 @@ export async function createPasskey(
     // TRACE - DEBUG
     // console.log("Creating ", fingerprint);
 
-    const passkey = (await extractPasskeyData(
-      passkeyCredential,
-    )) as PasskeyArgType;
-    // TRACE - DEBUG
-    // console.log("Passkey generated: ");
-    // console.log(passkey);
+    const extracted = await extractPasskeyData(passkeyCredential);
+    const passkey: PasskeyArgType = {
+      ...extracted,
+      verifierAddress: PACKED_VERIFIERS_HEX,
+    };
 
-    setLocalData(username, "", {
-      rawId: passkey.rawId,
-      coordinates: {
-        x: passkey.coordinates.x,
-        y: passkey.coordinates.y,
-      },
-    });
+    setLocalData(username, "", passkey);
 
     return {
-      fingerprint: fingerprint,
-      passkey: passkey,
+      fingerprint,
+      passkey,
+      prfOutput,
     };
   } catch (e: unknown) {
     console.error(e);
@@ -115,16 +144,15 @@ export async function createPasskey(
       fingerprint: "",
       passkey: {
         rawId: "",
-        coordinates: {
-          x: "",
-          y: "",
-        },
+        coordinates: { x: "", y: "" },
+        verifierAddress: "",
       },
     };
   }
 }
 
-export async function loadFromDevice(rawId: string): Promise<boolean> {
+// Returns PRF output (32 bytes) if the authenticator supports it, null if not, throws if credential not found.
+export async function loadFromDevice(rawId: string): Promise<Uint8Array | null> {
   try {
     const credential = (await navigator.credentials.get({
       publicKey: {
@@ -137,21 +165,31 @@ export async function loadFromDevice(rawId: string): Promise<boolean> {
         ],
         userVerification: "preferred",
         timeout: 60_000,
+        extensions: {
+          prf: { eval: { first: PRF_SALT } },
+        } as AuthenticationExtensionsClientInputs,
       },
     })) as PublicKeyCredential;
 
-    const assertionResponse =
-      credential.response as AuthenticatorAssertionResponse;
-    if (assertionResponse) {
-      // TRACE - DEBUG
-      // console.log(assertionResponse);
-      console.log("OK");
-    }
-    return true;
+    const extResults = credential.getClientExtensionResults() as
+      AuthenticationExtensionsClientOutputs & {
+        prf?: { results?: { first?: ArrayBuffer } };
+      };
+
+    const prfOutput = extResults.prf?.results?.first
+      ? new Uint8Array(extResults.prf.results.first)
+      : null;
+
+    console.log(`[loadFromDevice] PRF: ${prfOutput ? `✓ (${prfOutput.length} bytes)` : "✗ not supported by this authenticator"}`);
+
+    // null  → credential not found (falsy)
+    // Uint8Array(0)  → found, no PRF (truthy)
+    // Uint8Array(32) → found + PRF output (truthy)
+    return prfOutput ?? new Uint8Array(0);
   } catch (e: unknown) {
     console.error("Error loading passkey:", e);
     await log("Error loading passkey:", e);
-    return false;
+    return null;
   }
 }
 

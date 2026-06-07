@@ -2,7 +2,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   createPasskey,
-  // generateAuthKey
   generateFingerprint,
   loadFromDevice,
   readFromSC,
@@ -12,7 +11,9 @@ import LoginWithPasskey from "@/components/LoginWithPasskey";
 import styles from "./page.module.css";
 import Image from "next/image";
 import { safeClient } from "@/lib/client";
-import { registerPasskey } from "@/lib/deploy";
+import { PACKED_VERIFIERS_HEX } from "@/app/constants";
+import { registerPasskey, registerStealthKeys } from "@/lib/deploy";
+import { isStealthRegistered, derivePQKeysFromPRF, scanAnnouncements, STEALTH_SCAN_DEFAULT_BLOCKS } from "@/lib/stealth";
 import { Address } from "viem";
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
@@ -21,8 +22,11 @@ import { log } from "@/lib/common";
 import {
   getLocalData,
   removeLocalData,
-  setLocalData,
+  // setLocalData,
   updateLocalData,
+  getStealthUTXOs,
+  saveStealthScan,
+  getLastScannedBlock,
 } from "@/lib/localstorage";
 import { LOCAL_LAST_USER } from "@/app/constants";
 import Popup from "@/components/Popup";
@@ -141,24 +145,48 @@ export default function Home() {
     fingerprint: string,
     passkey: PasskeyArgType,
     wallet: Safe4337Pack,
+    prfOutput?: Uint8Array,
+    privacy?: boolean,
   ) {
     if (!fingerprint || !passkey || !wallet) {
       throw new Error("Missing data");
     }
 
     try {
-      // CHECK: TEST MSG.SENDER
+      const safeAddress = await wallet.protocolKit.getAddress();
+      const isDeployed = await wallet.protocolKit.isSafeDeployed();
+      console.log(`[handleStore] Safe: ${safeAddress} | deployed: ${isDeployed}`);
+      console.log(`[handleStore] Fingerprint: ${fingerprint}`);
+      console.log(`[handleStore] verifierAddress (packed): ${passkey.verifierAddress}`);
+      console.log("[handleStore] Sending UserOp — PasskeyRegistry.registerPasskey()...");
+
       const tx = await registerPasskey(
         wallet,
         fingerprint,
         passkey.rawId,
         passkey.coordinates.x,
         passkey.coordinates.y,
+        safeAddress,
       );
 
       if (tx) {
+        console.log(`[handleStore] ✓ PasskeyRegistry tx confirmed: ${tx}`);
+
         updateLocalData(username, fingerprint, passkey);
         setDeployed(true);
+
+        if (privacy && prfOutput) {
+          try {
+            console.log("[handleStore] Privacy enabled — registering stealth keys (ERC-6538 scheme 4)...");
+            const deployedWallet = await safeClient(passkey);
+            const stealthTx = await registerStealthKeys(deployedWallet, prfOutput);
+            console.log(`[handleStore] ✓ Stealth registry tx: ${stealthTx}`);
+            updateLocalData(username, fingerprint, passkey, true);
+          } catch (stealthErr) {
+            console.warn("[handleStore] Stealth registration failed (non-fatal):", stealthErr);
+          }
+        }
+
         closePopup();
       }
     } catch (e: unknown) {
@@ -177,13 +205,14 @@ export default function Home() {
     const wallet = await safeClient(passkey);
     setWallet(wallet);
 
-    const safeAddress: Address =
-      (await wallet.protocolKit.getAddress()) as Address;
+    const safeAddress: Address = (await wallet.protocolKit.getAddress()) as Address;
     setAddress(safeAddress);
-    // console.log(safeAddress);
 
     const isSafeDeployed = await wallet.protocolKit.isSafeDeployed();
     setDeployed(isSafeDeployed);
+
+    console.log(`[handleWalletInit] Safe: ${safeAddress} | deployed: ${isSafeDeployed}`);
+    console.log(`[handleWalletInit] verifierAddress (packed): ${passkey.verifierAddress}`);
 
     return wallet;
   }
@@ -198,20 +227,19 @@ export default function Home() {
       throw new Error("Could not read passkey from registry");
     }
 
-    const passkey = {
+    const passkey: PasskeyArgType = {
       rawId: onchainPasskey.rawId,
       coordinates: {
         x: onchainPasskey.coordinateX,
         y: onchainPasskey.coordinateY,
       },
-    } as PasskeyArgType;
+      verifierAddress: PACKED_VERIFIERS_HEX,
+    };
 
     return passkey;
   }
 
-  async function createOrLoad(username: string, external: boolean) {
-    // TRACE - DEBUG
-    // console.log("External provider", external);
+  async function createOrLoad(username: string, external: boolean, privacy?: boolean) {
     let passkey;
     setUsername(username);
 
@@ -219,16 +247,17 @@ export default function Home() {
     const fingerprint = wallet?.fingerprint || "";
     passkey = wallet?.passkey || {};
 
+    console.log(`[createOrLoad] username=${username} fingerprint=${fingerprint || "(empty)"} passkeyInLS=${Object.keys(passkey).length > 0}`);
+
     if (fingerprint === "") {
-      // TRACE - DEBUG
-      // console.log("No fingerprint detected");
+      console.log("[createOrLoad] Path: no fingerprint in LS");
 
       if (Object.keys(passkey).length !== 0) {
-        // Created but not deployed
-        // Check locally and tell user forget it.
-        if (await loadFromDevice(passkey.rawId!)) {
-          // in device but exists onchain?
-          await managePasskey(username, external, passkey as PasskeyArgType);
+        console.log("[createOrLoad] Path: passkey in LS but no fingerprint — checking device...");
+        const prfResult = await loadFromDevice((passkey as PasskeyArgType).rawId!);
+        if (prfResult) {
+          console.log("[createOrLoad] Path: passkey on device — checking onchain...");
+          await managePasskey(username, external, passkey as PasskeyArgType, prfResult);
         } else {
           const e =
             "Your wallet is not created. Please remove your passkey from this device";
@@ -239,7 +268,7 @@ export default function Home() {
           throw Error(e);
         }
       } else {
-        await managePasskey(username, external);
+        await managePasskey(username, external, null, undefined, privacy);
       }
     } else {
       // TRACE - DEBUG
@@ -275,16 +304,19 @@ export default function Home() {
         }
       } else {
         passkey = await formatPasskey(fingerprint);
-        // TRACE - DEBUG
-        // console.log("Retrieved passkey from onchain: ", passkey);
-        if (await loadFromDevice(passkey.rawId)) {
-          // TRACE - DEBUG
-          // console.log("Everything OK");
-          updateLocalData(username, fingerprint, passkey);
-          await handleWalletInit(passkey);
+        const prfOnLogin = await loadFromDevice(passkey.rawId);
+        console.log(`[login] Passkey found: ${!!prfOnLogin}, PRF output: ${prfOnLogin?.length ? `✓ (${prfOnLogin.length} bytes)` : "✗ not supported"}`);
+        if (prfOnLogin) {
+          const loginWallet = await handleWalletInit(passkey);
+          const safeAddr = await loginWallet.protocolKit.getAddress();
+          const hasPrivacy = await isStealthRegistered(safeAddr);
+          updateLocalData(username, fingerprint, passkey, hasPrivacy);
+          console.log(`[login] privacy (ERC-6538): ${hasPrivacy}`);
           closePopup();
+          if (hasPrivacy && prfOnLogin.length > 0) {
+            runStealthScan(username, prfOnLogin);
+          }
         } else {
-          // localStorage.removeItem(username);
           openPopup("Passkey could not be loaded in your device.");
           removeLocalData(username);
 
@@ -313,20 +345,25 @@ export default function Home() {
         if (existsPasskey) {
           exists = true;
         } else {
-          //TODO
-          // VERY IMPORTANT. ASK USER BEFORE CONTINUE BECAUSE WILL OVERWRITE ONCHAIN REGISTRY.
-          // The user has changed device or deleted passkey from the device.
-          // And I don't know if is worth to store again in SC overwriting the existing.
           exists = true;
           overwrite = true;
-          if (await loadFromDevice(passkey.rawId)) {
-            setLocalData(username, fingerprint, passkey);
-            await handleWalletInit(passkey);
+          const prfResult = await loadFromDevice(passkey.rawId);
+          console.log(`[existsOnchain] Passkey found: ${!!prfResult}, PRF: ${prfResult?.length ? `✓ (${prfResult.length} bytes)` : "✗ not supported"}`);
+          console.log(`[existsOnchain] passkey.coordinates.x: ${passkey.coordinates.x}`);
+          console.log(`[existsOnchain] passkey.coordinates.y: ${passkey.coordinates.y}`);
+          if (prfResult) {
+            const loadedWallet = await handleWalletInit(passkey);
+            const safeAddr = await loadedWallet.protocolKit.getAddress();
+            const hasPrivacy = await isStealthRegistered(safeAddr);
+            updateLocalData(username, fingerprint, passkey, hasPrivacy);
+            console.log(`[existsOnchain] privacy (ERC-6538): ${hasPrivacy}`);
             closePopup();
+            if (hasPrivacy && prfResult.length > 0) {
+              runStealthScan(username, prfResult);
+            }
           } else {
             openPopup("Your wallet could not be loaded");
             const e = "Exists onchain but NOT exists in device";
-            // Rotate keys mechanism
             await log("existsOnchain - 2", e);
             throw new Error(e);
           }
@@ -347,6 +384,8 @@ export default function Home() {
     username: string,
     external: boolean,
     passkey: PasskeyArgType | null = null,
+    _prfOutput?: Uint8Array,
+    privacy?: boolean,
   ) {
     let exists, overwrite: boolean;
 
@@ -359,9 +398,14 @@ export default function Home() {
     try {
       if (exists) {
         if (!overwrite) {
-          // Retrieve data and load wallet.
-          const { passkey } = getLocalData(username)!;
-          await handleWalletInit(passkey);
+          const fp = generateFingerprint(username);
+          const { passkey: storedPasskey } = getLocalData(username)!;
+          console.log(`[managePasskey] exists + !overwrite — updating fingerprint in LS: ${fp}`);
+          const managedWallet = await handleWalletInit(storedPasskey);
+          const safeAddr = await managedWallet.protocolKit.getAddress();
+          const hasPrivacy = await isStealthRegistered(safeAddr);
+          updateLocalData(username, fp, storedPasskey, hasPrivacy);
+          console.log(`[managePasskey] privacy (ERC-6538): ${hasPrivacy}`);
           closePopup();
         }
         // overwrite === true: existsOnchain already loaded the wallet and closed the popup.
@@ -374,16 +418,14 @@ export default function Home() {
         } else {
           // New user, if not exists onchain, could exists locally ????
           openPopup("Creating new passkey");
-          const { fingerprint, passkey } = await handleCreatePasskey(
+          const { fingerprint, passkey, prfOutput } = await handleCreatePasskey(
             username,
             external,
           );
 
           if (passkey.rawId !== "") {
             const wallet = await handleWalletInit(passkey);
-            //TODO: Check this
-            // updateLocalData(username, fingerprint, passkey);
-            await handleStore(username, fingerprint!, passkey, wallet);
+            await handleStore(username, fingerprint!, passkey, wallet, prfOutput, privacy);
           } else {
             openPopup(
               "Your wallet could not be created. Try again or change browser/device",
@@ -394,6 +436,45 @@ export default function Home() {
     } catch (e: unknown) {
       await log("managePasskey", e);
       console.error(e);
+    }
+  }
+
+  async function runStealthScan(username: string, prfOutput: Uint8Array) {
+    try {
+      console.log("[stealthScan] Deriving PQ keys from PRF...");
+      const keys = await derivePQKeysFromPRF(prfOutput);
+
+      const lastBlock = getLastScannedBlock(username);
+      const existing  = getStealthUTXOs(username);
+
+      // If no previous scan, go back ~3 days
+      const fromBlock = lastBlock ?? (await (async () => {
+        const { createPublicClient, http } = await import("viem");
+        const { sepolia } = await import("viem/chains");
+        const c = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
+        const latest = await c.getBlockNumber();
+        return latest > STEALTH_SCAN_DEFAULT_BLOCKS ? latest - STEALTH_SCAN_DEFAULT_BLOCKS : 0n;
+      })());
+
+      console.log(`[stealthScan] From block: ${fromBlock} | existing UTXOs: ${existing.length}`);
+
+      const { utxos: newUtxos, latestBlock } = await scanAnnouncements(
+        keys.spendingPrivateKey,
+        keys.viewingPrivateKey,
+        keys.mlkemDecapsKey,
+        fromBlock,
+      );
+
+      // Merge — deduplicate by stealthAddress
+      const merged = [
+        ...existing,
+        ...newUtxos.filter(u => !existing.some(e => e.stealthAddress === u.stealthAddress)),
+      ];
+
+      saveStealthScan(username, merged, latestBlock);
+      console.log(`[stealthScan] ✓ Total UTXOs cached: ${merged.length}`);
+    } catch (e) {
+      console.warn("[stealthScan] Scan failed (non-fatal):", e);
     }
   }
 
