@@ -2,15 +2,17 @@ import React, { useState } from "react";
 import { Box, Button, Stack, Typography } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
 import { spendStealthUTXO } from "@/lib/deploy";
-import { generateFingerprint, readFromSC, loadFromDevice } from "@/lib/passkeys";
-import { PasskeyOnchainResponseType } from "@/types";
-import { getDecimals, getSymbol, getLocalData } from "@/lib/localstorage";
-import { derivePQKeysFromPRF, type StealthUTXO } from "@/lib/stealth";
-import { parseUnits, zeroAddress } from "viem";
+import { loadFromDevice } from "@/lib/passkeys";
+import { readDirectory } from "@/lib/registry-v2";
+import { getDecimals, getSymbol } from "@/lib/localstorage";
+import { getWalletCredential } from "@/lib/credstore";
+import { derivePQKeysFromPRF, generateStealthPayment, isPQMetaAddress, type StealthUTXO } from "@/lib/stealth";
+import { parseUnits, formatUnits } from "viem";
 
 type SpendStealthUTXOProps = {
   utxo: StealthUTXO;
-  balance: number;
+  balance: number;       // rounded, for display only
+  balanceWei: bigint;    // exact on-chain balance — validation/MAX use this
   username: string;
   onBack: (message: string) => void;
 };
@@ -31,7 +33,7 @@ const inputStyle: React.CSSProperties = {
   transition: "opacity 0.15s",
 };
 
-export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balance, username, onBack }) => {
+export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balance, balanceWei, username, onBack }) => {
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -44,26 +46,20 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
     onBack(message);
   };
 
-  const resolveRecipient = async (input: string): Promise<`0x${string}` | null> => {
+  // v2: usernames resolve through the Argon2id-encrypted directory (~1s).
+  const resolveRecipient = async (
+    input: string,
+  ): Promise<{ address: `0x${string}` | null; metaAddress: `0x${string}` | null }> => {
     const trimmed = input.trim();
-    if (!trimmed) return null;
+    if (!trimmed) return { address: null, metaAddress: null };
 
     if (trimmed.startsWith("0x") && trimmed.length === 42) {
-      return trimmed as `0x${string}`;
+      return { address: trimmed as `0x${string}`, metaAddress: null };
     }
 
-    const onchainResponse = (await readFromSC(
-      "getPasskey",
-      generateFingerprint(trimmed),
-    )) as PasskeyOnchainResponseType;
-
-    if (onchainResponse && onchainResponse.safeAddress !== zeroAddress) {
-      return onchainResponse.safeAddress as `0x${string}`;
-    }
-    if (onchainResponse && onchainResponse.userAddress !== zeroAddress) {
-      return onchainResponse.userAddress as `0x${string}`;
-    }
-    return null;
+    const entry = await readDirectory(trimmed);
+    if (!entry) return { address: null, metaAddress: null };
+    return { address: entry.safeAddress, metaAddress: entry.metaAddress };
   };
 
   const handleSpend = async () => {
@@ -71,10 +67,6 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
 
     const parsedAmount = parseFloat(amount);
     if (Number.isNaN(parsedAmount) || parsedAmount <= 0) return;
-    if (parsedAmount > balance) {
-      handleCancel(`Amount exceeds available balance (${balance} ${symbol}).`);
-      return;
-    }
 
     let totalAmount: bigint;
     try {
@@ -83,24 +75,52 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
       handleCancel("Invalid amount.");
       return;
     }
+    // Compare in exact wei (the displayed balance is rounded and can sit ABOVE
+    // the true balance → spending it would overspend and revert in simulation).
+    if (totalAmount <= 0n) return;
+    if (totalAmount > balanceWei) {
+      handleCancel(`Amount exceeds available balance (${formatUnits(balanceWei, decimals)} ${symbol}).`);
+      return;
+    }
 
     setIsLoading(true);
     console.log(`[SpendStealthUTXO] Spending ${amount} ${symbol} from ${utxo.stealthAddress} to ${recipient}`);
 
     try {
-      const recipientAddress = await resolveRecipient(recipient);
+      const trimmed = recipient.trim();
+
+      // Δ1: a meta-address recipient gets a fresh stealth destination and the
+      // delivery blob rides on the transfer itself (private chained spend).
+      // v2: a username whose directory entry carries a meta-address gets the
+      // same private treatment automatically.
+      let metaAddress: `0x${string}` | null = isPQMetaAddress(trimmed)
+        ? (trimmed as `0x${string}`)
+        : null;
+      let recipientAddress: `0x${string}` | null = null;
+      let calldataBlob: `0x${string}` | undefined;
+
+      if (!metaAddress) {
+        const resolved = await resolveRecipient(trimmed);
+        metaAddress = resolved.metaAddress;
+        recipientAddress = resolved.address;
+      }
+      if (metaAddress) {
+        const payment = await generateStealthPayment(metaAddress);
+        recipientAddress = payment.stealthAddress;
+        calldataBlob = payment.calldataBlob;
+      }
       if (!recipientAddress) {
         handleCancel("Recipient not found.");
         return;
       }
 
-      const data = getLocalData(username);
-      if (!data?.passkey?.rawId) {
+      const cred = await getWalletCredential(username).catch(() => null);
+      if (!cred) {
         handleCancel("Passkey not found on this device.");
         return;
       }
 
-      const prf = await loadFromDevice(data.passkey.rawId);
+      const prf = await loadFromDevice(cred.rawId);
       if (!prf || prf.length === 0) {
         handleCancel("Could not access your passkey. Try again.");
         return;
@@ -114,6 +134,7 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
         keys.spendingPrivateKey,
         keys.viewingPrivateKey,
         keys.mlkemDecapsKey,
+        calldataBlob,
       );
 
       if (tx) handleCancel(`Sent ${amount} ${symbol} from your stealth balance to ${recipient}`);
@@ -141,13 +162,13 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
         {/* Recipient input */}
         <Box>
           <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
-            Recipient (Username or Address)
+            Recipient (Username, Address or Meta-address)
           </Typography>
           <input
             type="text"
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
-            placeholder="_ username or 0x address"
+            placeholder="_ username, 0x address or 0x00… meta-address"
             style={inputStyle}
             onFocus={(e) => (e.target.style.opacity = "1")}
             onBlur={(e) => (e.target.style.opacity = "0.7")}
@@ -156,9 +177,21 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
 
         {/* Amount input */}
         <Box>
-          <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
-            Amount ({symbol})
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+            <Typography variant="body2" sx={{ color: "text.secondary" }}>
+              Amount ({symbol})
+            </Typography>
+            <Button
+              variant="text"
+              color="primary"
+              size="small"
+              onClick={() => setAmount(formatUnits(balanceWei, decimals))}
+              disabled={isLoading || balanceWei <= 0n}
+              sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
+            >
+              MAX
+            </Button>
+          </Box>
           <input
             type="number"
             value={amount}

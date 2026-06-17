@@ -1,95 +1,125 @@
-## R1DO Wallet
+# R1DO Wallet — Δ (Delta)
 
-R1DO Wallet is a dApp for normies that creates a very simple EVM smart wallet using a passkey and [Safe{Core} SDK](https://github.com/safe-global/safe-core-sdk). It preserves decentralization and self-custody without relying on external providers like Privy, Web3Auth, or Magic.
-
-### Description
-**R1DO Wallet** generates keys and an EVM-compatible smart wallet using the device passkey (Secure Enclave / Secure Element). Designed for non-technical users who want full control of their assets without sacrificing usability.
+> A self-custody wallet you open with your fingerprint. No seed phrases, no
+> third parties — and now with **two worlds**: a normal, public side, and a
+> private side where your money moves without leaving a trail.
 
 > [!CAUTION]
-> This is a very lightweight version of a wallet. Please, don't use it to store the savings of your entire life.
-
-### Rationale
-
-On a daily basis, users rely on multiple services to authenticate themselves. This poses a significant risk to their information, as it depends on the security of a third party, which cannot be audited and is generally not transparent about how it handles their data. In the web3 world, a series of services for social login, i.e., using social networks and email, has recently emerged.
-
-Although less dangerous than other services, this is still risky because your identity depends on a unique ID hosted on these companies' servers, which is usually linked to the EOA they generate. In addition, these services, as companies, are required to keep minimum connection records, including IPs, timestamps, device IDs, etc.
-
-For several years now, the [FIDO Alliance](https://fidoalliance.org/overview/), an open association made up of leading technology companies, has been looking for ways to eliminate passwords from our lives in order to reduce phishing and various security breaches.
-
-Among the most important milestones is the creation of [passkeys](https://fidoalliance.org/passkeys/), which allow users to sign in to apps and websites using the same process they use to unlock their device (biometrics, PIN, or pattern).
-
-Now, with the [precompilation of the secp256r1 curve](https://eips.ethereum.org/EIPS/eip-7951) in EVM networks, the door is open to the option of having a smart wallet thanks to passkeys.
-
-This method is simple and clean for users who are not used to dealing with seed phrases, while maintaining self-custody.
-
-> I don't want normie users to depend on third services that may trade their data just to create a wallet and interact with it, that's not why I entered this wonderful world of web3. And although traditional methods (seed phrases, passphrases, dice, paper) **are the most recommended**, R1DO Wallet aims to give control back to the user and offers an easy and simple way to interact with a wallet with no other requirements than a username (accepting the responsibilities and risks of self-custody).
-
-### Why not passwords?
-Relying on passwords mean trust in a server trusting a server. A server that you don't manage. Why choose passkeys? Easy, [KISS](https://en.wikipedia.org/wiki/KISS_principle). Instead of trusting a **private** server, you are storing your **public** key coordinates in a public smart contract related to your user (stored as a hashed fingerprint).
-
-This maintains user's privacy while storing the information on a public server that everyone can see, but no one can decrypt. Even so, one potential danger is that they know your public key and the address derived from it. This is not a problem in itself due to the very nature of [asymmetric key cryptography](https://en.wikipedia.org/wiki/Public-key_cryptography).
-
-> [!WARNING]
-> If you do not choose the external providers option, you will not be able to manage your passkey, as it is generated internally on your device and **if you lose it or change it, you will lose complete access to your wallet**.
-
-### Technologies
-- Next.js
-    - viem for web3, @mui for UI.
-
-- EVM-compatible chains (Ethereum and compatibles)
-    - Safe as SW provider & Pimlico as ERC4337 infra.
-
-- Passkeys (Secure Enclave / Secure Element)
-    - Webauthn lib.
-
-### Get Started
-Install packages:
-```bash
-npm install
-```
-
-Create .env file:
-```bash
-cp .env.example .env
-```
-
-Change .env with your keys:
-```js
-NEXT_PUBLIC_PIMLICO_API_KEY = "<PIMLICO_API_KEY>"
-
-// current dev version at 0xD7504892EeA860fe54b87c05af70Bba51446449f
-NEXT_PUBLIC_REGISTRY_ADDRESS = "<SC_REGISTRY_ADDRESS>"
-```
-
-Run:
-```bash
-npm run dev
-```
-
-### Known issues with passkeys
-- Passkeys depend on specific hardware/software: **only works** on devices with passkeys (Secure Enclave / Secure Element or External providers services as Google or Apple) and **browsers with [WebAuthAPI PublicKeyCredential](https://developer.mozilla.org/en-US/docs/Web/API/PublicKeyCredential) allowed**.
-- **Limited portability**: moving a passkey between devices can be complex or require OS-level sync.
-- **Recovery**: if a user loses access to their device and didn't sync the passkey using external providers, recovery, is difficult — same risk as other self-custody options e.g if you lose your seedphrase paper.
-- **Compatibility**: not all browsers and environments implement WebAuthn/passkeys the same way, e.g Android Webviews.
-- UX edge-cases: **native authentication prompts can confuse** non-technical users.
-
-### Roadmap
-- [X] Improve cross-browser and device compatibility.
-- [X] Import passkeys.
-- [X] Improve SC.
-- [ ] Integrate recovery flows (social recovery, ZKProofs to recover funds, Key rotation on chain).
-- [ ] UX/UI improvements for non-technical users (guided onboarding).
-- [ ] Integrate DeFi options.
-- [ ] More privacy, integrate stealth mechanisms.
-- [ ] E2E tests and security audit
-- ...
+> **Testnet only.** Δ runs on Ethereum **Sepolia** (test network, play money).
+> Don't put real savings here. This is experimental software.
 
 ---
 
-### Contributions
-Contributions welcome. Open issues for bugs and features; PRs will be reviewed. Keep commits clear and add tests when possible.
+## What is it?
 
-### License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+R1DO Wallet is a crypto wallet for normal people. You create it with the same
+gesture you use to unlock your phone — your **passkey** (fingerprint / face /
+PIN). There's no seed phrase to write down, no password, and no company in the
+middle holding your keys. You, and only you, control your funds.
 
-Copyright (c) 2025 Iván M.M
+**Δ (Delta)** is the version that adds **privacy as a first-class feature**.
+Most wallets are a glass house: anyone can follow every payment you make. Δ
+gives you a second, private world where your balance and your payments are
+hidden — while keeping the easy, public wallet for everyday use.
+
+## The two worlds, one switch
+
+Δ has a single toggle that flips the whole wallet between two modes:
+
+- **🌖 Public world** — a clean, normal smart wallet. Send and receive, pay
+  people by username, check your balance. Everything works the way you'd
+  expect.
+- **🌑 Private world (the shadows)** — your funds enter a **privacy pool** where
+  amounts and links are hidden. You can send privately, receive privately, and
+  take money back out to a fresh address that isn't tied to your identity.
+
+You move money between the two worlds whenever you want. Public when you want
+convenience, private when you want privacy.
+
+## What you can do
+
+- **Open a wallet in seconds** with just a username and your device passkey —
+  no seed phrase, no email, no third-party login.
+- **Pay by username.** Type a friend's name instead of a long `0x…` address.
+  The lookup is encrypted, so the list of who's who isn't public.
+- **Send privately.** Pay someone so that the amount and the connection between
+  you stay hidden.
+- **Receive privately** at one-time "stealth" addresses that can't be linked
+  back to you.
+- **Cash out** from the private world to any address — including a brand-new
+  one only you control, so the exit doesn't reveal who you are.
+
+## Privacy, in plain terms
+
+Δ stacks a few ideas so that "private" actually means private:
+
+- **Stealth addresses** — every private payment lands at a fresh, single-use
+  address. Nobody watching the chain can tell they're all yours.
+- **A privacy pool** — funds you make private get mixed into a shared pool, so
+  individual amounts and senders/receivers are hidden by zero-knowledge proofs
+  (math that proves a payment is valid *without revealing its details*).
+- **Future-proof secrecy** — the part of the system that decides "who can
+  discover this private payment" is protected with **post-quantum**
+  cryptography, so it stays private even against the powerful computers of the
+  future. (See [TECHSTACK.md](./TECHSTACK.md) for the details.)
+
+## Why passkeys instead of seed phrases?
+
+A seed phrase is a long secret you must write down and never lose. Passkeys
+replace that with the secure chip already in your phone or laptop (the same one
+that guards your fingerprint). Your wallet's keys are *derived* from that
+passkey on the fly and never stored anywhere — not on a server, not by us.
+
+> [!WARNING]
+> **This is real self-custody.** If you create the passkey only on your device
+> and lose it without a backup/sync, you lose access to the wallet — the same
+> way losing a seed-phrase paper would. With great power, etc.
+
+## How it's built (the short version)
+
+- **Smart wallet:** each account is a [Safe](https://safe.global) smart account
+  running on account abstraction (ERC-4337); gas is sponsored so you don't need
+  to hold ETH just to get started.
+- **Private pool:** powered by the [Railgun](https://railgun.org) privacy
+  system (zero-knowledge proofs).
+- **App:** Next.js + React, viem, MUI.
+
+For a deep, primitive-by-primitive breakdown — especially the **cryptography** —
+read **[TECHSTACK.md](./TECHSTACK.md)**.
+
+## Run it locally
+
+```bash
+npm install
+cp .env.example .env     # add your Pimlico API key (and directory address, if used)
+```
+
+```bash
+# Δ uses the Railgun engine in the browser, which needs the full webpack build.
+npm run build
+npm run start
+```
+
+> [!NOTE]
+> Use **build + start**, not `dev`. The private pool relies on Node polyfills
+> that only apply under the webpack production build.
+
+## Status & roadmap
+
+- [x] Passkey-derived smart wallet (no seed phrase)
+- [x] Pay by username (encrypted directory)
+- [x] Stealth / private payments (post-quantum hybrid)
+- [x] Private pool: shield · private transfer · unshield
+- [ ] Auto-shield of incoming funds
+- [ ] Key rotation & recovery flows
+- [ ] Security audit
+- [ ] Mainnet (only after audit)
+
+---
+
+### License & credits
+
+Δ is the experimental privacy fork of R1DO Wallet.
+Licensed under the MIT License — see [LICENSE](LICENSE).
+
+Copyright (c) 2025–2026 Iván M.M

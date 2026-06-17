@@ -17,12 +17,14 @@ import { SendEth } from "./SendEth";
 import { SpendStealthUTXO } from "./SpendStealthUTXO";
 import Popup from "./Popup";
 import { Safe4337Pack } from "@safe-global/relay-kit";
-import { formatUnits, createPublicClient, http } from "viem";
+import { formatUnits, createPublicClient } from "viem";
+import { sepoliaTransport } from "@/app/constants";
 import { sepolia } from "viem/chains";
 import { getLastBlock } from "@/lib/client";
-import { getDecimals, getSymbol, getStealthUTXOs, getLocalData, saveStealthScan, getLastScannedBlock } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getStealthUTXOs, getWalletMeta, saveStealthScan, getLastScannedBlock } from "@/lib/localstorage";
+import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
-import { derivePQKeysFromPRF, scanAnnouncements, type StealthUTXO } from "@/lib/stealth";
+import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
 
 type UserMenuProps = {
   wallet: Safe4337Pack;
@@ -36,6 +38,7 @@ type Transaction = {
   amount: number;
   proportion?: number;
   stealthAddress?: string;
+  weiBalance?: bigint; // exact on-chain balance (private/stealth) — spend uses this, not the rounded `amount`
 };
 
 type EtherscanTransaction = {
@@ -70,6 +73,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance })
   const [loading, setLoading] = useState(false);
   const [selectedUtxo, setSelectedUtxo] = useState<StealthUTXO | null>(null);
   const [selectedBalance, setSelectedBalance] = useState<number>(0);
+  const [selectedWei, setSelectedWei] = useState<bigint>(0n);
 
   const handleShowPopup = (message: string) => {
     setShowPopup(true);
@@ -99,10 +103,11 @@ const handleBackToMenu = (message: string = "") => {
     if (!utxo) return;
     setSelectedUtxo(utxo);
     setSelectedBalance(transaction.amount);
+    setSelectedWei(transaction.weiBalance ?? 0n);
     setCurrentView("spendUtxo");
   };
 
-  const privacy = getLocalData(username)?.privacy ?? false;
+  const privacy = getWalletMeta(username)?.privacy ?? false;
   const symbol = getSymbol();
 
   const fetchTransactions = useCallback(async () => {
@@ -159,7 +164,7 @@ const handleBackToMenu = (message: string = "") => {
     const utxos = getStealthUTXOs(username);
     if (utxos.length === 0) return;
     const decimals = getDecimals();
-    const pub = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
+    const pub = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
     const results = await Promise.all(
       utxos.map(async (utxo) => {
         const raw = await pub.getBalance({ address: utxo.stealthAddress });
@@ -168,6 +173,7 @@ const handleBackToMenu = (message: string = "") => {
           type: "private" as const,
           amount: parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4)),
           stealthAddress: utxo.stealthAddress,
+          weiBalance: raw, // exact — spend clamps to this, never the rounded `amount`
         };
       }),
     );
@@ -181,20 +187,20 @@ const handleBackToMenu = (message: string = "") => {
   };
 
   const refreshPrivate = useCallback(async () => {
-    const data = getLocalData(username);
-    if (!data?.passkey?.rawId) return;
+    const cred = await getWalletCredential(username).catch(() => null);
+    if (!cred) return;
     setLoading(true);
     try {
-      const prf = await loadFromDevice(data.passkey.rawId);
+      const prf = await loadFromDevice(cred.rawId);
       if (!prf || prf.length === 0) {
         await fetchStealthBalances();
         return;
       }
       const keys = await derivePQKeysFromPRF(prf);
       const lastBlock = getLastScannedBlock(username);
-      const pub = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
+      const pub = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
       const fromBlock = lastBlock ?? (await pub.getBlockNumber() - 21600n);
-      const { utxos: newUtxos, latestBlock } = await scanAnnouncements(
+      const { utxos: newUtxos, latestBlock } = await scanStealthPayments(
         keys.spendingPrivateKey,
         keys.viewingPrivateKey,
         keys.mlkemDecapsKey,
@@ -234,6 +240,7 @@ const handleBackToMenu = (message: string = "") => {
       <SpendStealthUTXO
         utxo={selectedUtxo}
         balance={selectedBalance}
+        balanceWei={selectedWei}
         username={username}
         onBack={handleBackFromSpend}
       />

@@ -11,8 +11,16 @@ import {
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { useEffect, useRef, useState } from "react";
-import { getAllWallets, removeLocalData } from "@/lib/localstorage";
-import { LocalStorageData } from "@/types";
+import {
+  getWalletMetas,
+  removeWalletMeta,
+  migrateLegacyWalletList,
+} from "@/lib/localstorage";
+import {
+  listWalletCredentials,
+  deleteWalletCredential,
+} from "@/lib/credstore";
+import { WalletMeta } from "@/types";
 
 type props = {
   createOrLoad: (username: string, external: boolean, privacy?: boolean) => object;
@@ -21,11 +29,12 @@ type props = {
 
 export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: props) {
   const hasAutoLoaded = useRef(false);
-  const [wallets, setWallets] = useState<LocalStorageData[]>([]);
+  const [wallets, setWallets] = useState<WalletMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState("");
   const [external, setExternal] = useState(false);
-  const [privacy, setPrivacy] = useState(false);
+  // New wallets are private by default
+  const [privacy, setPrivacy] = useState(true);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   const handleInfoClick = (event: React.MouseEvent<HTMLElement>) => {
@@ -34,17 +43,31 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
 
   useEffect(() => {
     if (hasAutoLoaded.current) return;
-    const wallets = getAllWallets();
-    if (wallets.length > 0) {
-      setWallets(wallets);
-      hasAutoLoaded.current = true;
-      // Autoload the wallet
-      // if (wallets.length === 1) {
-      //   createOrLoad(wallets[0].username.toLowerCase(), false);
-      // }
-    }
-    setLoading(false);
-  }, [setLoading]);
+    hasAutoLoaded.current = true;
+    (async () => {
+      try {
+        await migrateLegacyWalletList();
+      } catch (e) {
+        console.warn("[login] legacy wallet-list migration failed:", e);
+      }
+      // Wallet list = shared credential store (R1DOToolsDB — any passkey of
+      // the suite is a derivable wallet) merged with the local metadata.
+      const byName = new Map<string, WalletMeta>();
+      try {
+        for (const c of await listWalletCredentials()) {
+          byName.set(c.username.toLowerCase(), { username: c.username });
+        }
+      } catch (e) {
+        console.warn("[login] credential store unavailable:", e);
+      }
+      for (const m of getWalletMetas()) {
+        const key = m.username.toLowerCase();
+        byName.set(key, { ...byName.get(key), ...m });
+      }
+      setWallets([...byName.values()]);
+      setLoading(false);
+    })();
+  }, []);
 
   const handlePopoverClose = () => {
     setAnchorEl(null);
@@ -194,7 +217,7 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
             const priv = privacy;
             setUsername("");
             setExternal(false);
-            setPrivacy(false);
+            setPrivacy(true);
             createOrLoad(user.toLowerCase(), ext, priv);
           }}
           variant="contained"
@@ -243,7 +266,7 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
                 maxWidth: "100%",
               }}
             >
-              {wallets.map((wallet: LocalStorageData, index: number) => (
+              {wallets.map((wallet: WalletMeta, index: number) => (
                 <div
                   key={index}
                   style={{
@@ -287,7 +310,13 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
                     }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      removeLocalData(wallet.username.toLowerCase());
+                      // Forget on this device: metadata + caches + the shared
+                      // credential record (the passkey itself survives on the
+                      // authenticator; a resident-key login re-learns it).
+                      removeWalletMeta(wallet.username);
+                      deleteWalletCredential(wallet.username).catch((err) =>
+                        console.warn("[login] credential delete failed:", err),
+                      );
                       const updatedWallets = wallets.filter(
                         (_, i) => i !== index,
                       );

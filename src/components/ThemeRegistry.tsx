@@ -1,43 +1,92 @@
 "use client";
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { ThemeProvider, CssBaseline } from "@mui/material";
-import { lightTheme, darkTheme } from "@/app/theme";
-import { getThemeMode, setThemeMode } from "@/lib/localstorage";
+import { publicTheme, privateTheme } from "@/app/theme";
 
-type ThemeModeContextType = {
-  isDark: boolean;
-  toggleTheme: () => void;
+export type WalletView = "public" | "private";
+
+type ViewContextType = {
+  view: WalletView;
+  isPrivate: boolean;
+  enterPrivate: () => void;
+  exitPublic: () => void;
+  toggleView: () => void;
 };
 
-const ThemeModeContext = createContext<ThemeModeContextType>({
-  isDark: false,
-  toggleTheme: () => {},
+const ViewContext = createContext<ViewContextType>({
+  view: "public",
+  isPrivate: false,
+  enterPrivate: () => {},
+  exitPublic: () => {},
+  toggleView: () => {},
 });
 
-export const useThemeMode = () => useContext(ThemeModeContext);
+// Keep the hook name so existing consumers don't break.
+export const useThemeMode = () => useContext(ViewContext);
+
+const VEIL_BG: Record<WalletView, string> = {
+  public: "#F4F0E6",
+  private: "#0C0D0F",
+};
 
 export function ThemeRegistry({ children }: { children: React.ReactNode }) {
-  const [isDark, setIsDark] = useState(false);
+  const [view, setView] = useState<WalletView>("public");
+  const [veil, setVeil] = useState(false);
+  const firstRender = useRef(true);
 
+  // Allowed cleanup: dark/light is gone, so we wipe its leftover key.
   useEffect(() => {
-    setIsDark(getThemeMode() === "dark");
+    try {
+      localStorage.removeItem("LOCAL_THEME_MODE");
+    } catch {
+      /* SSR / storage unavailable */
+    }
   }, []);
 
-  const toggleTheme = () => {
-    setIsDark((prev) => {
-      const next = !prev;
-      setThemeMode(next ? "dark" : "light");
-      return next;
-    });
-  };
+  // The threshold: on a world change, a veil of the incoming color "ink-dims".
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) return;
+    setVeil(true);
+    const t = setTimeout(() => setVeil(false), 520);
+    return () => clearTimeout(t);
+  }, [view]);
+
+  const enterPrivate = () => setView("private");
+  const exitPublic = () => setView("public");
+  const toggleView = () =>
+    setView((v) => (v === "private" ? "public" : "private"));
+
+  const isPrivate = view === "private";
+  const theme = isPrivate ? privateTheme : publicTheme;
 
   return (
-    <ThemeModeContext.Provider value={{ isDark, toggleTheme }}>
-      <ThemeProvider theme={isDark ? darkTheme : lightTheme}>
+    <ViewContext.Provider value={{ view, isPrivate, enterPrivate, exitPublic, toggleView }}>
+      <ThemeProvider theme={theme}>
         <CssBaseline />
-        <style>{`::placeholder { color: ${isDark ? "#4a8f5c" : "#2d6a3f"}; opacity: 0.8; }`}</style>
+        <style>{`::placeholder { color: ${isPrivate ? "#8A9099" : "#6E665A"}; opacity: 0.7; }`}</style>
         {children}
+        {/* Threshold veil: covers the world change and fades out. */}
+        <div
+          key={view}
+          aria-hidden
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 2000,
+            pointerEvents: "none",
+            backgroundColor: VEIL_BG[view],
+            opacity: 0,
+            animation: veil ? "r1doVeil 520ms ease" : "none",
+          }}
+        />
       </ThemeProvider>
-    </ThemeModeContext.Provider>
+    </ViewContext.Provider>
   );
 }

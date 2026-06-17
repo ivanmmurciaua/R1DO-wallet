@@ -1,24 +1,11 @@
-import { PasskeyArgType } from "@safe-global/protocol-kit";
-import { Address } from "viem";
-
 export type PasskeyResponseType = {
-  fingerprint: string;
-  passkey: PasskeyArgType;
+  rawId: string;
   prfOutput?: Uint8Array;
 };
 
-export type PasskeyOnchainResponseType = {
-  rawId: string;
-  coordinateX: string;
-  coordinateY: string;
-  userAddress: Address;
-  safeAddress: Address;
-  timestamp: number;
-};
-
-export type LocalStorageData = {
+// v2: localStorage keeps only per-wallet metadata. Credentials (username →
+// rawId) live in the shared IndexedDB R1DOToolsDB (src/lib/credstore.ts).
+export type WalletMeta = {
   username: string;
-  fingerprint: string;
-  passkey: PasskeyArgType;
   privacy?: boolean;
 };

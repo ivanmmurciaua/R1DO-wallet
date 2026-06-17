@@ -1,16 +1,5 @@
-import { keccak256, toHex } from "viem";
-import { PasskeyArgType, extractPasskeyData } from "@safe-global/protocol-kit";
-import { PACKED_VERIFIERS_HEX } from "@/app/constants";
-
-import { registryABI } from "./registryAbi";
-import { REGISTRY_ADDRESS } from "@/app/constants";
-import { client } from "./client";
-import { PasskeyOnchainResponseType, PasskeyResponseType } from "@/types";
+import { PasskeyResponseType } from "@/types";
 import { log } from "./common";
-import { setLocalData } from "./localstorage";
-
-export const generateFingerprint = (userAuthKey: string) =>
-  keccak256(toHex(userAuthKey));
 
 export const checkPRFSupport = async (): Promise<boolean> => {
   try {
@@ -48,16 +37,17 @@ const PRF_SALT = new TextEncoder().encode("r1do-stealth-v1").buffer;
 
 export async function generateCredential(
   displayName: string,
-  external: boolean = false,
+  // kept for call-site compatibility; v2 always creates resident keys
+  _external: boolean = false,
 ) {
+  // v2: ALWAYS resident (discoverable). With a resident credential the
+  // wallet works on a new device from the passkey alone (sync or QR/CDA)
+  // — the directory becomes optional, never a prerequisite for funds.
   const authenticatorSelection: AuthenticatorSelectionCriteria = {
     userVerification: "preferred",
+    requireResidentKey: true,
+    residentKey: "required",
   };
-
-  if (external) {
-    authenticatorSelection.requireResidentKey = true;
-    authenticatorSelection.residentKey = "required";
-  }
 
   const passkeyCredential = await navigator.credentials.create({
     publicKey: {
@@ -98,56 +88,37 @@ export async function generateCredential(
 
   return {
     passkeyCredential,
-    userAuthKey: displayName,
     prfOutput,
   };
 }
 
 /**
  * Create a passkey using WebAuthn API.
- * @returns {Promise<PasskeyResponseType>} Object with rawId and coordinates related with a fingerprint.
- * @throws {Error} If passkey creation fails.
+ * v2: only the rawId (credential pointer) and the PRF output matter — the
+ * P-256 public key never leaves the authenticator's role of gating the PRF.
+ * Nothing is persisted here; the caller stores the credential only after
+ * the PRF check passes.
+ * @returns {Promise<PasskeyResponseType>} rawId is "" if creation failed.
  */
 export async function createPasskey(
   username: string,
   external: boolean = false,
 ): Promise<PasskeyResponseType> {
   try {
-    const { passkeyCredential, userAuthKey, prfOutput } = await generateCredential(
+    const { passkeyCredential, prfOutput } = await generateCredential(
       username,
       external,
     );
 
-    // Generate fingerprint
-    const fingerprint = generateFingerprint(userAuthKey);
-    // TRACE - DEBUG
-    // console.log("Creating ", fingerprint);
+    const rawId = Buffer.from(
+      (passkeyCredential as PublicKeyCredential).rawId,
+    ).toString("hex");
 
-    const extracted = await extractPasskeyData(passkeyCredential);
-    const passkey: PasskeyArgType = {
-      ...extracted,
-      verifierAddress: PACKED_VERIFIERS_HEX,
-    };
-
-    setLocalData(username, "", passkey);
-
-    return {
-      fingerprint,
-      passkey,
-      prfOutput,
-    };
+    return { rawId, prfOutput };
   } catch (e: unknown) {
     console.error(e);
     await log("creatingPasskey", e);
-
-    return {
-      fingerprint: "",
-      passkey: {
-        rawId: "",
-        coordinates: { x: "", y: "" },
-        verifierAddress: "",
-      },
-    };
+    return { rawId: "" };
   }
 }
 
@@ -193,21 +164,5 @@ export async function loadFromDevice(rawId: string): Promise<Uint8Array | null> 
   }
 }
 
-export async function readFromSC(
-  functionName: string,
-  fingerprint: string,
-): Promise<boolean | PasskeyOnchainResponseType | null> {
-  try {
-    const data = (await client.readContract({
-      address: REGISTRY_ADDRESS,
-      abi: registryABI,
-      functionName: functionName,
-      args: [fingerprint],
-    })) as boolean | PasskeyOnchainResponseType;
-    return data;
-  } catch (e: unknown) {
-    console.error(e);
-    await log(functionName, e);
-    return null;
-  }
-}
+// v2: the legacy on-chain PasskeyRegistry (readFromSC) is gone. Username
+// resolution lives in src/lib/registry-v2.ts (Argon2id-encrypted directory).

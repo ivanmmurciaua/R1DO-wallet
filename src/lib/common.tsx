@@ -1,14 +1,5 @@
+// Client-side error logger. (Antes hacía POST a /api/log-error, pero la app se
+// exporta estática para IPFS — sin servidor — así que logueamos en consola.)
 export const log = async (context: string, e: unknown) => {
-  try {
-    await fetch("/api/log-error", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        error: e?.toString?.() || String(e),
-        context: context,
-      }),
-    });
-  } catch (apiErr) {
-    console.error("Failed to log error to server:", apiErr);
-  }
+  console.error(`[R1DO]${context ? " [" + context + "]" : ""}:`, e);
 };
