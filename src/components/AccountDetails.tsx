@@ -1,11 +1,12 @@
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { useEffect, useState } from "react";
 import { Snackbar, Alert, CircularProgress } from "@mui/material";
-import { formatUnits, createPublicClient, http } from "viem";
+import { formatUnits, createPublicClient } from "viem";
 import { sepolia } from "viem/chains";
+import { sepoliaTransport } from "@/app/constants";
 import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
-import { getDecimals, getSymbol, getLocalData, getStealthUTXOs } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getWalletMeta, getStealthUTXOs, getMetaAddress } from "@/lib/localstorage";
 
 type props = {
   username: string;
@@ -24,7 +25,7 @@ const formatBalance = (value: number): string => {
 };
 
 export default function AccountDetails({ username, wallet, address }: props) {
-  const [decimals, setDecimals] = useState<number>(15);
+  const [decimals, setDecimals] = useState<number>(13);
   const [symbol, setSymbol] = useState<string>("⧫");
   const [isLoaded, setLoaded] = useState(false);
   const [userBalance, setBalance] = useState<number>(0.0);
@@ -32,9 +33,9 @@ export default function AccountDetails({ username, wallet, address }: props) {
   const [showCopySuccess, setShowCopySuccess] = useState(false);
   const [copyWarning, setCopyWarning] = useState(false);
 
-  const privacy = getLocalData(username)?.privacy ?? false;
+  const privacy = getWalletMeta(username)?.privacy ?? false;
 
-  const publicClient = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
+  const publicClient = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
 
   useEffect(() => {
     if (!wallet) return;
@@ -98,7 +99,19 @@ export default function AccountDetails({ username, wallet, address }: props) {
 
   const handleCopyAddress = async () => {
     if (privacy) {
-      setCopyWarning(true);
+      // Δ1: in privacy mode the shareable identifier is the meta-address —
+      // public data, distributed off-chain (no registry).
+      const meta = getMetaAddress(username);
+      if (!meta) {
+        setCopyWarning(true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(meta);
+        setShowCopySuccess(true);
+      } catch (err) {
+        console.error("Failed to copy meta-address:", err);
+      }
       return;
     }
     try {
@@ -188,7 +201,9 @@ export default function AccountDetails({ username, wallet, address }: props) {
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
         <Alert onClose={() => setShowCopySuccess(false)} severity="success" variant="filled">
-          Address copied to clipboard!
+          {privacy
+            ? "Meta-address copied — share it to receive private payments!"
+            : "Address copied to clipboard!"}
         </Alert>
       </Snackbar>
 
@@ -203,7 +218,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
           variant="filled"
           sx={{ backgroundColor: "#c0392b" }}
         >
-          Copying your <strong>public</strong> address is disabled in privacy mode — sharing it would let others trace your on-chain activity.
+          Your meta-address is not available yet — log in again so it can be derived from your passkey.
         </Alert>
       </Snackbar>
     </div>

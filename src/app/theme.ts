@@ -1,109 +1,96 @@
 "use client";
 import { createTheme } from "@mui/material/styles";
 
-const baseTypography = {
-  fontFamily: "var(--font-geist-mono), monospace",
-  h4: {
-    fontWeight: 700,
-    letterSpacing: "0.04em",
-    textTransform: "uppercase" as const,
-  },
-  h6: { fontWeight: 700, letterSpacing: "0.04em" },
-  button: { letterSpacing: "0.08em" },
+/* ════════════════════════════════════════════════════════════════════
+   TWO WORLDS, ONE TOGGLE — no dark/light; the theme is decided by `view`.
+
+   · publicTheme  — 和 (washi): Japanese, light, serene, warm paper + sumi
+                    ink + indigo accent. Headings in Mincho serif.
+   · privateTheme — 影 (kage): ninja, dark, stealthy, near-black + cold
+                    low-saturation steel. Mono (terminal) everywhere.
+
+   Designed INDEPENDENTLY (not one as an inversion of the other).
+   ════════════════════════════════════════════════════════════════════ */
+
+const SANS = "var(--font-geist-sans), system-ui, sans-serif";
+const MONO = "var(--font-geist-mono), ui-monospace, monospace";
+const MINCHO = "var(--font-mincho), serif";
+
+/* ─────────────────────────── 和 · PUBLIC ──────────────────────────── */
+
+const WASHI = {
+  bg: "#F4F0E6", // washi paper
+  paper: "#FCFAF3", // surface
+  sumi: "#23211C", // ink
+  muted: "#6E665A",
+  ai: "#2E4F6B", // 藍 indigo (accent)
+  aiDark: "#233E55",
+  matcha: "#6E8B5B", // 抹茶 (positive)
+  shu: "#B5502B", // 朱 vermilion (error/danger)
+  hairline: "rgba(35,33,28,0.12)",
 };
 
-const baseShape = { borderRadius: 2 };
-
-const baseComponents = {
-  MuiButton: {
-    styleOverrides: {
-      root: {
-        textTransform: "uppercase" as const,
-        fontFamily: "var(--font-geist-mono), monospace",
-        fontWeight: 700,
-        letterSpacing: "0.1em",
-        borderRadius: 2,
-        paddingTop: 10,
-        paddingBottom: 10,
-        transition: "all 0.15s ease",
-      },
-    },
-  },
-  MuiListItem: { styleOverrides: { root: { borderRadius: 0 } } },
-  MuiIconButton: {
-    styleOverrides: { root: { borderRadius: 2 } },
-  },
-};
-
-export const lightTheme = createTheme({
+export const publicTheme = createTheme({
   palette: {
     mode: "light",
-    primary: {
-      main: "#15803d",
-      light: "#16a34a",
-      dark: "#166534",
-      contrastText: "#ffffff",
-    },
-    secondary: { main: "#15803d", contrastText: "#ffffff" },
-    info: { main: "#15803d", contrastText: "#ffffff" },
-    background: { default: "#f0f7f2", paper: "#ffffff" },
-    text: { primary: "#0a2e14", secondary: "#2d6a3f" },
-    divider: "rgba(21,128,61,0.15)",
-    error: { main: "#dc2626" },
-    success: { main: "#15803d" },
+    primary: { main: WASHI.ai, light: "#3A5E7C", dark: WASHI.aiDark, contrastText: "#FCFAF3" },
+    secondary: { main: WASHI.ai, contrastText: "#FCFAF3" },
+    info: { main: WASHI.ai, contrastText: "#FCFAF3" },
+    background: { default: WASHI.bg, paper: WASHI.paper },
+    text: { primary: WASHI.sumi, secondary: WASHI.muted },
+    divider: WASHI.hairline,
+    error: { main: WASHI.shu },
+    success: { main: WASHI.matcha },
   },
   typography: {
-    ...baseTypography,
-    body2: { color: "#2d6a3f", fontFamily: "var(--font-geist-mono), monospace" },
+    fontFamily: SANS,
+    h2: { fontFamily: MINCHO, fontWeight: 500, letterSpacing: "0.01em" },
+    h4: { fontFamily: MINCHO, fontWeight: 500, letterSpacing: "0.01em" },
+    h6: { fontFamily: MINCHO, fontWeight: 500, letterSpacing: "0.02em" },
+    body2: { color: WASHI.muted, fontFamily: SANS },
+    button: { letterSpacing: "0.03em" },
   },
-  shape: baseShape,
+  shape: { borderRadius: 10 },
   components: {
-    ...baseComponents,
     MuiCssBaseline: {
-      styleOverrides: { body: { backgroundColor: "#f0f7f2" } },
+      styleOverrides: {
+        body: { backgroundColor: WASHI.bg, color: WASHI.sumi, fontFamily: SANS },
+      },
     },
     MuiButton: {
       styleOverrides: {
-        ...baseComponents.MuiButton.styleOverrides,
+        root: {
+          textTransform: "none" as const,
+          fontFamily: SANS,
+          fontWeight: 600,
+          letterSpacing: "0.02em",
+          borderRadius: 10,
+          paddingTop: 10,
+          paddingBottom: 10,
+          transition: "all 0.2s ease",
+        },
         containedPrimary: {
-          backgroundColor: "#15803d",
-          color: "#ffffff",
-          boxShadow: "0 0 10px rgba(21,128,61,0.2)",
-          "&:hover": {
-            backgroundColor: "#166534",
-            boxShadow: "0 0 16px rgba(21,128,61,0.35)",
-          },
+          backgroundColor: WASHI.ai,
+          color: "#FCFAF3",
+          boxShadow: "none",
+          "&:hover": { backgroundColor: WASHI.aiDark, boxShadow: "0 4px 14px rgba(46,79,107,0.22)" },
         },
         containedSecondary: {
           backgroundColor: "transparent",
-          color: "#15803d",
-          border: "1px solid rgba(21,128,61,0.4)",
+          color: WASHI.ai,
+          border: `1px solid ${WASHI.hairline}`,
           boxShadow: "none",
-          "&:hover": {
-            backgroundColor: "rgba(21,128,61,0.07)",
-            border: "1px solid #15803d",
-          },
-        },
-        containedInfo: {
-          backgroundColor: "#15803d",
-          color: "#ffffff",
-          "&:hover": { backgroundColor: "#166534" },
+          "&:hover": { backgroundColor: "rgba(46,79,107,0.06)", border: `1px solid ${WASHI.ai}` },
         },
         outlinedPrimary: {
-          borderColor: "rgba(21,128,61,0.4)",
-          color: "#15803d",
-          "&:hover": {
-            borderColor: "#15803d",
-            backgroundColor: "rgba(21,128,61,0.06)",
-          },
+          borderColor: WASHI.hairline,
+          color: WASHI.ai,
+          "&:hover": { borderColor: WASHI.ai, backgroundColor: "rgba(46,79,107,0.05)" },
         },
         text: {
-          color: "#2d6a3f",
-          fontFamily: "var(--font-geist-mono), monospace",
-          "&:hover": {
-            color: "#15803d",
-            backgroundColor: "rgba(21,128,61,0.05)",
-          },
+          color: WASHI.muted,
+          fontFamily: SANS,
+          "&:hover": { color: WASHI.ai, backgroundColor: "rgba(46,79,107,0.05)" },
         },
       },
     },
@@ -111,118 +98,111 @@ export const lightTheme = createTheme({
       styleOverrides: {
         root: {
           backgroundImage: "none",
-          backgroundColor: "#ffffff",
-          border: "1px solid rgba(21,128,61,0.15)",
+          backgroundColor: WASHI.paper,
+          border: `1px solid ${WASHI.hairline}`,
         },
       },
     },
-    MuiCircularProgress: { styleOverrides: { root: { color: "#15803d" } } },
+    MuiListItem: { styleOverrides: { root: { borderRadius: 8 } } },
+    MuiCircularProgress: { styleOverrides: { root: { color: WASHI.ai } } },
     MuiAlert: {
       styleOverrides: {
-        filledSuccess: {
-          backgroundColor: "#dcfce7",
-          color: "#166534",
-          border: "1px solid rgba(21,128,61,0.3)",
-        },
+        filledSuccess: { backgroundColor: "#E7EFDF", color: "#3F5630", border: `1px solid rgba(110,139,91,0.4)` },
       },
     },
     MuiIconButton: {
       styleOverrides: {
         root: {
-          borderRadius: 2,
-          color: "#2d6a3f",
-          "&:hover": {
-            color: "#15803d",
-            backgroundColor: "rgba(21,128,61,0.07)",
-          },
+          borderRadius: 8,
+          color: WASHI.muted,
+          "&:hover": { color: WASHI.ai, backgroundColor: "rgba(46,79,107,0.06)" },
         },
       },
     },
     MuiPopover: {
       styleOverrides: {
-        paper: {
-          border: "1px solid rgba(21,128,61,0.25)",
-          boxShadow: "0 4px 20px rgba(21,128,61,0.1)",
-        },
+        paper: { border: `1px solid ${WASHI.hairline}`, boxShadow: "0 6px 24px rgba(35,33,28,0.1)" },
       },
     },
   },
 });
 
-export const darkTheme = createTheme({
+/* ─────────────────────────── 影 · PRIVATE ─────────────────────────── */
+
+const KAGE = {
+  bg: "#0C0D0F", // night sumi
+  paper: "#15171A", // surface
+  raised: "#1C1F23",
+  text: "#E6E8EA",
+  muted: "#8A9099",
+  steel: "#5B8DB8", // cold steel (accent, low saturation)
+  steelHi: "#74A6D0",
+  teal: "#4C9A8F", // muted positive
+  ember: "#C75B4A", // contained value/danger
+  hairline: "rgba(255,255,255,0.08)",
+};
+
+export const privateTheme = createTheme({
   palette: {
     mode: "dark",
-    primary: {
-      main: "#00e54d",
-      light: "#00ff5e",
-      dark: "#00b33d",
-      contrastText: "#000000",
-    },
-    secondary: { main: "#00e54d", contrastText: "#000000" },
-    info: { main: "#00e54d", contrastText: "#000000" },
-    background: { default: "#000000", paper: "#050505" },
-    text: { primary: "#ccffcc", secondary: "#4a8f5c" },
-    divider: "rgba(0,229,77,0.15)",
-    error: { main: "#ff4444" },
-    success: { main: "#00e54d" },
+    primary: { main: KAGE.steel, light: KAGE.steelHi, dark: "#477191", contrastText: "#0C0D0F" },
+    secondary: { main: KAGE.steel, contrastText: "#0C0D0F" },
+    info: { main: KAGE.steel, contrastText: "#0C0D0F" },
+    background: { default: KAGE.bg, paper: KAGE.paper },
+    text: { primary: KAGE.text, secondary: KAGE.muted },
+    divider: KAGE.hairline,
+    error: { main: KAGE.ember },
+    success: { main: KAGE.teal },
   },
   typography: {
-    ...baseTypography,
-    body2: { color: "#4a8f5c", fontFamily: "var(--font-geist-mono), monospace" },
+    fontFamily: MONO,
+    h2: { fontFamily: MONO, fontWeight: 700, letterSpacing: "0.04em" },
+    h4: { fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" as const },
+    h6: { fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" as const },
+    body2: { color: KAGE.muted, fontFamily: MONO },
+    button: { letterSpacing: "0.1em" },
   },
-  shape: baseShape,
+  shape: { borderRadius: 2 },
   components: {
-    ...baseComponents,
     MuiCssBaseline: {
-      styleOverrides: { body: { backgroundColor: "#000000" } },
+      styleOverrides: {
+        body: { backgroundColor: KAGE.bg, color: KAGE.text, fontFamily: MONO },
+      },
     },
     MuiButton: {
       styleOverrides: {
-        ...baseComponents.MuiButton.styleOverrides,
+        root: {
+          textTransform: "uppercase" as const,
+          fontFamily: MONO,
+          fontWeight: 700,
+          letterSpacing: "0.1em",
+          borderRadius: 2,
+          paddingTop: 10,
+          paddingBottom: 10,
+          transition: "all 0.15s ease",
+        },
         containedPrimary: {
-          backgroundColor: "#00e54d",
-          color: "#000000",
-          boxShadow: "0 0 12px rgba(0,229,77,0.3)",
-          "&:hover": {
-            backgroundColor: "#00ff5e",
-            boxShadow: "0 0 20px rgba(0,229,77,0.6)",
-          },
+          backgroundColor: KAGE.steel,
+          color: "#0C0D0F",
+          boxShadow: "0 0 10px rgba(91,141,184,0.18)",
+          "&:hover": { backgroundColor: KAGE.steelHi, boxShadow: "0 0 18px rgba(91,141,184,0.35)" },
         },
         containedSecondary: {
           backgroundColor: "transparent",
-          color: "#00e54d",
-          border: "1px solid rgba(0,229,77,0.4)",
+          color: KAGE.steel,
+          border: `1px solid ${KAGE.hairline}`,
           boxShadow: "none",
-          "&:hover": {
-            backgroundColor: "rgba(0,229,77,0.07)",
-            border: "1px solid #00e54d",
-          },
-        },
-        containedInfo: {
-          backgroundColor: "#00e54d",
-          color: "#000000",
-          boxShadow: "0 0 12px rgba(0,229,77,0.3)",
-          "&:hover": {
-            backgroundColor: "#00ff5e",
-            boxShadow: "0 0 20px rgba(0,229,77,0.6)",
-          },
+          "&:hover": { backgroundColor: "rgba(91,141,184,0.07)", border: `1px solid ${KAGE.steel}` },
         },
         outlinedPrimary: {
-          borderColor: "rgba(0,229,77,0.5)",
-          color: "#00e54d",
-          "&:hover": {
-            borderColor: "#00e54d",
-            backgroundColor: "rgba(0,229,77,0.07)",
-            boxShadow: "0 0 12px rgba(0,229,77,0.2)",
-          },
+          borderColor: "rgba(91,141,184,0.4)",
+          color: KAGE.steel,
+          "&:hover": { borderColor: KAGE.steel, backgroundColor: "rgba(91,141,184,0.07)" },
         },
         text: {
-          color: "#4a8f5c",
-          fontFamily: "var(--font-geist-mono), monospace",
-          "&:hover": {
-            color: "#00e54d",
-            backgroundColor: "rgba(0,229,77,0.05)",
-          },
+          color: KAGE.muted,
+          fontFamily: MONO,
+          "&:hover": { color: KAGE.steel, backgroundColor: "rgba(91,141,184,0.05)" },
         },
       },
     },
@@ -230,39 +210,30 @@ export const darkTheme = createTheme({
       styleOverrides: {
         root: {
           backgroundImage: "none",
-          backgroundColor: "#050505",
-          border: "1px solid rgba(0,229,77,0.15)",
+          backgroundColor: KAGE.paper,
+          border: `1px solid ${KAGE.hairline}`,
         },
       },
     },
-    MuiCircularProgress: { styleOverrides: { root: { color: "#00e54d" } } },
+    MuiListItem: { styleOverrides: { root: { borderRadius: 0 } } },
+    MuiCircularProgress: { styleOverrides: { root: { color: KAGE.steel } } },
     MuiAlert: {
       styleOverrides: {
-        filledSuccess: {
-          backgroundColor: "#001a0d",
-          color: "#00e54d",
-          border: "1px solid rgba(0,229,77,0.3)",
-        },
+        filledSuccess: { backgroundColor: "#0E1A19", color: KAGE.teal, border: `1px solid rgba(76,154,143,0.35)` },
       },
     },
     MuiIconButton: {
       styleOverrides: {
         root: {
           borderRadius: 2,
-          color: "#4a8f5c",
-          "&:hover": {
-            color: "#00e54d",
-            backgroundColor: "rgba(0,229,77,0.07)",
-          },
+          color: KAGE.muted,
+          "&:hover": { color: KAGE.steel, backgroundColor: "rgba(91,141,184,0.07)" },
         },
       },
     },
     MuiPopover: {
       styleOverrides: {
-        paper: {
-          border: "1px solid rgba(0,229,77,0.3)",
-          boxShadow: "0 0 20px rgba(0,229,77,0.1)",
-        },
+        paper: { border: `1px solid ${KAGE.hairline}`, boxShadow: "0 0 24px rgba(0,0,0,0.5)" },
       },
     },
   },

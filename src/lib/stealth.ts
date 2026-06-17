@@ -2,34 +2,34 @@ import { keccak256, toHex, concat, hexToBytes, getAddress } from "viem";
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 
-// ERC-6538 Stealth Meta-Address Registry (same address on all chains)
-export const STEALTH_REGISTRY_ADDRESS =
-  "0x6538E6bf4B0eBd30A8Ea093027Ac2422ce5d6538" as const;
+// ── Δ1: announcer-less delivery ──────────────────────────────────────────────
+// The ERC-5564 announcer and the ERC-6538 registry are gone. The note-delivery
+// blob travels fused with the payment itself, as calldata of the value transfer
+// to the (counterfactual) stealth Safe:
+//
+//   blob = MAGIC(4) ‖ viewTag(1) ‖ ephemeralPubKey(33) ‖ kemCiphertext(1088)
+//
+// The stealth Safe has no code at payment time, so the calldata is inert — it
+// exists only as bytes inside the UserOp, where the receiver's scanner finds it
+// (EntryPoint UserOperationEvent → tx → calldata pattern match → trial-decrypt).
+// Meta-addresses are distributed off-chain (QR, profile, direct message).
 
-export const STEALTH_SCHEME_ID = 4n; // PQ hybrid: secp256k1 + ML-KEM-768
+export const STEALTH_MAGIC = "0x73706531" as const; // "spe1"
+export const STEALTH_BLOB_LENGTH = 4 + 1 + 33 + 1088; // 1126 bytes
 
-export const STEALTH_REGISTRY_ABI = [
-  {
-    name: "registerKeys",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "schemeId",           type: "uint256" },
-      { name: "stealthMetaAddress", type: "bytes"   },
-    ],
-    outputs: [],
-  },
-  {
-    name: "stealthMetaAddressOf",
-    type: "function",
-    stateMutability: "view",
-    inputs: [
-      { name: "registrant", type: "address" },
-      { name: "schemeId",   type: "uint256" },
-    ],
-    outputs: [{ name: "", type: "bytes" }],
-  },
-] as const;
+// EntryPoint v0.7 — the scanner's index source (canonical AA infra, not a
+// privacy-specific contract: every 4337 tx emits these events).
+export const ENTRYPOINT_ADDRESS = "0x0000000071727De22E5E9d8BAf0edAc6f37da032" as const;
+
+// v2: the main Safe owner is a secp256k1 key derived from the PRF — a
+// sibling of the stealth keys under HKDF. The passkey stops signing
+// transactions and becomes the biometric gate of this derivation: no
+// P-256 coordinates need to exist anywhere, and a Falcon/ML-DSA owner is
+// one more HKDF branch away when EVM signature migration lands.
+export function deriveOwnerKey(prfOutput: Uint8Array): `0x${string}` {
+  const ownerSeed = hkdf(sha256, prfOutput, undefined, "r1do/wallet/owner/v2", 32);
+  return toHex(ownerSeed) as `0x${string}`;
+}
 
 export interface PQStealthKeys {
   spendingPrivateKey: `0x${string}`;
@@ -80,67 +80,10 @@ export async function derivePQKeysFromPRF(prfOutput: Uint8Array): Promise<PQStea
   };
 }
 
-// ── ERC-6538 registration check ──────────────────────────────────────────────
-
-// ── ERC-5564 Announcer ────────────────────────────────────────────────────────
-
-export const ANNOUNCER_ADDRESS =
-  "0x55649E01B5Df198D18D95b5cc5051630cfD45564" as const;
-
-export const ANNOUNCER_ABI = [
-  {
-    name: "announce",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "schemeId",       type: "uint256" },
-      { name: "stealthAddress", type: "address" },
-      { name: "ephemeralPubKey",type: "bytes"   },
-      { name: "metadata",       type: "bytes"   },
-    ],
-    outputs: [],
-  },
-  {
-    name: "Announcement",
-    type: "event",
-    inputs: [
-      { name: "schemeId",       type: "uint256",  indexed: true  },
-      { name: "stealthAddress", type: "address",  indexed: true  },
-      { name: "caller",         type: "address",  indexed: true  },
-      { name: "ephemeralPubKey",type: "bytes",    indexed: false },
-      { name: "metadata",       type: "bytes",    indexed: false },
-    ],
-  },
-] as const;
-
-// ── ERC-6538 registration check ──────────────────────────────────────────────
-
-export async function isStealthRegistered(safeAddress: string): Promise<boolean> {
-  const { createPublicClient, http } = await import("viem");
-  const { sepolia } = await import("viem/chains");
-
-  const publicClient = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
-  const result = await publicClient.readContract({
-    address: STEALTH_REGISTRY_ADDRESS,
-    abi: STEALTH_REGISTRY_ABI,
-    functionName: "stealthMetaAddressOf",
-    args: [safeAddress as `0x${string}`, STEALTH_SCHEME_ID],
-  });
-  return (result as `0x${string}`).length > 2; // "0x" = not registered
-}
-
-export async function getStealthMetaAddress(safeAddress: string): Promise<`0x${string}` | null> {
-  const { createPublicClient, http } = await import("viem");
-  const { sepolia } = await import("viem/chains");
-
-  const publicClient = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
-  const result = await publicClient.readContract({
-    address: STEALTH_REGISTRY_ADDRESS,
-    abi: STEALTH_REGISTRY_ABI,
-    functionName: "stealthMetaAddressOf",
-    args: [safeAddress as `0x${string}`, STEALTH_SCHEME_ID],
-  }) as `0x${string}`;
-  return result.length > 2 ? result : null;
+// Validates the off-chain-distributed meta-address format:
+// 0x00 + pk_spend(33) + pk_view(33) + mlkemEncapsKey(1184) = 1251 bytes.
+export function isPQMetaAddress(input: string): input is `0x${string}` {
+  return /^0x00[0-9a-fA-F]{2500}$/.test(input.trim());
 }
 
 // ── Stealth Safe address prediction ──────────────────────────────────────────
@@ -181,11 +124,11 @@ async function predictStealthSafeAddress(
 // ── Stealth payment generation (sender side) ──────────────────────────────────
 
 export interface StealthPayment {
-  stealthAddress: `0x${string}`;
+  stealthAddress:  `0x${string}`;
   ephemeralPubkey: `0x${string}`; // 33 bytes compressed
   kemCiphertext:   `0x${string}`; // 1088 bytes
   viewTag:         number;
-  metadata:        `0x${string}`; // 0x01 || viewTag(1) || kemCiphertext(1088)
+  calldataBlob:    `0x${string}`; // MAGIC(4) ‖ viewTag(1) ‖ R(33) ‖ ctKEM(1088) — rides on the payment tx
 }
 
 export async function generateStealthPayment(metaAddressHex: `0x${string}`): Promise<StealthPayment> {
@@ -227,109 +170,63 @@ export async function generateStealthPayment(metaAddressHex: `0x${string}`): Pro
   const saltNonce      = BigInt(h).toString();
   const stealthAddress = await predictStealthSafeAddress(stealthOwner, saltNonce);
 
-  // metadata = 0x01 || viewTag(1 byte) || kemCiphertext(1088 bytes)
-  const metadata = toHex(
-    concat([new Uint8Array([0x01, viewTag]), kemCiphertext])
+  // Δ1: the blob is the tx calldata itself — no announcer call.
+  const calldataBlob = toHex(
+    concat([hexToBytes(STEALTH_MAGIC), new Uint8Array([viewTag]), ephemeralPubKey, kemCiphertext])
   ) as `0x${string}`;
 
   console.log(`[generateStealthPayment] stealthOwner (EOA): ${stealthOwner}`);
   console.log(`[generateStealthPayment] stealthAddress (Safe): ${stealthAddress}`);
   console.log(`[generateStealthPayment] viewTag: 0x${viewTag.toString(16).padStart(2, "0")}`);
+  console.log(`[generateStealthPayment] calldataBlob: ${(calldataBlob.length - 2) / 2} bytes (no announcer)`);
 
   return {
     stealthAddress,
     ephemeralPubkey: toHex(ephemeralPubKey) as `0x${string}`,
     kemCiphertext:   toHex(kemCiphertext)   as `0x${string}`,
     viewTag,
-    metadata,
+    calldataBlob,
   };
 }
 
-// ── Announcement scanning ────────────────────────────────────────────────────
+// ── Calldata blob extraction ─────────────────────────────────────────────────
 
-// ~3 days back on Sepolia (12s block time → ~7200 blocks/day)
-export const STEALTH_SCAN_DEFAULT_BLOCKS = 21600n;
-
-export async function scanAnnouncements(
-  spendingPrivateKey: `0x${string}`,
-  viewingPrivateKey:  `0x${string}`,
-  mlkemDecapsKey:     Uint8Array,
-  fromBlock:          bigint,
-): Promise<{ utxos: StealthUTXO[]; latestBlock: bigint }> {
-  const { createPublicClient, http, parseAbiItem } = await import("viem");
-  const { sepolia } = await import("viem/chains");
-
-  const publicClient = createPublicClient({ chain: sepolia, transport: http("https://sepolia.drpc.org") });
-  const latestBlock = await publicClient.getBlockNumber();
-
-  const totalBlocks = latestBlock - fromBlock;
-  console.log(`[scanAnnouncements] Scanning blocks ${fromBlock} → ${latestBlock} (${totalBlocks} blocks, batches of 1000)`);
-
-  const CHUNK = 1000n;
-  const announcementEvent = parseAbiItem(
-    "event Announcement(uint256 indexed schemeId, address indexed stealthAddress, address indexed caller, bytes ephemeralPubKey, bytes metadata)",
-  );
-
-  const logs = [];
-  let batchCount = 0;
-  for (let from = fromBlock; from <= latestBlock; from += CHUNK) {
-    const to = from + CHUNK - 1n < latestBlock ? from + CHUNK - 1n : latestBlock;
-    const chunk = await publicClient.getLogs({
-      address: ANNOUNCER_ADDRESS,
-      event: announcementEvent,
-      args: { schemeId: STEALTH_SCHEME_ID },
-      fromBlock: from,
-      toBlock: to,
-    });
-    logs.push(...chunk);
-    batchCount++;
-    if (chunk.length > 0) console.log(`[scanAnnouncements] batch ${batchCount}: blocks ${from}–${to} → ${chunk.length} events`);
-  }
-
-  console.log(`[scanAnnouncements] ${logs.length} scheme-4 announcements found in ${batchCount} batches`);
-
-  const utxos: StealthUTXO[] = [];
-
-  for (const log of logs) {
-    const { stealthAddress, ephemeralPubKey, metadata } = log.args as {
-      stealthAddress: `0x${string}`;
-      ephemeralPubKey: `0x${string}`;
-      metadata: `0x${string}`;
-    };
-    if (!stealthAddress || !ephemeralPubKey || !metadata) continue;
-
-    // metadata = 0x01 || viewTag(1) || kemCiphertext(1088)
-    const metaBytes = hexToBytes(metadata);
-    if (metaBytes.length < 2 + 1088) continue;
-    const announcedViewTag = metaBytes[1];
-    const kemCiphertext    = toHex(metaBytes.slice(2)) as `0x${string}`;
-
-    const match = await checkPQAnnouncement(
-      spendingPrivateKey,
-      viewingPrivateKey,
-      mlkemDecapsKey,
-      ephemeralPubKey,
-      kemCiphertext,
-      stealthAddress,
-      announcedViewTag,
-    );
-
-    if (match) {
-      console.log(`[scanAnnouncements] ✓ UTXO detected: ${stealthAddress} (block ${log.blockNumber})`);
-      utxos.push({
-        stealthAddress,
-        ephemeralPubkey: ephemeralPubKey,
-        kemCiphertext,
-        blockNumber: Number(log.blockNumber),
-      });
-    }
-  }
-
-  console.log(`[scanAnnouncements] Done — ${utxos.length} UTXOs found`);
-  return { utxos, latestBlock };
+export interface StealthBlob {
+  viewTag:         number;
+  ephemeralPubkey: `0x${string}`;
+  kemCiphertext:   `0x${string}`;
 }
 
-// ── Old announcement scanning interface (kept for reference) ──────────────────
+// Finds every well-formed stealth blob inside arbitrary calldata. The blob is
+// nested verbatim in the outer handleOps() calldata (ABI encoding keeps the
+// raw bytes contiguous), so a pattern scan over the tx input is enough.
+export function extractStealthBlobs(input: `0x${string}`): StealthBlob[] {
+  const hex = input.toLowerCase();
+  const magic = STEALTH_MAGIC.slice(2);
+  const blobs: StealthBlob[] = [];
+
+  let at = hex.indexOf(magic, 2);
+  while (at !== -1) {
+    // Hex offsets within the match: magic(8) ‖ viewTag(2) ‖ R(66) ‖ ct(2176)
+    const end = at + STEALTH_BLOB_LENGTH * 2;
+    if (end <= hex.length) {
+      const viewTag = parseInt(hex.slice(at + 8, at + 10), 16);
+      const rHex    = hex.slice(at + 10, at + 76);
+      // Compressed secp256k1 point starts with 02/03 — cheap sanity filter
+      if (rHex.startsWith("02") || rHex.startsWith("03")) {
+        blobs.push({
+          viewTag,
+          ephemeralPubkey: `0x${rHex}` as `0x${string}`,
+          kemCiphertext:   `0x${hex.slice(at + 76, end)}` as `0x${string}`,
+        });
+      }
+    }
+    at = hex.indexOf(magic, at + 8);
+  }
+  return blobs;
+}
+
+// ── Payment check (receiver side) ────────────────────────────────────────────
 
 export interface StealthUTXO {
   stealthAddress:  `0x${string}`;
@@ -338,14 +235,15 @@ export interface StealthUTXO {
   blockNumber:     number;
 }
 
-export async function checkPQAnnouncement(
+// Trial-decrypts one blob. Returns the derived stealth Safe address if the
+// blob is ours, null otherwise. Unlike the announcer flow there is no announced
+// address to compare against: the derived address IS the payment destination
+// (the caller can confirm with a balance check).
+export async function checkPQPayment(
   spendingPrivateKey: `0x${string}`,
   viewingPrivateKey:  `0x${string}`,
   mlkemDecapsKey:     Uint8Array,
-  ephemeralPubkey:    `0x${string}`,
-  kemCiphertext:      `0x${string}`,
-  announcedAddress:   `0x${string}`,
-  announcedViewTag:   number,
+  blob:               StealthBlob,
 ): Promise<`0x${string}` | null> {
   const { getPublicKey, getSharedSecret, Point } = await import("@noble/secp256k1");
   const { ml_kem768 } = await import("@noble/post-quantum/ml-kem.js");
@@ -355,18 +253,22 @@ export async function checkPQAnnouncement(
   const skViewBytes  = hexToBytes(viewingPrivateKey);
   const skSpendBytes = hexToBytes(spendingPrivateKey);
   const pkSpendBytes = getPublicKey(skSpendBytes, true);
-  const R            = hexToBytes(ephemeralPubkey);
-  const ct           = hexToBytes(kemCiphertext);
+  const R            = hexToBytes(blob.ephemeralPubkey);
+  const ct           = hexToBytes(blob.kemCiphertext);
 
-  const sharedCompressed = getSharedSecret(skViewBytes, R, true);
-  const sharedX          = sharedCompressed.slice(1);
-
-  const sharedKem = ml_kem768.decapsulate(ct, mlkemDecapsKey);
+  let sharedX: Uint8Array;
+  let sharedKem: Uint8Array;
+  try {
+    sharedX   = getSharedSecret(skViewBytes, R, true).slice(1);
+    sharedKem = ml_kem768.decapsulate(ct, mlkemDecapsKey);
+  } catch {
+    return null; // malformed point/ciphertext — false positive of the pattern scan
+  }
 
   const h       = keccak256(toHex(concat([sharedX, sharedKem])));
   const viewTag = parseInt(h.slice(2, 4), 16);
 
-  if (viewTag !== announcedViewTag) return null;
+  if (viewTag !== blob.viewTag) return null;
 
   const hScalar = BigInt(h) % SECP256K1_N;
 
@@ -375,13 +277,103 @@ export async function checkPQAnnouncement(
   const addrHash     = keccak256(toHex(uncompressed.slice(1)));
   const stealthOwner = getAddress(`0x${addrHash.slice(-40)}`) as `0x${string}`;
 
-  // Re-derive the predicted Safe address — same saltNonce as the sender computed.
-  const saltNonce      = BigInt(h).toString();
-  const stealthAddress = await predictStealthSafeAddress(stealthOwner, saltNonce);
+  // Re-derive the predicted Safe address — same saltNonce the sender computed.
+  const saltNonce = BigInt(h).toString();
+  return await predictStealthSafeAddress(stealthOwner, saltNonce);
+}
 
-  if (stealthAddress.toLowerCase() !== announcedAddress.toLowerCase()) return null;
+// ── Payment scanning ─────────────────────────────────────────────────────────
 
-  return stealthAddress;
+// ~3 days back on Sepolia (12s block time → ~7200 blocks/day)
+export const STEALTH_SCAN_DEFAULT_BLOCKS = 21600n;
+
+// How many candidate txs to fetch concurrently
+const TX_FETCH_BATCH = 20;
+
+// Scans for incoming stealth payments without any announcer: uses the
+// EntryPoint's UserOperationEvent as a free index (every 4337 tx emits it,
+// stealth or not — it carries no scheme fingerprint), fetches each candidate
+// tx once, pattern-matches the calldata for the magic prefix and
+// trial-decrypts whatever it finds. Direct EOA payments carrying the blob in
+// tx.input would need block-level scanning — out of scope here, since Δ1
+// always pays through the EntryPoint.
+export async function scanStealthPayments(
+  spendingPrivateKey: `0x${string}`,
+  viewingPrivateKey:  `0x${string}`,
+  mlkemDecapsKey:     Uint8Array,
+  fromBlock:          bigint,
+): Promise<{ utxos: StealthUTXO[]; latestBlock: bigint }> {
+  const { createPublicClient, http, fallback, parseAbiItem } = await import("viem");
+  const { sepolia } = await import("viem/chains");
+  const { RPC_URLS } = await import("@/app/constants");
+
+  const publicClient = createPublicClient({ chain: sepolia, transport: fallback(RPC_URLS.map((u) => http(u))) });
+  const latestBlock = await publicClient.getBlockNumber();
+
+  const totalBlocks = latestBlock - fromBlock;
+  console.log(`[scanStealthPayments] Scanning blocks ${fromBlock} → ${latestBlock} (${totalBlocks} blocks, batches of 1000)`);
+
+  const CHUNK = 1000n;
+  const userOpEvent = parseAbiItem(
+    "event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)",
+  );
+
+  // Collect candidate txs (deduped — one handleOps tx bundles many UserOps)
+  const txBlocks = new Map<`0x${string}`, bigint>();
+  let batchCount = 0;
+  for (let from = fromBlock; from <= latestBlock; from += CHUNK) {
+    const to = from + CHUNK - 1n < latestBlock ? from + CHUNK - 1n : latestBlock;
+    const chunk = await publicClient.getLogs({
+      address: ENTRYPOINT_ADDRESS,
+      event: userOpEvent,
+      fromBlock: from,
+      toBlock: to,
+    });
+    for (const log of chunk) {
+      if (log.transactionHash) txBlocks.set(log.transactionHash, log.blockNumber ?? 0n);
+    }
+    batchCount++;
+    if (chunk.length > 0) console.log(`[scanStealthPayments] batch ${batchCount}: blocks ${from}–${to} → ${chunk.length} userOps`);
+  }
+
+  console.log(`[scanStealthPayments] ${txBlocks.size} candidate txs found in ${batchCount} batches`);
+
+  const utxos: StealthUTXO[] = [];
+  const txEntries = Array.from(txBlocks.entries());
+
+  for (let i = 0; i < txEntries.length; i += TX_FETCH_BATCH) {
+    const slice = txEntries.slice(i, i + TX_FETCH_BATCH);
+    const results = await Promise.all(
+      slice.map(async ([hash, blockNumber]) => {
+        try {
+          const tx = await publicClient.getTransaction({ hash });
+          return { input: tx.input as `0x${string}`, blockNumber };
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    for (const result of results) {
+      if (!result) continue;
+      const blobs = extractStealthBlobs(result.input);
+      for (const blob of blobs) {
+        const match = await checkPQPayment(spendingPrivateKey, viewingPrivateKey, mlkemDecapsKey, blob);
+        if (match) {
+          console.log(`[scanStealthPayments] ✓ UTXO detected: ${match} (block ${result.blockNumber})`);
+          utxos.push({
+            stealthAddress:  match,
+            ephemeralPubkey: blob.ephemeralPubkey,
+            kemCiphertext:   blob.kemCiphertext,
+            blockNumber:     Number(result.blockNumber),
+          });
+        }
+      }
+    }
+  }
+
+  console.log(`[scanStealthPayments] Done — ${utxos.length} UTXOs found`);
+  return { utxos, latestBlock };
 }
 
 // Re-derives the spending key for a specific stealth UTXO (call when spending, never store).

@@ -1,96 +1,126 @@
 import { LOCAL_WALLET_LIST } from "@/app/constants";
-import { LocalStorageData } from "@/types";
-import { PasskeyArgType } from "@safe-global/protocol-kit";
-import { PACKED_VERIFIERS_HEX } from "@/app/constants";
+import { WalletMeta } from "@/types";
 import type { StealthUTXO } from "@/lib/stealth";
+import { saveWalletCredential } from "@/lib/credstore";
 
-export const getAllWallets = (): LocalStorageData[] => {
-  const walletList: LocalStorageData[] =
+// v2: localStorage holds only per-wallet metadata ({ username, privacy }).
+// Credentials (username → rawId) live in the shared IndexedDB R1DOToolsDB
+// (credstore.ts); stealth caches in the STEALTH_* keys below.
+
+const readWalletList = (): WalletMeta[] => {
+  const raw: unknown[] =
     JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
-  return walletList.filter((wallet) => wallet.fingerprint !== "");
+  return raw
+    .filter((w): w is Record<string, unknown> => !!w && typeof w === "object")
+    .filter((w) => typeof w.username === "string" && w.username !== "")
+    .map((w) => ({ username: w.username as string, privacy: !!w.privacy }));
 };
 
-export const setLocalData = (
-  username: string,
-  fingerprint: string,
-  passkey: PasskeyArgType,
-): void => {
-  const existingData =
-    JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
-
-  const newWallet = {
-    username: username,
-    fingerprint: fingerprint,
-    passkey: {
-      rawId: passkey.rawId,
-      coordinates: {
-        x: passkey.coordinates.x,
-        y: passkey.coordinates.y,
-      },
-      verifierAddress: passkey.verifierAddress,
-    },
-  };
-  existingData.push(newWallet);
-  localStorage.setItem(LOCAL_WALLET_LIST, JSON.stringify(existingData));
+const writeWalletList = (list: WalletMeta[]): void => {
+  localStorage.setItem(LOCAL_WALLET_LIST, JSON.stringify(list));
 };
 
-export const getLocalData = (username: string): LocalStorageData | null => {
-  const walletList: LocalStorageData[] =
-    JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
+export const getWalletMetas = (): WalletMeta[] => readWalletList();
 
-  const wallet = walletList.find((w) => w.username === username);
-  if (!wallet) return null;
-
-  // Migration: add verifierAddress for entries saved before protocol-kit v7
-  if (!wallet.passkey.verifierAddress) {
-    wallet.passkey.verifierAddress = PACKED_VERIFIERS_HEX;
-  }
-
-  return wallet;
+export const getWalletMeta = (username: string): WalletMeta | null => {
+  const u = username.toLowerCase();
+  return readWalletList().find((w) => w.username.toLowerCase() === u) ?? null;
 };
 
-export const removeLocalData = (username: string): void => {
-  const walletList: LocalStorageData[] =
-    JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
-
-  const updatedWalletList = walletList.filter((w) => w.username !== username);
-  localStorage.setItem(LOCAL_WALLET_LIST, JSON.stringify(updatedWalletList));
-};
-
-export const updateLocalData = (
-  username: string,
-  newFingerprint: string,
-  newPasskey: PasskeyArgType,
-  privacy?: boolean,
-): void => {
-  const walletList: LocalStorageData[] =
-    JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
-
-  const existing = walletList.find((w) => w.username === username);
-  const entry: LocalStorageData = {
+export const setWalletMeta = (username: string, privacy?: boolean): void => {
+  const list = readWalletList();
+  const u = username.toLowerCase();
+  const existing = list.find((w) => w.username.toLowerCase() === u);
+  const entry: WalletMeta = {
     username,
-    fingerprint: newFingerprint,
-    passkey: {
-      rawId: newPasskey.rawId,
-      coordinates: {
-        x: newPasskey.coordinates.x,
-        y: newPasskey.coordinates.y,
-      },
-      verifierAddress: newPasskey.verifierAddress,
-    },
     privacy: privacy ?? existing?.privacy ?? false,
   };
+  writeWalletList(
+    existing
+      ? list.map((w) => (w.username.toLowerCase() === u ? entry : w))
+      : [...list, entry],
+  );
+};
 
-  const exists = walletList.some((w) => w.username === username);
-  const updatedWalletList = exists
-    ? walletList.map((w) => (w.username === username ? entry : w))
-    : [...walletList, entry];
+export const removeWalletMeta = (username: string): void => {
+  const u = username.toLowerCase();
+  writeWalletList(readWalletList().filter((w) => w.username.toLowerCase() !== u));
+  // Drop the per-wallet caches too — they re-derive/rescan on next login.
+  for (const name of new Set([username, u])) {
+    localStorage.removeItem(`${STEALTH_UTXOS_PREFIX}_${name}`);
+    localStorage.removeItem(`${STEALTH_BLOCK_PREFIX}_${name}`);
+    localStorage.removeItem(`${STEALTH_META_PREFIX}_${name}`);
+    localStorage.removeItem(`${DIRECTORY_MARK_PREFIX}_${name}`);
+    localStorage.removeItem(`${POOL_ZK_PREFIX}_${name}`);
+  }
+};
 
-  localStorage.setItem(LOCAL_WALLET_LIST, JSON.stringify(updatedWalletList));
+// Marks "this user's entry exists in directory <address>" so logins skip the
+// Argon2id + on-chain check. Keyed to the directory address: redeploying the
+// contract invalidates the mark and triggers a lazy re-publish.
+const DIRECTORY_MARK_PREFIX = "DIRECTORY_PUBLISHED";
+
+export const getDirectoryMark = (username: string): string | null =>
+  localStorage.getItem(`${DIRECTORY_MARK_PREFIX}_${username}`);
+
+export const setDirectoryMark = (username: string, directoryAddress: string): void => {
+  localStorage.setItem(`${DIRECTORY_MARK_PREFIX}_${username}`, directoryAddress);
+};
+
+/* One-time migration from the v1 list format ({ username, fingerprint,
+   passkey: { rawId, coordinates, verifierAddress }, privacy }): the rawId
+   moves into the shared credential store, the rest collapses to metadata.
+   Entries with fingerprint === "" were aborted registrations — dropped. */
+export const migrateLegacyWalletList = async (): Promise<void> => {
+  const raw: unknown[] =
+    JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const entries = raw.filter((w): w is any => !!w && typeof w === "object");
+  if (!entries.some((w) => "passkey" in w || "fingerprint" in w)) return;
+
+  const kept = entries.filter(
+    (w) => typeof w.username === "string" && w.username !== "" && w.fingerprint !== "",
+  );
+  for (const w of kept) {
+    const rawId = w.passkey?.rawId;
+    if (typeof rawId === "string" && rawId !== "") {
+      try {
+        await saveWalletCredential(w.username, rawId);
+      } catch (e) {
+        console.warn("[localstorage] legacy credential migration failed:", e);
+      }
+    }
+  }
+  writeWalletList(kept.map((w) => ({ username: w.username, privacy: !!w.privacy })));
+  console.log(`[localstorage] ✓ Migrated ${kept.length} wallet entr${kept.length === 1 ? "y" : "ies"} to the v2 format`);
 };
 
 const STEALTH_UTXOS_PREFIX   = "STEALTH_UTXOS";
 const STEALTH_BLOCK_PREFIX   = "STEALTH_LAST_BLOCK";
+const STEALTH_META_PREFIX    = "STEALTH_META_ADDRESS";
+const POOL_ZK_PREFIX         = "POOL_ZK_ADDRESS";
+
+// Cache the user's (public, deterministic) 0zk address so re-entering the
+// private view shows "registered → Unlock" instantly, without an on-chain
+// directory read. It's public data; the secret keys still re-derive from the
+// passkey each session.
+export const getCachedPoolZk = (username: string): string | null =>
+  localStorage.getItem(`${POOL_ZK_PREFIX}_${username}`);
+
+export const setCachedPoolZk = (username: string, zkAddress: string): void => {
+  localStorage.setItem(`${POOL_ZK_PREFIX}_${username}`, zkAddress);
+};
+
+// Δ1: no on-chain registry — the meta-address is public data distributed
+// off-chain. We cache it locally so the UI can offer it for sharing without
+// touching the passkey (it re-derives deterministically from the PRF anyway).
+export const saveMetaAddress = (username: string, metaAddress: `0x${string}`): void => {
+  localStorage.setItem(`${STEALTH_META_PREFIX}_${username}`, metaAddress);
+};
+
+export const getMetaAddress = (username: string): `0x${string}` | null => {
+  return localStorage.getItem(`${STEALTH_META_PREFIX}_${username}`) as `0x${string}` | null;
+};
 
 export const getStealthUTXOs = (username: string): StealthUTXO[] => {
   const raw = localStorage.getItem(`${STEALTH_UTXOS_PREFIX}_${username}`);
@@ -106,6 +136,15 @@ export const saveStealthScan = (
   localStorage.setItem(`${STEALTH_BLOCK_PREFIX}_${username}`, lastBlock.toString());
 };
 
+// Append one stealth UTXO to the local registry WITHOUT touching the scan
+// cursor — used by ghost-mode unshield, whose payment carries no on-chain blob,
+// so the local note is the ONLY way to re-derive its spending key (this device).
+export const addStealthUTXO = (username: string, utxo: StealthUTXO): void => {
+  const existing = getStealthUTXOs(username);
+  if (existing.some((u) => u.stealthAddress.toLowerCase() === utxo.stealthAddress.toLowerCase())) return;
+  localStorage.setItem(`${STEALTH_UTXOS_PREFIX}_${username}`, JSON.stringify([...existing, utxo]));
+};
+
 export const getLastScannedBlock = (username: string): bigint | null => {
   const val = localStorage.getItem(`${STEALTH_BLOCK_PREFIX}_${username}`);
   return val ? BigInt(val) : null;
@@ -114,7 +153,7 @@ export const getLastScannedBlock = (username: string): bigint | null => {
 const LOCAL_AMOUNT_CONFIG = "LOCAL_AMOUNT_CONFIG";
 const LOCAL_SYMBOL_CONFIG = "LOCAL_SYMBOL_CONFIG";
 
-export const DEFAULT_DECIMALS = 15;
+export const DEFAULT_DECIMALS = 13;
 export const DEFAULT_SYMBOL = "⧫";
 
 export const getDecimals = (): number => {
@@ -137,14 +176,4 @@ export const getSymbol = (): string => {
 
 export const setSymbolConfig = (symbol: string): void => {
   localStorage.setItem(LOCAL_SYMBOL_CONFIG, symbol);
-};
-
-const LOCAL_THEME_MODE = "LOCAL_THEME_MODE";
-
-export const getThemeMode = (): "light" | "dark" => {
-  return localStorage.getItem(LOCAL_THEME_MODE) === "dark" ? "dark" : "light";
-};
-
-export const setThemeMode = (mode: "light" | "dark"): void => {
-  localStorage.setItem(LOCAL_THEME_MODE, mode);
 };

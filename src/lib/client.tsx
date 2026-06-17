@@ -6,15 +6,15 @@ import {
   SAFE_MODULES_ADDRESS,
   SAFE_MODULES_VERSION,
   SAFE_SW_VERSION,
+  sepoliaTransport,
 } from "@/app/constants";
-import { PasskeyArgType } from "@safe-global/protocol-kit";
 import { PaymasterOptions, Safe4337Pack } from "@safe-global/relay-kit";
-import { createPublicClient, http } from "viem";
+import { createPublicClient } from "viem";
 import { sepolia } from "viem/chains";
 
 export const client = createPublicClient({
   chain: sepolia,
-  transport: http(),
+  transport: sepoliaTransport(),
 });
 
 const paymasterOptions: PaymasterOptions = {
@@ -22,12 +22,18 @@ const paymasterOptions: PaymasterOptions = {
   paymasterUrl: PAYMASTER_URL,
 };
 
-export const safeClient = async (
-  owner: PasskeyArgType,
+// v2: the Safe owner is a plain secp256k1 key derived from the passkey PRF
+// (deriveOwnerKey). Standard ecrecover verification — no WebAuthn signer
+// contract, no P-256 coordinates anywhere.
+export const safeClientFromOwner = async (
+  ownerPrivateKey: `0x${string}`,
 ): Promise<Safe4337Pack> => {
-  const safe4337Pack = await Safe4337Pack.init({
+  const { privateKeyToAccount } = await import("viem/accounts");
+  const ownerAddress = privateKeyToAccount(ownerPrivateKey).address;
+
+  return Safe4337Pack.init({
     provider: RPC_URL,
-    signer: owner,
+    signer: ownerPrivateKey,
     bundlerUrl: BUNDLER_URL,
     safeModulesVersion: SAFE_MODULES_VERSION,
     customContracts: {
@@ -37,32 +43,12 @@ export const safeClient = async (
     paymasterOptions,
     options: {
       safeVersion: SAFE_SW_VERSION,
-      owners: [],
+      owners: [ownerAddress],
       threshold: 1,
     },
   });
-
-  return safe4337Pack;
 };
 
 export const getLastBlock = async (): Promise<string> => {
   return (await client.getBlockNumber()).toString();
 };
-
-// // TODO: Test it to load an existing wallet.
-// const existingSafeClient = async (
-//   passkey: PasskeyArgType,
-//   address: Address,
-// ): Promise<Safe4337Pack> => {
-//   const safe4337Pack = await Safe4337Pack.init({
-//     provider: RPC_URL,
-//     signer: passkey,
-//     bundlerUrl: BUNDLER_URL,
-//     paymasterOptions,
-//     options: {
-//       safeAddress: address,
-//     },
-//   });
-
-//   return safe4337Pack;
-// };

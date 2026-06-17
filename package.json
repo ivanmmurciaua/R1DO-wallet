@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
+    "dev": "next dev",
+    "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
@@ -13,14 +13,22 @@
     "@emotion/styled": "^11.14.1",
     "@mui/icons-material": "^7.3.1",
     "@mui/material": "^7.3.1",
+    "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^1.8.0",
     "@noble/post-quantum": "^0.6.1",
     "@noble/secp256k1": "^1.7.1",
+    "@railgun-community/shared-models": "^8.0.1",
+    "@railgun-community/wallet": "^10.8.6",
     "@safe-global/protocol-kit": "^7.2.0",
     "@safe-global/relay-kit": "^5.0.0",
+    "ethers": "^6.14.3",
+    "hash-wasm": "^4.12.0",
+    "level-js": "^6.1.0",
+    "localforage": "^1.10.0",
     "next": "15.5.9",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "snarkjs": "^0.7.6",
     "viem": "^2.35.1"
   },
   "devDependencies": {
@@ -30,6 +38,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "15.5.0",
+    "node-polyfill-webpack-plugin": "^4.1.0",
     "typescript": "^5"
   }
 }

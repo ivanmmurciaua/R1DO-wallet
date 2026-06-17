@@ -5,9 +5,20 @@ body {
 }
 
 body {
-  font-family: var(--font-geist-mono), monospace;
+  /* Serene base of the PUBLIC world (sans). The PRIVATE world uses mono via
+     its own components / theme. Background color is set by each theme (MUI). */
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  transition: background-color 450ms ease, color 450ms ease;
+}
+
+/* Native headings (e.g. the balance in the public view) in Mincho serif —
+   seals the Japanese look. The private view uses no native <h1>/<h2>. */
+h1,
+h2 {
+  font-family: var(--font-mincho), serif;
+  font-weight: 500;
 }
 
 * {
@@ -21,7 +32,6 @@ a {
   text-decoration: none;
 }
 
-
 /* Hide number input arrows */
 input[type="number"]::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button {
@@ -32,7 +42,7 @@ input[type="number"] {
   -moz-appearance: textfield;
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar — neutral (world-independent) */
 ::-webkit-scrollbar {
   width: 4px;
 }
@@ -40,9 +50,26 @@ input[type="number"] {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(21, 128, 61, 0.3);
+  background: rgba(128, 128, 128, 0.3);
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(21, 128, 61, 0.6);
+  background: rgba(128, 128, 128, 0.6);
+}
+
+/* Public↔private threshold: veil that covers the world change and fades. */
+@keyframes r1doVeil {
+  0% { opacity: 0; }
+  40% { opacity: 0.92; }
+  100% { opacity: 0; }
+}
+
+/* Pulse of the "validating in the background" badge (private world). */
+@keyframes r1doPulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body { transition: none; }
 }
