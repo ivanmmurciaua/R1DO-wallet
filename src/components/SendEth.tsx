@@ -136,7 +136,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
       const recipientLabel = isPrivate
         ? isPQMetaAddress(trimmed)
           ? `${trimmed.slice(0, 10)}…(meta-address)`
-          : `${trimmed} (private)`
+          : trimmed
         : recipient;
       if (result.success) {
         handleBackToMenu(`Sent ${amount} ${symbol}${metaAddress ? " privately" : ""} to ${recipientLabel}`);

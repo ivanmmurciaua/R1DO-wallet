@@ -12,8 +12,10 @@ import {
   Alert,
   Switch,
   FormControlLabel,
-  Tooltip,
+  IconButton,
+  Popover,
 } from "@mui/material";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import { formatUnits, parseUnits } from "viem";
 import type { Safe4337Pack } from "@safe-global/relay-kit";
 import { getWalletCredential } from "@/lib/credstore";
@@ -21,6 +23,7 @@ import { loadFromDevice } from "@/lib/passkeys";
 import { ensureZkInDirectory, resolvePoolAddress } from "@/lib/registry-v2";
 import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO } from "@/lib/localstorage";
 import type { PoolBalances } from "@/lib/pool/railgun";
+import { protocolName } from "@/lib/pool/protocols";
 import { generateStealthPayment, type StealthUTXO, type StealthPayment } from "@/lib/stealth";
 
 type Coin = { utxo: StealthUTXO; balance: bigint };
@@ -83,6 +86,8 @@ export default function PrivateView({
   // Deposit (shield) state. Source coin: stealth total (privacy) or the public
   // Safe balance (public). privacy-by-default → smartShield from stealth UTXOs.
   const isPrivacy = getWalletMeta(username)?.privacy ?? false;
+  // Active privacy protocol (RAILGUN for now; no switcher yet).
+  const proto = protocolName();
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositAmt, setDepositAmt] = useState("");
   const [sourceBalance, setSourceBalance] = useState<bigint | null>(null); // the source "coin" total
@@ -114,6 +119,8 @@ export default function PrivateView({
   // only via the local note).
   const [unshieldStealth, setUnshieldStealth] = useState<StealthPayment | null>(null);
   const [unshieldAnnounce, setUnshieldAnnounce] = useState(true);
+  // Info popover (Announce/Ghost explainer) — click-to-open, mobile-friendly.
+  const [infoAnchor, setInfoAnchor] = useState<HTMLElement | null>(null);
   // POI activity (finalizing a spent-POI) — surfaced to warn the user
   const [poolActivity, setPoolActivity] = useState<{ finalizing: boolean; generatingProof: boolean; proofProgress: number }>({
     finalizing: false,
@@ -305,7 +312,7 @@ export default function PrivateView({
       if (!res.success) throw new Error(res.error ?? "shield failed");
       console.log(`[private] ✓ shielded ${res.txHashes.length} coin(s)`);
       setToast({
-        msg: "Shielded — validating in the pool, your balance updates shortly",
+        msg: "Shielded — validating, your balance updates shortly",
         sev: "success",
       });
       setDepositOpen(false);
@@ -594,7 +601,7 @@ export default function PrivateView({
         console.log(`[private] ✓ shield submitted — tx: ${txHash}`);
       }
       setToast({
-        msg: "Shielded — validating in the pool, your balance updates shortly",
+        msg: "Shielded — validating, your balance updates shortly",
         sev: "success",
       });
       setDepositOpen(false);
@@ -692,9 +699,9 @@ export default function PrivateView({
                no unlock/register); funds are safe, just can't open the pool. */
             <>
               <Typography variant="body2" sx={{ fontSize: "0.78rem", lineHeight: 1.7, opacity: 0.85, mb: 2.5, color: "error.main" }}>
-                Can&apos;t reach the privacy network (POI). RAILGUN is
-                unavailable right now — your funds are safe, but the pool can&apos;t
-                be opened until it&apos;s back.
+                Can&apos;t reach the privacy network (POI). Your funds are safu,
+                but the private side is unavailable until the connection is
+                restored.
               </Typography>
               <Button
                 variant="outlined"
@@ -709,7 +716,7 @@ export default function PrivateView({
             <Box sx={{ display: "inline-flex", alignItems: "center", gap: 1, opacity: 0.7 }}>
               <CircularProgress size={14} />
               <Typography variant="body2" sx={{ fontSize: "0.72rem", letterSpacing: "0.08em" }}>
-                {engine === "booting" ? "connecting to RAILGUN…" : "checking your account…"}
+                {engine === "booting" ? `connecting to ${proto}…` : "checking your account…"}
               </Typography>
             </Box>
           ) : (
@@ -717,8 +724,8 @@ export default function PrivateView({
             <>
               <Typography variant="body2" sx={{ fontSize: "0.78rem", lineHeight: 1.7, opacity: 0.75, mb: 3 }}>
                 {registered
-                  ? "Your shielded account is registered. Unlock it with your passkey to see your balance and operate through RAILGUN pool."
-                  : "Enable your shielded account to send and receive privately through RAILGUN pool. One tap derives your private identity — nothing leaves your device."}
+                  ? `Your shielded account is registered. Unlock it with your passkey to see your balance and operate through ${proto} pool.`
+                  : `Enable your shielded account to send and receive privately through ${proto} pool. One tap derives your private identity — nothing leaves your device.`}
               </Typography>
 
               <Button
@@ -830,7 +837,7 @@ export default function PrivateView({
               <Typography variant="body2" sx={{ fontSize: "0.62rem", letterSpacing: "0.03em", textAlign: "left", lineHeight: 1.5 }}>
                 {poolActivity.generatingProof
                   ? `Finalizing your private transfer — generating proof… ${poolActivity.proofProgress}%`
-                  : "Finalizing your private transfer — keep the pool open a moment."}
+                  : "Finalizing your private transfer — keep the private side open a moment."}
               </Typography>
             </Box>
           )}
@@ -842,7 +849,7 @@ export default function PrivateView({
               <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 1.5, textAlign: "left" }}>
                 <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.25 }}>
                   <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
-                    Shield into the pool
+                    Shield
                   </Typography>
                   <Button
                     variant="text"
@@ -1014,19 +1021,19 @@ export default function PrivateView({
                           disabled={shielding}
                         />
                       }
-                      label={`Receive the exact amount in the pool (cover the ${fees.shieldBps / 100}% fee)`}
+                      label="Receive the exact amount (cover the fee)"
                       sx={{ ".MuiFormControlLabel-label": { fontSize: "0.62rem", opacity: 0.7 }, mb: 0.5 }}
                     />
 
                     <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: 1.25, lineHeight: 1.5 }}>
                       {shieldPreview ? (
                         <>
-                          Railgun fee {fees.shieldBps / 100}% · moves {fmt(shieldPreview.moves, decimals)} {symbol} →
+                          {proto} fee {fees.shieldBps / 100}% · moves {fmt(shieldPreview.moves, decimals)} {symbol} →
                           pool gets {fmt(shieldPreview.receive, decimals)} {symbol}
                           {shieldExact && shieldPreview.forcedGross ? " · capped to your balance (fee not covered)" : ""}
                         </>
                       ) : (
-                        <>Railgun charges a {fees.shieldBps / 100}% fee on each shield.</>
+                        <>{proto} charges a {fees.shieldBps / 100}% fee on each shield.</>
                       )}
                     </Typography>
 
@@ -1137,7 +1144,7 @@ export default function PrivateView({
                   fullWidth
                   size="small"
                   placeholder="0x…"
-                  label={isPrivacy ? "To address (fresh stealth · yours)" : "To address"}
+                  label={isPrivacy ? "To address (fresh stealth)" : "To address"}
                   value={unshieldTo}
                   onChange={(e) => setUnshieldTo(e.target.value)}
                   disabled={unshieldBusy}
@@ -1164,38 +1171,44 @@ export default function PrivateView({
                       label={unshieldAnnounce ? "Announce on-chain" : "Ghost mode"}
                       sx={{ ".MuiFormControlLabel-label": { fontSize: "0.62rem", opacity: 0.7 }, mr: 0.25 }}
                     />
-                    <Tooltip
-                      arrow
-                      enterTouchDelay={0}
-                      title={
-                        <span style={{ fontSize: "0.7rem", lineHeight: 1.5 }}>
-                          <b>On — Announce:</b> publishes a one-time pointer on-chain so this payment is
-                          <b> 100% always recoverable</b> by scanning, on any device.<br />
-                          <b>Off — Ghost:</b> nothing is published — <b>maximum privacy</b>, hardest to
-                          detect — but it&apos;s spendable <b>only from this device</b>. Clear this browser&apos;s
-                          data and it&apos;s gone.
-                        </span>
-                      }
+                    <IconButton
+                      size="small"
+                      onClick={(e) => setInfoAnchor(e.currentTarget)}
+                      sx={{
+                        p: 0.25,
+                        color: (theme) =>
+                          theme.palette.mode === "dark" ? "#fff" : "inherit",
+                      }}
+                      aria-label="More info"
+                    >
+                      <InfoOutlinedIcon fontSize="small" />
+                    </IconButton>
+                    <Popover
+                      open={Boolean(infoAnchor)}
+                      anchorEl={infoAnchor}
+                      onClose={() => setInfoAnchor(null)}
+                      anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
                     >
                       <Box
-                        component="span"
+                        p={2}
+                        maxWidth={250}
                         sx={{
-                          cursor: "help",
                           fontSize: "0.7rem",
-                          opacity: 0.55,
-                          border: "1px solid currentColor",
-                          borderRadius: "50%",
-                          width: 15,
-                          height: 15,
-                          display: "inline-flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          lineHeight: 1,
+                          lineHeight: 1.5,
+                          backgroundColor: (theme) =>
+                            theme.palette.mode === "dark" ? "#222" : "#3B3B3B",
+                          color: "#fff",
                         }}
                       >
-                        i
+                        <b>On — Announce:</b> publishes a one-time pointer on-chain so this payment is
+                        <b> 100% always recoverable</b> by scanning, on any device.
+                        <br />
+                        <br />
+                        <b>Off — Ghost:</b> nothing is published — <b>maximum privacy</b>, hardest to
+                        detect — but it&apos;s spendable <b>only from this device</b>. Clear this browser&apos;s
+                        data and it&apos;s gone.
                       </Box>
-                    </Tooltip>
+                    </Popover>
                   </Box>
                 )}
 
@@ -1234,20 +1247,20 @@ export default function PrivateView({
                       disabled={unshieldBusy}
                     />
                   }
-                  label={`Receive the exact amount at the address (cover the ${fees.unshieldBps / 100}% fee)`}
+                  label="Receive the exact amount (cover the fee)"
                   sx={{ ".MuiFormControlLabel-label": { fontSize: "0.62rem", opacity: 0.7 }, mb: 0.5 }}
                 />
 
                 <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: 1.25, lineHeight: 1.5 }}>
                   {unshieldPreview ? (
                     <>
-                      Railgun fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, decimals)} {symbol} →
+                      {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, decimals)} {symbol} →
                       you receive {fmt(unshieldPreview.receive, decimals)} {symbol}
                       {unshieldExact && unshieldPreview.forcedGross ? " · capped to spendable (fee not covered)" : ""}
                       . Funds land on confirmation; the POI finalizes in the background.
                     </>
                   ) : (
-                    <>Railgun charges a {fees.unshieldBps / 100}% fee. Funds land on confirmation; the POI finalizes in the background.</>
+                    <>{proto} charges a {fees.unshieldBps / 100}% fee. Funds land on confirmation; the POI finalizes in the background.</>
                   )}
                 </Typography>
 
