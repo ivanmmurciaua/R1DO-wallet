@@ -1,7 +1,8 @@
 import { Address, http, fallback } from "viem";
 
-export const LOCAL_WALLET_LIST = "SAFE_KEY_WALLET_LIST";
-export const LOCAL_LAST_USER = "SAFE_LAST_USER";
+// localStorage globals — namespaced under r1do/wallet/v1 (see lib/localstorage.tsx).
+export const LOCAL_WALLET_LIST = "r1do/wallet/v1/wallets";
+export const LOCAL_LAST_USER = "r1do/wallet/v1/lastUser";
 // Primary RPC (default). PublicNode handles Railgun's big batched scans well.
 export const RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
 // Failover order: PublicNode first (default), then community fallbacks. Used by

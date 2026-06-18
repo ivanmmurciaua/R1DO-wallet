@@ -1,15 +1,45 @@
 import { LOCAL_WALLET_LIST } from "@/app/constants";
 import { WalletMeta } from "@/types";
 import type { StealthUTXO } from "@/lib/stealth";
-import { saveWalletCredential } from "@/lib/credstore";
 
-// v2: localStorage holds only per-wallet metadata ({ username, privacy }).
-// Credentials (username → rawId) live in the shared IndexedDB R1DOToolsDB
-// (credstore.ts); stealth caches in the STEALTH_* keys below.
+// ── localStorage layout (r1do/wallet/v1) ─────────────────────────────────────
+// Everything the wallet keeps locally lives under one versioned namespace, so
+// nothing is scattered and a whole account wipes in one call.
+//
+//   r1do/wallet/v1/wallets               → [{ username, privacy }]   (global list)
+//   r1do/wallet/v1/lastUser              → "<username>"              (F5 restore)
+//   r1do/wallet/v1/prefs                 → { decimals, symbol }      (UI prefs)
+//   r1do/wallet/v1/acct/<u>              → { zk, metaAddress, directory }
+//   r1do/wallet/v1/scan/<u>/cursor       → { block, count }          (tiny, hot)
+//   r1do/wallet/v1/scan/<u>/utxos        → StealthUTXO[]             (large, cold)
+//
+// The two globals `wallets`/`lastUser` keep their constant names (LOCAL_WALLET_LIST
+// / LOCAL_LAST_USER) but now point at the namespaced keys (see constants.tsx).
+//
+// Scan state is split on purpose: the scanner bumps the cursor on EVERY pass
+// (~3 days of blocks) but only appends UTXOs occasionally. Keeping the cursor
+// (block + count) in its own tiny key lets us re-serialize the potentially huge
+// UTXO array ONLY when the set actually changed — the merge upstream is
+// append-only/deduped, so a length change is a perfect change signal.
+//
+// Credentials (username → rawId) are NOT here: they live in the shared
+// IndexedDB R1DOToolsDB (credstore.ts).
+
+const NS = "r1do/wallet/v1";
+const acctKey       = (u: string) => `${NS}/acct/${u.toLowerCase()}`;
+const scanCursorKey = (u: string) => `${NS}/scan/${u.toLowerCase()}/cursor`;
+const scanUtxosKey  = (u: string) => `${NS}/scan/${u.toLowerCase()}/utxos`;
+const PREFS_KEY     = `${NS}/prefs`;
+
+// ── Global wallet list ───────────────────────────────────────────────────────
 
 const readWalletList = (): WalletMeta[] => {
-  const raw: unknown[] =
-    JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
+  let raw: unknown[] = [];
+  try {
+    raw = JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
+  } catch {
+    raw = [];
+  }
   return raw
     .filter((w): w is Record<string, unknown> => !!w && typeof w === "object")
     .filter((w) => typeof w.username === "string" && w.username !== "")
@@ -45,135 +75,149 @@ export const setWalletMeta = (username: string, privacy?: boolean): void => {
 export const removeWalletMeta = (username: string): void => {
   const u = username.toLowerCase();
   writeWalletList(readWalletList().filter((w) => w.username.toLowerCase() !== u));
-  // Drop the per-wallet caches too — they re-derive/rescan on next login.
-  for (const name of new Set([username, u])) {
-    localStorage.removeItem(`${STEALTH_UTXOS_PREFIX}_${name}`);
-    localStorage.removeItem(`${STEALTH_BLOCK_PREFIX}_${name}`);
-    localStorage.removeItem(`${STEALTH_META_PREFIX}_${name}`);
-    localStorage.removeItem(`${DIRECTORY_MARK_PREFIX}_${name}`);
-    localStorage.removeItem(`${POOL_ZK_PREFIX}_${name}`);
+  // Drop the whole per-account record + scan state — re-derives/rescans on next login.
+  localStorage.removeItem(acctKey(u));
+  localStorage.removeItem(scanCursorKey(u));
+  localStorage.removeItem(scanUtxosKey(u));
+};
+
+// ── Per-account record ───────────────────────────────────────────────────────
+// Small, mostly write-once metadata bundled into one object per account.
+
+interface Account {
+  zk?: string;                 // cached 0zk (public, deterministic) — instant "Unlock"
+  metaAddress?: `0x${string}`; // Δ1 stealth meta-address (public, off-chain shareable)
+  directory?: string;          // directory contract address this user is published to
+}
+
+const readAccount = (username: string): Account => {
+  try {
+    return JSON.parse(localStorage.getItem(acctKey(username)) || "{}") || {};
+  } catch {
+    return {};
   }
 };
+
+const patchAccount = (username: string, partial: Partial<Account>): void => {
+  localStorage.setItem(acctKey(username), JSON.stringify({ ...readAccount(username), ...partial }));
+};
+
+// Cache the user's 0zk address so re-entering the private view shows
+// "registered → Unlock" instantly, without an on-chain directory read.
+export const getCachedPoolZk = (username: string): string | null =>
+  readAccount(username).zk ?? null;
+
+export const setCachedPoolZk = (username: string, zkAddress: string): void =>
+  patchAccount(username, { zk: zkAddress });
+
+// Δ1: no on-chain registry — the meta-address is public data distributed
+// off-chain. Cached locally so the UI can offer it for sharing without
+// touching the passkey (it re-derives deterministically from the PRF anyway).
+export const saveMetaAddress = (username: string, metaAddress: `0x${string}`): void =>
+  patchAccount(username, { metaAddress });
+
+export const getMetaAddress = (username: string): `0x${string}` | null =>
+  readAccount(username).metaAddress ?? null;
 
 // Marks "this user's entry exists in directory <address>" so logins skip the
 // Argon2id + on-chain check. Keyed to the directory address: redeploying the
 // contract invalidates the mark and triggers a lazy re-publish.
-const DIRECTORY_MARK_PREFIX = "DIRECTORY_PUBLISHED";
-
 export const getDirectoryMark = (username: string): string | null =>
-  localStorage.getItem(`${DIRECTORY_MARK_PREFIX}_${username}`);
+  readAccount(username).directory ?? null;
 
-export const setDirectoryMark = (username: string, directoryAddress: string): void => {
-  localStorage.setItem(`${DIRECTORY_MARK_PREFIX}_${username}`, directoryAddress);
-};
+export const setDirectoryMark = (username: string, directoryAddress: string): void =>
+  patchAccount(username, { directory: directoryAddress });
 
-/* One-time migration from the v1 list format ({ username, fingerprint,
-   passkey: { rawId, coordinates, verifierAddress }, privacy }): the rawId
-   moves into the shared credential store, the rest collapses to metadata.
-   Entries with fingerprint === "" were aborted registrations — dropped. */
-export const migrateLegacyWalletList = async (): Promise<void> => {
-  const raw: unknown[] =
-    JSON.parse(localStorage.getItem(LOCAL_WALLET_LIST) || "[]") || [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const entries = raw.filter((w): w is any => !!w && typeof w === "object");
-  if (!entries.some((w) => "passkey" in w || "fingerprint" in w)) return;
+// ── Stealth scan state (split: hot cursor / cold UTXO list) ──────────────────
 
-  const kept = entries.filter(
-    (w) => typeof w.username === "string" && w.username !== "" && w.fingerprint !== "",
-  );
-  for (const w of kept) {
-    const rawId = w.passkey?.rawId;
-    if (typeof rawId === "string" && rawId !== "") {
-      try {
-        await saveWalletCredential(w.username, rawId);
-      } catch (e) {
-        console.warn("[localstorage] legacy credential migration failed:", e);
-      }
-    }
+interface ScanCursor {
+  block: string | null; // last scanned block (decimal string) — null if never scanned
+  count: number;        // number of UTXOs currently cached (change signal)
+}
+
+const readCursor = (username: string): ScanCursor => {
+  try {
+    const c = JSON.parse(localStorage.getItem(scanCursorKey(username)) || "{}");
+    return { block: typeof c.block === "string" ? c.block : null, count: Number(c.count) || 0 };
+  } catch {
+    return { block: null, count: 0 };
   }
-  writeWalletList(kept.map((w) => ({ username: w.username, privacy: !!w.privacy })));
-  console.log(`[localstorage] ✓ Migrated ${kept.length} wallet entr${kept.length === 1 ? "y" : "ies"} to the v2 format`);
 };
 
-const STEALTH_UTXOS_PREFIX   = "STEALTH_UTXOS";
-const STEALTH_BLOCK_PREFIX   = "STEALTH_LAST_BLOCK";
-const STEALTH_META_PREFIX    = "STEALTH_META_ADDRESS";
-const POOL_ZK_PREFIX         = "POOL_ZK_ADDRESS";
-
-// Cache the user's (public, deterministic) 0zk address so re-entering the
-// private view shows "registered → Unlock" instantly, without an on-chain
-// directory read. It's public data; the secret keys still re-derive from the
-// passkey each session.
-export const getCachedPoolZk = (username: string): string | null =>
-  localStorage.getItem(`${POOL_ZK_PREFIX}_${username}`);
-
-export const setCachedPoolZk = (username: string, zkAddress: string): void => {
-  localStorage.setItem(`${POOL_ZK_PREFIX}_${username}`, zkAddress);
-};
-
-// Δ1: no on-chain registry — the meta-address is public data distributed
-// off-chain. We cache it locally so the UI can offer it for sharing without
-// touching the passkey (it re-derives deterministically from the PRF anyway).
-export const saveMetaAddress = (username: string, metaAddress: `0x${string}`): void => {
-  localStorage.setItem(`${STEALTH_META_PREFIX}_${username}`, metaAddress);
-};
-
-export const getMetaAddress = (username: string): `0x${string}` | null => {
-  return localStorage.getItem(`${STEALTH_META_PREFIX}_${username}`) as `0x${string}` | null;
-};
+const writeCursor = (username: string, cursor: ScanCursor): void =>
+  localStorage.setItem(scanCursorKey(username), JSON.stringify(cursor));
 
 export const getStealthUTXOs = (username: string): StealthUTXO[] => {
-  const raw = localStorage.getItem(`${STEALTH_UTXOS_PREFIX}_${username}`);
-  return raw ? JSON.parse(raw) : [];
+  try {
+    return JSON.parse(localStorage.getItem(scanUtxosKey(username)) || "[]") || [];
+  } catch {
+    return [];
+  }
 };
 
+export const getLastScannedBlock = (username: string): bigint | null => {
+  const { block } = readCursor(username);
+  return block ? BigInt(block) : null;
+};
+
+// Persists a scan pass. The upstream merge is append-only/deduped, so the UTXO
+// array is only re-serialized when its length changed; the cursor (tiny) is
+// always updated. With a large UTXO set, cursor-only passes cost almost nothing.
 export const saveStealthScan = (
   username: string,
   utxos: StealthUTXO[],
   lastBlock: bigint,
 ): void => {
-  localStorage.setItem(`${STEALTH_UTXOS_PREFIX}_${username}`, JSON.stringify(utxos));
-  localStorage.setItem(`${STEALTH_BLOCK_PREFIX}_${username}`, lastBlock.toString());
+  const { count } = readCursor(username);
+  if (utxos.length !== count) {
+    localStorage.setItem(scanUtxosKey(username), JSON.stringify(utxos));
+  }
+  writeCursor(username, { block: lastBlock.toString(), count: utxos.length });
 };
 
-// Append one stealth UTXO to the local registry WITHOUT touching the scan
-// cursor — used by ghost-mode unshield, whose payment carries no on-chain blob,
-// so the local note is the ONLY way to re-derive its spending key (this device).
+// Append one stealth UTXO WITHOUT advancing the scan cursor — used by ghost-mode
+// unshield and off-chain Courier import, whose payments carry no on-chain blob,
+// so the local note is the only way to re-derive the spending key on this device.
 export const addStealthUTXO = (username: string, utxo: StealthUTXO): void => {
   const existing = getStealthUTXOs(username);
   if (existing.some((u) => u.stealthAddress.toLowerCase() === utxo.stealthAddress.toLowerCase())) return;
-  localStorage.setItem(`${STEALTH_UTXOS_PREFIX}_${username}`, JSON.stringify([...existing, utxo]));
+  localStorage.setItem(scanUtxosKey(username), JSON.stringify([...existing, utxo]));
+  const cur = readCursor(username);
+  writeCursor(username, { block: cur.block, count: existing.length + 1 });
 };
 
-export const getLastScannedBlock = (username: string): bigint | null => {
-  const val = localStorage.getItem(`${STEALTH_BLOCK_PREFIX}_${username}`);
-  return val ? BigInt(val) : null;
-};
+// ── UI preferences ───────────────────────────────────────────────────────────
 
-const LOCAL_AMOUNT_CONFIG = "LOCAL_AMOUNT_CONFIG";
-const LOCAL_SYMBOL_CONFIG = "LOCAL_SYMBOL_CONFIG";
+interface Prefs {
+  decimals?: number;
+  symbol?: string;
+}
 
 export const DEFAULT_DECIMALS = 13;
 export const DEFAULT_SYMBOL = "⧫";
 
+const readPrefs = (): Prefs => {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+};
+
+const patchPrefs = (partial: Partial<Prefs>): void =>
+  localStorage.setItem(PREFS_KEY, JSON.stringify({ ...readPrefs(), ...partial }));
+
 export const getDecimals = (): number => {
-  const amountConfig = localStorage.getItem(LOCAL_AMOUNT_CONFIG);
-  if (!amountConfig) {
-    localStorage.setItem(LOCAL_AMOUNT_CONFIG, DEFAULT_DECIMALS.toString());
+  const { decimals } = readPrefs();
+  if (typeof decimals !== "number") {
+    patchPrefs({ decimals: DEFAULT_DECIMALS });
     return DEFAULT_DECIMALS;
   }
-
-  return parseInt(amountConfig);
+  return decimals;
 };
 
-export const setDecimalsConfig = (decimals: number): void => {
-  localStorage.setItem(LOCAL_AMOUNT_CONFIG, decimals.toString());
-};
+export const setDecimalsConfig = (decimals: number): void => patchPrefs({ decimals });
 
-export const getSymbol = (): string => {
-  return localStorage.getItem(LOCAL_SYMBOL_CONFIG) || DEFAULT_SYMBOL;
-};
+export const getSymbol = (): string => readPrefs().symbol || DEFAULT_SYMBOL;
 
-export const setSymbolConfig = (symbol: string): void => {
-  localStorage.setItem(LOCAL_SYMBOL_CONFIG, symbol);
-};
+export const setSymbolConfig = (symbol: string): void => patchPrefs({ symbol });

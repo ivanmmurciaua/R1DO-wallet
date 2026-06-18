@@ -14,8 +14,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   getWalletMetas,
   removeWalletMeta,
-  migrateLegacyWalletList,
 } from "@/lib/localstorage";
+import { migrateLocalStorageToV1 } from "@/lib/localstorage-migrate"; // TEMP: remove in a future iteration
 import {
   listWalletCredentials,
   deleteWalletCredential,
@@ -44,12 +44,8 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
   useEffect(() => {
     if (hasAutoLoaded.current) return;
     hasAutoLoaded.current = true;
+    migrateLocalStorageToV1(); // TEMP one-shot: pre-namespace keys → r1do/wallet/v1
     (async () => {
-      try {
-        await migrateLegacyWalletList();
-      } catch (e) {
-        console.warn("[login] legacy wallet-list migration failed:", e);
-      }
       // Wallet list = shared credential store (R1DOToolsDB — any passkey of
       // the suite is a derivable wallet) merged with the local metadata.
       const byName = new Map<string, WalletMeta>();

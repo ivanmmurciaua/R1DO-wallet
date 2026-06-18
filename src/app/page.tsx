@@ -291,11 +291,17 @@ export default function Home() {
         const entry = await readDirectory(username);
         if (entry) {
           rawId = entry.rawId;
+          // The directory's `hasMeta` byte IS the original privacy choice:
+          // a private wallet always carries a metaAddress, a public one never
+          // does. Read it as an explicit boolean so a recovered PUBLIC wallet
+          // resolves to privacy=false instead of falling through to the
+          // default-private. (Without this, deleting a public wallet's local
+          // meta and re-recovering it would silently flip it private forever.)
+          privacyHint = !!entry.metaAddress;
           if (entry.metaAddress) {
             saveMetaAddress(username, entry.metaAddress);
-            privacyHint = true;
           }
-          console.log("[createOrLoad] ✓ Credential recovered from the encrypted directory");
+          console.log(`[createOrLoad] ✓ Credential recovered from the encrypted directory (privacy=${privacyHint})`);
         }
       }
 
@@ -315,7 +321,8 @@ export default function Home() {
         return;
       }
 
-      // 3) New user → create a resident passkey
+      // 3) New user → create the passkey. `external` picks Storage Type:
+      //    true = resident/synced (provider), false = non-resident/device-bound.
       openPopup("Creating new passkey");
       const { rawId: newRawId, prfOutput } = await handleCreatePasskey(username, external);
 

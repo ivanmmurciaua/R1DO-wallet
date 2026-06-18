@@ -37,17 +37,34 @@ const PRF_SALT = new TextEncoder().encode("r1do-stealth-v1").buffer;
 
 export async function generateCredential(
   displayName: string,
-  // kept for call-site compatibility; v2 always creates resident keys
-  _external: boolean = false,
+  external: boolean = false,
 ) {
-  // v2: ALWAYS resident (discoverable). With a resident credential the
-  // wallet works on a new device from the passkey alone (sync or QR/CDA)
-  // — the directory becomes optional, never a prerequisite for funds.
-  const authenticatorSelection: AuthenticatorSelectionCriteria = {
-    userVerification: "preferred",
-    requireResidentKey: true,
-    residentKey: "required",
-  };
+  // Honest "Storage Type" lever — the user genuinely chooses where the key lives:
+  //
+  //   external = true  → RESIDENT / discoverable passkey. The provider
+  //     (iCloud / Google / 1Password) stores and SYNCS it; recoverable from
+  //     the passkey alone on a new device. The directory is optional.
+  //
+  //   external = false → NON-RESIDENT, device-bound. The private key stays
+  //     wrapped in the credential ID inside THIS authenticator's secure
+  //     element — no provider sync, no "save passkey" popup. To use it we
+  //     must supply the rawId (allowCredentials); the encrypted on-chain
+  //     directory is the off-device copy of that rawId. Bound to this chip:
+  //     lose the device with no sync = lose access (the "i" hint says so).
+  //
+  // PRF rides on both paths identically — key derivation is unaffected by
+  // discoverability, so the choice never changes the wallet's keys.
+  const authenticatorSelection: AuthenticatorSelectionCriteria = external
+    ? {
+        userVerification: "preferred",
+        requireResidentKey: true,
+        residentKey: "required",
+      }
+    : {
+        userVerification: "preferred",
+        requireResidentKey: false,
+        residentKey: "discouraged",
+      };
 
   const passkeyCredential = await navigator.credentials.create({
     publicKey: {
