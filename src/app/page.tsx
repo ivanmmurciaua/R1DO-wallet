@@ -539,24 +539,28 @@ export default function Home() {
         {showPopup && popupMessage && <Popup popupMessage={popupMessage} />}
       </main>
 
-      <footer className={styles.footer}>
-        <a
-          href="https://ethereum.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/ethereum-badge.svg`}
-            alt="Powered by Ethereum"
-            width={77}
-            height={33}
-          />
-        </a>
-        <div>
-          <p>Made with ❤️ in pursuit of digital financial 🗽</p>
-        </div>
-      </footer>
+      {/* Footer lives only on the login screen — inside the wallet the bottom
+          belongs to the fixed action bar, which the footer was colliding with. */}
+      {!(userWallet && username && address && deployed) && (
+        <footer className={styles.footer}>
+          <a
+            href="https://ethereum.org"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <Image
+              aria-hidden
+              src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/ethereum-badge.svg`}
+              alt="Powered by Ethereum"
+              width={77}
+              height={33}
+            />
+          </a>
+          <div>
+            <p>Made with ❤️ in pursuit of digital financial 🗽</p>
+          </div>
+        </footer>
+      )}
     </div>
   );
 }

@@ -186,6 +186,22 @@ export const addStealthUTXO = (username: string, utxo: StealthUTXO): void => {
   writeCursor(username, { block: cur.block, count: existing.length + 1 });
 };
 
+// Patches fields of one stored UTXO (matched by address) WITHOUT changing the
+// set's length — so the scan cursor's count stays valid. Used to flip `hidden`
+// (never delete: the local note is the only way to spend a Courier payment) and
+// to stamp `receivedAt`.
+export const patchStealthUTXO = (
+  username: string,
+  stealthAddress: string,
+  patch: Partial<StealthUTXO>,
+): void => {
+  const a = stealthAddress.toLowerCase();
+  const next = getStealthUTXOs(username).map((u) =>
+    u.stealthAddress.toLowerCase() === a ? { ...u, ...patch } : u,
+  );
+  localStorage.setItem(scanUtxosKey(username), JSON.stringify(next));
+};
+
 // ── UI preferences ───────────────────────────────────────────────────────────
 
 interface Prefs {
