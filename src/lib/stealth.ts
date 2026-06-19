@@ -189,6 +189,16 @@ export async function generateStealthPayment(metaAddressHex: `0x${string}`): Pro
   };
 }
 
+// Rebuilds the shareable ticket (= the calldataBlob) for a stored UTXO, so the
+// UI can re-show it after creation. Needs `viewTag` (only present on UTXOs we
+// minted/imported under the Courier flow); returns null otherwise.
+export function buildStealthTicket(utxo: StealthUTXO): `0x${string}` | null {
+  if (typeof utxo.viewTag !== "number") return null;
+  return toHex(
+    concat([hexToBytes(STEALTH_MAGIC), new Uint8Array([utxo.viewTag]), hexToBytes(utxo.ephemeralPubkey), hexToBytes(utxo.kemCiphertext)]),
+  ) as `0x${string}`;
+}
+
 // ── Calldata blob extraction ─────────────────────────────────────────────────
 
 export interface StealthBlob {
@@ -233,6 +243,13 @@ export interface StealthUTXO {
   ephemeralPubkey: `0x${string}`; // 33 bytes
   kemCiphertext:   `0x${string}`; // 1088 bytes
   blockNumber:     number;
+  // Set when WE pre-mint a receive address (Δ1 off-chain "Courier" flow) instead
+  // of discovering it by scan. Lets the UI list/label pending receive addresses.
+  createdAt?:      number;        // epoch ms at mint time
+  memo?:           string;        // optional human label ("rent from Bob")
+  viewTag?:        number;        // h[0] — lets us rebuild the ticket for re-check
+  receivedAt?:     number;        // epoch ms first seen funded (status + safe-hide)
+  hidden?:         boolean;       // user hid it from the list (data KEPT — never deleted)
 }
 
 // Trial-decrypts one blob. Returns the derived stealth Safe address if the
@@ -304,10 +321,15 @@ export async function scanStealthPayments(
   fromBlock:          bigint,
 ): Promise<{ utxos: StealthUTXO[]; latestBlock: bigint }> {
   const { createPublicClient, http, fallback, parseAbiItem } = await import("viem");
-  const { sepolia } = await import("viem/chains");
+  const { activeChain } = await import("@/lib/networks");
   const { RPC_URLS } = await import("@/app/constants");
 
-  const publicClient = createPublicClient({ chain: sepolia, transport: fallback(RPC_URLS.map((u) => http(u))) });
+  // JSON-RPC batching: the getTransaction fan-out (Promise.all below) fires many
+  // node calls in one tick — coalesce them into a single POST per 17 instead of
+  // N round-trips. Conservative batchSize so picky public RPCs accept it; if one
+  // rejects a batch, the fallback transport rotates to the next.
+  const batchHttp = (u: string) => http(u, { batch: { batchSize: 17, wait: 16 } });
+  const publicClient = createPublicClient({ chain: activeChain(), transport: fallback(RPC_URLS.map(batchHttp)) });
   const latestBlock = await publicClient.getBlockNumber();
 
   const totalBlocks = latestBlock - fromBlock;

@@ -5,7 +5,9 @@
   align-items: center;
   justify-content: space-between;
   min-height: 100svh;
-  padding: 32px 20px 0;
+  /* bottom clearance reserves space for the position:fixed footer so content
+     (long lists) never tucks underneath it */
+  padding: 32px 20px 88px;
 }
 
 .main {
@@ -16,12 +18,25 @@
   width: 100%;
 }
 
+/* Inside the wallet the fixed top controls (logout / world switch) occupy the
+   top strip — push every view down so it clears them. Only applied when signed
+   in, so the login screen keeps its original spacing. */
+.inWallet {
+  padding-top: 76px;
+}
+
 /* ── PC: centered floating card ─────────────────────────────── */
 @media (min-width: 768px) {
   .page {
     justify-content: center;
-    padding: 40px;
+    padding: 40px 40px 88px;
     gap: 32px;
+  }
+
+  /* Desktop centres a floating card and the controls sit in the far corners,
+     so the extra top inset isn't needed — keep it vertically centred. */
+  .inWallet {
+    padding-top: 40px;
   }
 
   .main {

@@ -4,24 +4,32 @@ import {
   Stack,
   Box,
   Typography,
-  Paper,
-  List,
-  ListItem,
   CircularProgress,
   IconButton,
 } from "@mui/material";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
+import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
+import AddIcon from "@mui/icons-material/Add";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import CheckIcon from "@mui/icons-material/Check";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { SendEth } from "./SendEth";
 import { SpendStealthUTXO } from "./SpendStealthUTXO";
+import { ReceivePrivate } from "./ReceivePrivate";
+import { QrCode } from "./QrCode";
+import { GlitchText } from "./GlitchText";
 import Popup from "./Popup";
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { formatUnits, createPublicClient } from "viem";
 import { sepoliaTransport } from "@/app/constants";
-import { sepolia } from "viem/chains";
+import { activeChain, activeChainId, networkName, explorerTxUrl } from "@/lib/networks";
+import { getStealthBalances } from "@/lib/balances";
 import { getLastBlock } from "@/lib/client";
-import { getDecimals, getSymbol, getStealthUTXOs, getWalletMeta, saveStealthScan, getLastScannedBlock } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getStealthUTXOs, getWalletMeta, saveStealthScan, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
@@ -30,6 +38,7 @@ type UserMenuProps = {
   wallet: Safe4337Pack;
   username: string;
   balance: number;
+  address: string; // public Safe address — shown/copied in public Receive
 };
 
 type Transaction = {
@@ -64,16 +73,31 @@ type EtherscanResponse = {
   result: EtherscanTransaction[];
 };
 
-export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance }) => {
+// Compact amount formatter: 2 decimals max, K/M/B for large values
+// (11105.76 → "11.11K", 12.34 → "12.34", 1.23e6 → "1.23M").
+const compactFmt = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+const fmtAmount = (n: number) => compactFmt.format(n);
+
+export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, address }) => {
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
-  const [currentView, setCurrentView] = useState<"menu" | "sendEth" | "spendUtxo">("menu");
+  const [currentView, setCurrentView] = useState<"menu" | "sendEth" | "spendUtxo" | "receivePrivate" | "receivePublic">("menu");
+  const [copied, setCopied] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [stealthTxs, setStealthTxs] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedUtxo, setSelectedUtxo] = useState<StealthUTXO | null>(null);
   const [selectedBalance, setSelectedBalance] = useState<number>(0);
   const [selectedWei, setSelectedWei] = useState<bigint>(0n);
+  const [hideBalance, setHide] = useState<boolean>(() => getHideBalance());
+
+  const toggleHideBalance = () => {
+    setHide((h) => {
+      const next = !h;
+      setHideBalance(next);
+      return next;
+    });
+  };
 
   const handleShowPopup = (message: string) => {
     setShowPopup(true);
@@ -88,6 +112,10 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance })
 
   const handleSendEth = () => {
     setCurrentView("sendEth");
+  };
+
+  const handleReceive = () => {
+    setCurrentView(privacy ? "receivePrivate" : "receivePublic");
   };
 
 const handleBackToMenu = (message: string = "") => {
@@ -110,6 +138,12 @@ const handleBackToMenu = (message: string = "") => {
   const privacy = getWalletMeta(username)?.privacy ?? false;
   const symbol = getSymbol();
 
+  // Headline balance for the wallet-home card: stealth total in a privacy wallet
+  // (summed from the already-fetched UTXOs — no extra RPC), else the public Safe.
+  const shownBalance = privacy
+    ? Number(formatUnits(stealthTxs.reduce((s, t) => s + (t.weiBalance ?? 0n), 0n), getDecimals()))
+    : balance;
+
   const fetchTransactions = useCallback(async () => {
     if (privacy) return; // private wallet — no Etherscan
     setLoading(true);
@@ -119,7 +153,7 @@ const handleBackToMenu = (message: string = "") => {
       const block = await getLastBlock();
 
       const response = await fetch(
-        `https://api.etherscan.io/v2/api?chainid=11155111&module=account&action=txlistinternal&address=${address}&startblock=0&endblock=${block}&page=1&offset=10&sort=desc&apikey=${apiKey}`,
+        `https://api.etherscan.io/v2/api?chainid=${activeChainId()}&module=account&action=txlistinternal&address=${address}&startblock=0&endblock=${block}&page=1&offset=10&sort=desc&apikey=${apiKey}`,
       );
 
       const data: EtherscanResponse = await response.json();
@@ -164,20 +198,34 @@ const handleBackToMenu = (message: string = "") => {
     const utxos = getStealthUTXOs(username);
     if (utxos.length === 0) return;
     const decimals = getDecimals();
-    const pub = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
-    const results = await Promise.all(
-      utxos.map(async (utxo) => {
-        const raw = await pub.getBalance({ address: utxo.stealthAddress });
-        return {
+    const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+    const balances = await getStealthBalances(pub, utxos.map((u) => u.stealthAddress));
+    const rows = utxos.map((utxo, i) => {
+      const raw = balances[i];
+      // Displayed amount is rounded; sub-dust (e.g. 1 wei) rounds to 0 and is
+      // treated as "no funds" — both for the list and the received stamp.
+      const amount = parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4));
+      return { utxo, raw, amount };
+    });
+
+    // Stamp first-funding once (sequential → no read-modify-write race). This is
+    // the persistent "received" signal the ReceivePrivate list reads, so status
+    // never needs its own balance fetch.
+    for (const { utxo, amount } of rows) {
+      if (amount > 0 && !utxo.receivedAt) patchStealthUTXO(username, utxo.stealthAddress, { receivedAt: Date.now() });
+    }
+
+    setStealthTxs(
+      rows
+        .filter((r) => r.amount > 0)
+        .map(({ utxo, raw, amount }) => ({
           id: utxo.stealthAddress,
           type: "private" as const,
-          amount: parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4)),
+          amount,
           stealthAddress: utxo.stealthAddress,
           weiBalance: raw, // exact — spend clamps to this, never the rounded `amount`
-        };
-      }),
+        })),
     );
-    setStealthTxs(results.filter((tx) => tx.amount > 0));
   }, [username]);
 
   const handleBackFromSpend = (message: string = "") => {
@@ -198,7 +246,7 @@ const handleBackToMenu = (message: string = "") => {
       }
       const keys = await derivePQKeysFromPRF(prf);
       const lastBlock = getLastScannedBlock(username);
-      const pub = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
+      const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
       const fromBlock = lastBlock ?? (await pub.getBlockNumber() - 21600n);
       const { utxos: newUtxos, latestBlock } = await scanStealthPayments(
         keys.spendingPrivateKey,
@@ -247,6 +295,78 @@ const handleBackToMenu = (message: string = "") => {
     );
   }
 
+  if (currentView === "receivePrivate") {
+    return <ReceivePrivate username={username} onBack={handleBackFromSpend} />;
+  }
+
+  if (currentView === "receivePublic") {
+    const copyAddress = () => {
+      navigator.clipboard?.writeText(address ?? "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    };
+    return (
+      <Box sx={{ pb: 4 }}>
+        {/* Header */}
+        <Box sx={{ display: "flex", alignItems: "center", maxWidth: 400, mx: "auto", mb: 1 }}>
+          <IconButton onClick={() => setCurrentView("menu")} size="small" aria-label="Back">
+            <ArrowBackIcon fontSize="small" />
+          </IconButton>
+          <Typography sx={{ flex: 1, textAlign: "center", fontWeight: 600, letterSpacing: "0.02em", mr: 4 }}>
+            Receive
+          </Typography>
+        </Box>
+
+        <Stack spacing={2.5} direction="column" alignItems="center" sx={{ width: "100%", maxWidth: 400, mx: "auto" }}>
+          {/* QR */}
+          <Box sx={{ display: "flex", justifyContent: "center", mt: 1 }}>
+            <QrCode value={address ?? ""} size={232} />
+          </Box>
+
+          <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, maxWidth: 300 }}>
+            Scan to send {symbol}, or copy your address below.
+          </Typography>
+
+          {/* Address card — whole row copies */}
+          <Box
+            onClick={copyAddress}
+            title="Tap to copy your address"
+            sx={{
+              width: "100%",
+              border: "1px solid",
+              borderColor: copied ? "success.main" : "divider",
+              borderRadius: 2,
+              px: 1.75,
+              py: 1.5,
+              cursor: "pointer",
+              transition: "border-color 0.15s",
+              "&:hover": { borderColor: "primary.main" },
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 0.75 }}>
+              <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                Your address
+              </Typography>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: copied ? "success.main" : "primary.main" }}>
+                {copied ? <CheckIcon sx={{ fontSize: "0.95rem" }} /> : <ContentCopyIcon sx={{ fontSize: "0.95rem" }} />}
+                <Typography sx={{ fontSize: "0.68rem", letterSpacing: "0.04em" }}>
+                  {copied ? "copied" : "copy"}
+                </Typography>
+              </Box>
+            </Box>
+            <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.82rem", wordBreak: "break-all", lineHeight: 1.5 }}>
+              {address}
+            </Typography>
+          </Box>
+
+          <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.62rem", opacity: 0.5, letterSpacing: "0.06em", textAlign: "center" }}>
+            {networkName()}
+          </Typography>
+        </Stack>
+      </Box>
+    );
+  }
+
   return (
     <Box sx={{ mt: 2 }}>
       <Stack
@@ -254,20 +374,33 @@ const handleBackToMenu = (message: string = "") => {
         direction="column"
         sx={{ width: "100%", maxWidth: 400, mx: "auto" }}
       >
-        <Button
-          variant="contained"
-          color="primary"
-          onClick={handleSendEth}
+        {/* Wallet-home balance card */}
+        <Box
           sx={{
-            py: 1.5,
-            fontSize: "1rem",
-            borderRadius: 2,
+            border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 2, textAlign: "left",
           }}
         >
-          Send {symbol} to your friends
-        </Button>
-
-        {/* Put yours {symbol} to work — hidden until implemented */}
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 0.5 }}>
+            <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              Your balance
+            </Typography>
+            <IconButton
+              onClick={toggleHideBalance}
+              size="small"
+              aria-label={hideBalance ? "Show balance" : "Hide balance"}
+              title={hideBalance ? "Show balance" : "Hide balance"}
+              sx={{ p: 0.25 }}
+            >
+              {hideBalance ? <VisibilityOffIcon sx={{ fontSize: "1rem" }} /> : <VisibilityIcon sx={{ fontSize: "1rem" }} />}
+            </IconButton>
+          </Box>
+          <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "2rem", lineHeight: 1.1, fontWeight: 500, wordBreak: "break-all" }}>
+            {hideBalance ? <GlitchText length={7} /> : fmtAmount(shownBalance)} {symbol}
+          </Typography>
+          <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.7rem", opacity: 0.6, mt: 0.75, letterSpacing: "0.04em" }}>
+            {username} · {privacy ? "private" : "public"} · light
+          </Typography>
+        </Box>
 
         <div>
           <Box
@@ -297,106 +430,105 @@ const handleBackToMenu = (message: string = "") => {
             </IconButton>
           </Box>
 
-          <Paper
-            sx={{
-              borderRadius: 2,
-              height: 200,
-              overflow: "auto",
-              maxWidth: 300,
-              mx: "auto",
-            }}
-          >
-            <List sx={{ p: 1 }}>
-              {loading ? (
+          {loading ? (
+            <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}>
+              <CircularProgress size={24} />
+            </Box>
+          ) : (privacy ? stealthTxs : transactions).length === 0 ? (
+            <Box sx={{ display: "flex", justifyContent: "center", p: 3 }}>
+              <Typography variant="body2" color="text.secondary">
+                No transactions found
+              </Typography>
+            </Box>
+          ) : (
+            <Stack spacing={0.75} sx={{ maxHeight: 240, overflowY: "auto", pr: 0.5, maxWidth: 300, mx: "auto" }}>
+              {(privacy ? stealthTxs : transactions).map((transaction) => (
                 <Box
+                  key={transaction.id}
+                  component={transaction.type !== "private" ? "a" : "div"}
+                  href={transaction.type !== "private" ? (explorerTxUrl(transaction.id) ?? undefined) : undefined}
+                  target={transaction.type !== "private" ? "_blank" : undefined}
+                  rel={transaction.type !== "private" ? "noopener noreferrer" : undefined}
+                  onClick={transaction.type === "private" ? () => handleOpenSpend(transaction) : undefined}
+                  title={transaction.type === "private" ? "Tap to spend from this stealth balance" : undefined}
                   sx={{
-                    display: "flex",
-                    justifyContent: "center",
-                    p: 4,
+                    display: "flex", alignItems: "center", gap: 1,
+                    border: "1px solid", borderColor: "divider", borderRadius: "2px",
+                    px: 1.25, py: 0.75,
+                    cursor: "pointer", textDecoration: "none", color: "inherit",
+                    "&:hover": { borderColor: "primary.main" },
                   }}
                 >
-                  <CircularProgress size={24} />
+                  {transaction.type === "sent" ? (
+                    <ArrowForwardIcon sx={{ color: "primary.main", fontSize: "1.1rem", flexShrink: 0 }} />
+                  ) : transaction.type === "received" ? (
+                    <ArrowBackIcon sx={{ color: "secondary.main", fontSize: "1.1rem", flexShrink: 0 }} />
+                  ) : (
+                    <Typography sx={{ fontSize: "1rem", fontFamily: "var(--font-geist-mono), monospace", opacity: 0.6, lineHeight: 1, flexShrink: 0 }}>
+                      ◈
+                    </Typography>
+                  )}
+                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flex: 1, gap: 1, minWidth: 0, fontFamily: "var(--font-geist-mono), monospace" }}>
+                    {transaction.type === "private" && (
+                      <Typography variant="caption" sx={{ fontFamily: "inherit", letterSpacing: "0.04em", opacity: 0.7 }}>
+                        {transaction.stealthAddress?.slice(0, 6)}…{transaction.stealthAddress?.slice(-4)}
+                      </Typography>
+                    )}
+                    <Typography variant="body2" sx={{ fontFamily: "inherit", letterSpacing: "0.04em", fontWeight: 500, ml: "auto" }}>
+                      {hideBalance ? <GlitchText length={4} /> : fmtAmount(transaction.amount)} {symbol}
+                    </Typography>
+                  </Box>
                 </Box>
-              ) : (privacy ? stealthTxs : transactions).length === 0 ? (
-                <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}>
-                  <Typography variant="body2" color="text.secondary">
-                    No transactions found
-                  </Typography>
-                </Box>
-              ) : (
-                (privacy ? stealthTxs : transactions).map((transaction) => (
-                  <ListItem
-                    key={transaction.id}
-                    component={transaction.type !== "private" ? "a" : "div"}
-                    href={transaction.type !== "private" ? `https://sepolia.etherscan.io/tx/${transaction.id}` : undefined}
-                    target={transaction.type !== "private" ? "_blank" : undefined}
-                    rel={transaction.type !== "private" ? "noopener noreferrer" : undefined}
-                    onClick={transaction.type === "private" ? () => handleOpenSpend(transaction) : undefined}
-                    sx={{
-                      py: 0.5, px: 1,
-                      borderBottom: "1px solid #f5f5f5",
-                      "&:last-child": { borderBottom: "none" },
-                      cursor: "pointer",
-                      textDecoration: "none",
-                      color: "inherit",
-                      "&:hover": { backgroundColor: "rgba(0, 0, 0, 0.04)" },
-                    }}
-                    title={transaction.type === "private" ? "Tap to spend from this stealth balance" : undefined}
-                  >
-                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%", gap: 1 }}>
-                      {transaction.type === "sent" ? (
-                        <ArrowForwardIcon sx={{ color: "primary.main", fontSize: "1.2rem" }} />
-                      ) : transaction.type === "received" ? (
-                        <ArrowBackIcon sx={{ color: "secondary.main", fontSize: "1.2rem" }} />
-                      ) : (
-                        <Typography sx={{ fontSize: "1.1rem", fontFamily: "var(--font-geist-mono), monospace", opacity: 0.6, lineHeight: 1 }}>
-                          ◈
-                        </Typography>
-                      )}
-                      {transaction.type === "private" ? (
-                        <Box
-                          sx={{
-                            display: "flex", alignItems: "center", justifyContent: "space-between",
-                            width: "100%", maxWidth: "200px",
-                            background: "transparent",
-                            border: "1px dashed currentColor",
-                            opacity: 0.7,
-                            borderRadius: "2px", py: 0.5, px: 1,
-                            fontFamily: "var(--font-geist-mono), monospace",
-                          }}
-                        >
-                          <Typography variant="caption" sx={{ fontFamily: "inherit", letterSpacing: "0.04em" }}>
-                            {transaction.stealthAddress?.slice(0, 6)}…{transaction.stealthAddress?.slice(-4)}
-                          </Typography>
-                          <Typography variant="body2" sx={{ fontFamily: "inherit", letterSpacing: "0.04em", fontWeight: 500 }}>
-                            {transaction.amount} {symbol}
-                          </Typography>
-                        </Box>
-                      ) : (
-                        <Box
-                          sx={{
-                            display: "flex", alignItems: "center", justifyContent: "space-between",
-                            width: "100%", maxWidth: "200px",
-                            backgroundColor: transaction.type === "sent"
-                              ? `rgba(25, 118, 210, ${(transaction.proportion || 1) * 0.3})`
-                              : `rgba(156, 39, 176, ${(transaction.proportion || 1) * 0.3})`,
-                            borderRadius: 1, py: 0.5, px: 1,
-                          }}
-                        >
-                          <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                            {transaction.amount} {symbol}
-                          </Typography>
-                        </Box>
-                      )}
-                    </Box>
-                  </ListItem>
-                ))
-              )}
-            </List>
-          </Paper>
+              ))}
+            </Stack>
+          )}
         </div>
         {showPopup && popupMessage && <Popup popupMessage={popupMessage} />}
       </Stack>
+
+      {/* Fixed bottom action bar (wallet-home). Renders only on the menu view
+          since the sub-views return earlier. Sits at the bottom over the footer. */}
+      <Box
+        sx={{
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          zIndex: 1100,
+          bgcolor: "background.default",
+          borderTop: "1px solid",
+          borderColor: "divider",
+          pb: "env(safe-area-inset-bottom)",
+        }}
+      >
+        <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
+          {[
+            { key: "send", label: "Send", icon: <ArrowUpwardIcon fontSize="small" />, onClick: handleSendEth, disabled: false },
+            { key: "receive", label: "Receive", icon: <ArrowDownwardIcon fontSize="small" />, onClick: handleReceive, disabled: false },
+            { key: "soon", label: "soon", icon: <AddIcon fontSize="small" />, onClick: undefined, disabled: true },
+          ].map((slot) => (
+            <Button
+              key={slot.key}
+              onClick={slot.onClick}
+              disabled={slot.disabled}
+              sx={{
+                flex: 1,
+                minWidth: 0,
+                flexDirection: "column",
+                gap: 0.25,
+                py: 1.25,
+                borderRadius: 0,
+                color: "text.primary",
+              }}
+            >
+              {slot.icon}
+              <Typography sx={{ fontSize: "0.6rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                {slot.label}
+              </Typography>
+            </Button>
+          ))}
+        </Stack>
+      </Box>
     </Box>
   );
 };

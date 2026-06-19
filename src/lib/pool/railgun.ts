@@ -44,8 +44,22 @@ import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 import { Mnemonic, JsonRpcProvider } from "ethers";
 import { RPC_URLS } from "@/app/constants";
+import { activeNetwork, type NetworkId } from "@/lib/networks";
 
-export const POOL_NETWORK = NetworkName.EthereumSepolia;
+// Map the active network (registry) → Railgun's NetworkName. Railgun support is
+// a property of the protocol, not the wallet: a chain can live in the registry
+// without (yet) a Railgun deployment, so this is a partial map that throws
+// loudly if the private side is entered on an unsupported chain.
+const RAILGUN_NETWORK: Partial<Record<NetworkId, NetworkName>> = {
+  sepolia: NetworkName.EthereumSepolia,
+};
+
+export const POOL_NETWORK = (() => {
+  const id = activeNetwork().id;
+  const name = RAILGUN_NETWORK[id];
+  if (!name) throw new Error(`[pool] RAILGUN has no deployment for network "${id}"`);
+  return name;
+})();
 const TXID = TXIDVersion.V2_PoseidonMerkle;
 const { chain: CHAIN, baseToken } = NETWORK_CONFIG[POOL_NETWORK];
 const WETH = baseToken.wrappedAddress;

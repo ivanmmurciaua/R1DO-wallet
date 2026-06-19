@@ -1,3 +1,4 @@
+import localforage from "localforage";
 import { LOCAL_WALLET_LIST } from "@/app/constants";
 import { WalletMeta } from "@/types";
 import type { StealthUTXO } from "@/lib/stealth";
@@ -78,7 +79,11 @@ export const removeWalletMeta = (username: string): void => {
   // Drop the whole per-account record + scan state — re-derives/rescans on next login.
   localStorage.removeItem(acctKey(u));
   localStorage.removeItem(scanCursorKey(u));
-  localStorage.removeItem(scanUtxosKey(u));
+  localStorage.removeItem(scanUtxosKey(u)); // legacy copy, if any remains
+  // UTXOs now live in IndexedDB — clear the cache + durable store too.
+  utxoCache.delete(u);
+  hydratedUsers.delete(u);
+  void utxoDB().removeItem(u).catch(() => {});
 };
 
 // ── Per-account record ───────────────────────────────────────────────────────
@@ -128,7 +133,19 @@ export const getDirectoryMark = (username: string): string | null =>
 export const setDirectoryMark = (username: string, directoryAddress: string): void =>
   patchAccount(username, { directory: directoryAddress });
 
-// ── Stealth scan state (split: hot cursor / cold UTXO list) ──────────────────
+// ── Stealth scan state — cursor (localStorage) + UTXO store (IndexedDB) ───────
+//
+// The cursor is tiny and hot (bumped every scan pass) → stays in localStorage.
+// The UTXO array is the only large/unbounded structure → it would eventually
+// blow the ~5 MB localStorage quota, so it lives in IndexedDB (via localforage).
+//
+// A synchronous in-memory cache fronts IndexedDB so every existing call site
+// keeps its SYNC signature (React reads these in render):
+//   · reads  → served from the cache
+//   · writes → update the cache now, persist write-through (fire-and-forget)
+// The cache is the runtime source of truth; IndexedDB is the durable backing.
+// hydrateStealthStore() MUST run before the wallet subtree renders any sync
+// read — page.tsx gates the wallet render on it.
 
 interface ScanCursor {
   block: string | null; // last scanned block (decimal string) — null if never scanned
@@ -147,13 +164,75 @@ const readCursor = (username: string): ScanCursor => {
 const writeCursor = (username: string, cursor: ScanCursor): void =>
   localStorage.setItem(scanCursorKey(username), JSON.stringify(cursor));
 
-export const getStealthUTXOs = (username: string): StealthUTXO[] => {
-  try {
-    return JSON.parse(localStorage.getItem(scanUtxosKey(username)) || "[]") || [];
-  } catch {
-    return [];
-  }
+// IndexedDB-backed UTXO store + write-through cache.
+const utxoCache = new Map<string, StealthUTXO[]>();
+const hydratedUsers = new Set<string>();
+
+let _utxoDB: LocalForage | null = null;
+const utxoDB = (): LocalForage => {
+  // Lazy-create (never at import time) so SSR/build never touch IndexedDB.
+  if (!_utxoDB) _utxoDB = localforage.createInstance({ name: "R1DOWallet", storeName: "stealthUtxos" });
+  return _utxoDB;
 };
+
+const ukey = (u: string) => u.toLowerCase();
+const readUtxos = (username: string): StealthUTXO[] => utxoCache.get(ukey(username)) ?? [];
+
+// Best-effort durability: write-through persists promptly, but a write fired in
+// the instant before the tab closes might not commit. Flushing the whole cache
+// on pagehide / background re-issues those puts so they land. Hooked once.
+let _flushHooked = false;
+const hookFlush = (): void => {
+  if (_flushHooked || typeof window === "undefined") return;
+  _flushHooked = true;
+  const flush = () => { for (const [k, arr] of utxoCache) void utxoDB().setItem(k, arr).catch(() => {}); };
+  window.addEventListener("pagehide", flush);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(); });
+};
+
+// Update cache synchronously, then persist write-through. We always store the
+// full array snapshot and JS is single-threaded, so queued idb transactions
+// commit in call order — no torn/partial writes.
+const writeUtxos = (username: string, arr: StealthUTXO[]): void => {
+  const k = ukey(username);
+  utxoCache.set(k, arr);
+  hookFlush();
+  void utxoDB().setItem(k, arr).catch((e) => console.error("[stealthStore] persist failed:", e));
+};
+
+// Load one account's UTXOs idb → cache. Idempotent. Await before any sync read
+// of this user's UTXOs (page.tsx gates the wallet render on it).
+export const hydrateStealthStore = async (username: string): Promise<void> => {
+  const k = ukey(username);
+  if (hydratedUsers.has(k)) return;
+  hookFlush();
+  let arr: StealthUTXO[] = [];
+  try { arr = (await utxoDB().getItem<StealthUTXO[]>(k)) ?? []; } catch { arr = []; }
+
+  // TEMP migration (remove alongside localstorage-migrate.tsx once all existing
+  // testers have logged in once post-change): UTXOs used to live in localStorage.
+  // If idb is empty but the legacy array exists, adopt it into idb and drop the
+  // localStorage copy. New users never write that key, so this is dead code for
+  // them. Non-destructive: any error leaves the legacy key untouched. Don't
+  // delete this branch until you're sure no tester still has un-migrated UTXOs
+  // (ghost / Courier notes aren't on-chain — orphaning them = data loss).
+  if (arr.length === 0) {
+    try {
+      const legacy = localStorage.getItem(scanUtxosKey(username));
+      const parsed = legacy ? JSON.parse(legacy) : null;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        arr = parsed;
+        await utxoDB().setItem(k, arr);
+        localStorage.removeItem(scanUtxosKey(username));
+      }
+    } catch { /* on any error, leave the legacy key untouched */ }
+  }
+
+  utxoCache.set(k, arr);
+  hydratedUsers.add(k);
+};
+
+export const getStealthUTXOs = (username: string): StealthUTXO[] => readUtxos(username);
 
 export const getLastScannedBlock = (username: string): bigint | null => {
   const { block } = readCursor(username);
@@ -161,17 +240,15 @@ export const getLastScannedBlock = (username: string): bigint | null => {
 };
 
 // Persists a scan pass. The upstream merge is append-only/deduped, so the UTXO
-// array is only re-serialized when its length changed; the cursor (tiny) is
-// always updated. With a large UTXO set, cursor-only passes cost almost nothing.
+// array is only re-written when its length changed; the cursor (tiny) is always
+// updated. With a large UTXO set, cursor-only passes cost almost nothing.
 export const saveStealthScan = (
   username: string,
   utxos: StealthUTXO[],
   lastBlock: bigint,
 ): void => {
   const { count } = readCursor(username);
-  if (utxos.length !== count) {
-    localStorage.setItem(scanUtxosKey(username), JSON.stringify(utxos));
-  }
+  if (utxos.length !== count) writeUtxos(username, utxos);
   writeCursor(username, { block: lastBlock.toString(), count: utxos.length });
 };
 
@@ -179,11 +256,28 @@ export const saveStealthScan = (
 // unshield and off-chain Courier import, whose payments carry no on-chain blob,
 // so the local note is the only way to re-derive the spending key on this device.
 export const addStealthUTXO = (username: string, utxo: StealthUTXO): void => {
-  const existing = getStealthUTXOs(username);
+  const existing = readUtxos(username);
   if (existing.some((u) => u.stealthAddress.toLowerCase() === utxo.stealthAddress.toLowerCase())) return;
-  localStorage.setItem(scanUtxosKey(username), JSON.stringify([...existing, utxo]));
+  const next = [...existing, utxo];
+  writeUtxos(username, next);
   const cur = readCursor(username);
-  writeCursor(username, { block: cur.block, count: existing.length + 1 });
+  writeCursor(username, { block: cur.block, count: next.length });
+};
+
+// Patches fields of one stored UTXO (matched by address) WITHOUT changing the
+// set's length — so the scan cursor's count stays valid. Used to flip `hidden`
+// (never delete: the local note is the only way to spend a Courier payment) and
+// to stamp `receivedAt`.
+export const patchStealthUTXO = (
+  username: string,
+  stealthAddress: string,
+  patch: Partial<StealthUTXO>,
+): void => {
+  const a = stealthAddress.toLowerCase();
+  writeUtxos(
+    username,
+    readUtxos(username).map((u) => (u.stealthAddress.toLowerCase() === a ? { ...u, ...patch } : u)),
+  );
 };
 
 // ── UI preferences ───────────────────────────────────────────────────────────
@@ -191,6 +285,7 @@ export const addStealthUTXO = (username: string, utxo: StealthUTXO): void => {
 interface Prefs {
   decimals?: number;
   symbol?: string;
+  hideBalance?: boolean; // mask the balance + amounts with "*" (sticky across F5)
 }
 
 export const DEFAULT_DECIMALS = 13;
@@ -221,3 +316,9 @@ export const setDecimalsConfig = (decimals: number): void => patchPrefs({ decima
 export const getSymbol = (): string => readPrefs().symbol || DEFAULT_SYMBOL;
 
 export const setSymbolConfig = (symbol: string): void => patchPrefs({ symbol });
+
+// Balance privacy: when on, the headline balance and the Recent Transactions
+// amounts render masked ("*"). Sticky so it survives reloads.
+export const getHideBalance = (): boolean => readPrefs().hideBalance ?? false;
+
+export const setHideBalance = (hide: boolean): void => patchPrefs({ hideBalance: hide });
