@@ -162,13 +162,13 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
         {/* Recipient input */}
         <Box>
           <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
-            Recipient (Username, Address or Meta-address)
+            Recipient (Username or Address)
           </Typography>
           <input
             type="text"
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
-            placeholder="_ username, 0x address or 0x00… meta-address"
+            placeholder="_ username or 0x address"
             style={inputStyle}
             onFocus={(e) => (e.target.style.opacity = "1")}
             onBlur={(e) => (e.target.style.opacity = "0.7")}

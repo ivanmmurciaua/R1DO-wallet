@@ -16,12 +16,20 @@ import {
   Popover,
 } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import CheckIcon from "@mui/icons-material/Check";
+import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import { formatUnits, parseUnits } from "viem";
 import type { Safe4337Pack } from "@safe-global/relay-kit";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { ensureZkInDirectory, resolvePoolAddress } from "@/lib/registry-v2";
-import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
+import { QrCode } from "./QrCode";
+import { GlitchText } from "./GlitchText";
+import { QrScanner } from "./QrScanner";
 import type { PoolBalances } from "@/lib/pool/railgun";
 import { protocolName } from "@/lib/pool/protocols";
 import { generateStealthPayment, type StealthUTXO, type StealthPayment } from "@/lib/stealth";
@@ -129,6 +137,18 @@ export default function PrivateView({
   });
   const [toast, setToast] = useState<{ msg: string; sev: "success" | "error" | "info" } | null>(null);
   const [bootAttempt, setBootAttempt] = useState(0); // bump → retry the boot
+  // Balance privacy — shared pref with the public side (one toggle rules both
+  // worlds). Masks the headline + pending amounts with the Matrix glitch.
+  const [hideBalance, setHide] = useState<boolean>(() => getHideBalance());
+  const [zkCopied, setZkCopied] = useState(false); // copy feedback on the 0zk receive card
+  const [scanning, setScanning] = useState(false); // QR scanner overlay (private transfer "To")
+
+  const toggleHideBalance = () =>
+    setHide((h) => {
+      const next = !h;
+      setHideBalance(next);
+      return next;
+    });
 
   useEffect(() => {
     setDecimals(getDecimals());
@@ -243,12 +263,14 @@ export default function PrivateView({
     }
   };
 
-  // Tap the balance to copy your 0zk (like the public side copies your address).
+  // Copy your 0zk from the Receive card (the balance click is freed for the
+  // hide toggle). Inline check feedback on the card.
   const copyZk = async () => {
     if (!zk) return;
     try {
       await navigator.clipboard.writeText(zk);
-      setToast({ msg: "0zk address copied — share it to get paid privately", sev: "success" });
+      setZkCopied(true);
+      setTimeout(() => setZkCopied(false), 1600);
     } catch {
       setToast({ msg: "could not copy", sev: "error" });
     }
@@ -269,6 +291,8 @@ export default function PrivateView({
   };
 
   const openDeposit = () => {
+    setSendOpen(false);
+    setUnshieldOpen(false);
     setDepositAmt("");
     setSourceBalance(null);
     setCoinMode("amount");
@@ -328,6 +352,8 @@ export default function PrivateView({
     coins?.filter((c) => selectedCoins.has(c.utxo.stealthAddress)).reduce((s, c) => s + c.balance, 0n) ?? 0n;
 
   const openSend = () => {
+    setDepositOpen(false);
+    setUnshieldOpen(false);
     setSendTo("");
     setSendAmt("");
     setSendStage("idle");
@@ -418,6 +444,8 @@ export default function PrivateView({
   //  · privacy → a FRESH one-time stealth address we own (unlinkable); the ETH
   //    lands there and (announce ON) the blob is published / (ghost) kept local.
   const openUnshield = async () => {
+    setDepositOpen(false);
+    setSendOpen(false);
     setUnshieldTo("");
     setUnshieldAmt("");
     setUnshieldStage("idle");
@@ -648,6 +676,17 @@ export default function PrivateView({
 
   return (
     <Box sx={{ textAlign: "center", position: "relative" }}>
+      {scanning && (
+        <QrScanner
+          onResult={(text) => {
+            // Transfer recipient is a 0zk address or a username → use as-is.
+            setSendTo(text.trim());
+            setScanning(false);
+          }}
+          onClose={() => setScanning(false)}
+        />
+      )}
+
       {/* 影 (shadow) watermark */}
       <Box
         aria-hidden
@@ -749,32 +788,32 @@ export default function PrivateView({
       ) : (
         /* ── UNLOCKED: operational UI ── */
         <>
-          {/* shielded balance — tap to copy your 0zk */}
+          {/* shielded balance (click freed — copy lives on the Receive card now) */}
           <Typography
             variant="h2"
-            onClick={copyZk}
-            title="Tap to copy your 0zk address"
-            sx={{
-              fontSize: "2.6rem",
-              color: "text.primary",
-              mt: 1,
-              cursor: "pointer",
-              userSelect: "none",
-              transition: "transform 0.1s ease",
-              "&:active": { transform: "scale(0.97)" },
-            }}
+            sx={{ fontSize: "2.6rem", color: "text.primary", mt: 1, userSelect: "none" }}
           >
-            {fmt(spendable, decimals)}{" "}
+            {hideBalance ? <GlitchText length={7} /> : fmt(spendable, decimals)}{" "}
             <Box component="span" sx={{ color: "primary.main" }}>{symbol}</Box>
           </Typography>
 
-          <Typography
-            variant="body2"
-            onClick={copyZk}
-            sx={{ fontSize: "0.7rem", opacity: 0.55, mt: 0.5, letterSpacing: "0.08em", cursor: "pointer" }}
-          >
-            shielded balance · tap to copy 0zk
-          </Typography>
+          <Box sx={{ display: "inline-flex", alignItems: "center", gap: 0.5, mt: 0.5 }}>
+            <Typography
+              variant="body2"
+              sx={{ fontSize: "0.7rem", opacity: 0.55, letterSpacing: "0.08em" }}
+            >
+              shielded balance
+            </Typography>
+            <IconButton
+              onClick={toggleHideBalance}
+              size="small"
+              aria-label={hideBalance ? "Show balance" : "Hide balance"}
+              title={hideBalance ? "Show balance" : "Hide balance"}
+              sx={{ p: 0.25 }}
+            >
+              {hideBalance ? <VisibilityOffIcon sx={{ fontSize: "0.95rem" }} /> : <VisibilityIcon sx={{ fontSize: "0.95rem" }} />}
+            </IconButton>
+          </Box>
 
           {/* "validating in the background" — only when something is pending POI */}
           {pending > 0n && (
@@ -801,7 +840,7 @@ export default function PrivateView({
                 }}
               />
               <Typography variant="body2" sx={{ fontSize: "0.68rem", letterSpacing: "0.1em" }}>
-                {fmt(pending, decimals)} {symbol} validating
+                {hideBalance ? <GlitchText length={4} /> : fmt(pending, decimals)} {symbol} validating
               </Typography>
             </Box>
           )}
@@ -1077,6 +1116,20 @@ export default function PrivateView({
                   value={sendTo}
                   onChange={(e) => setSendTo(e.target.value)}
                   disabled={sendBusy}
+                  InputProps={{
+                    endAdornment: (
+                      <IconButton
+                        size="small"
+                        onClick={() => setScanning(true)}
+                        disabled={sendBusy}
+                        aria-label="Scan a QR address"
+                        title="Scan a QR address"
+                        sx={{ p: 0.5 }}
+                      >
+                        <QrCodeScannerIcon sx={{ fontSize: "1.1rem" }} />
+                      </IconButton>
+                    ),
+                  }}
                   sx={{ mb: 1.25 }}
                 />
 
@@ -1276,19 +1329,95 @@ export default function PrivateView({
                 </Button>
               </Box>
             ) : (
-              <>
-                <Button variant="contained" color="primary" fullWidth onClick={openDeposit}>
-                  Shield
-                </Button>
-                <Button variant="outlined" color="primary" fullWidth onClick={openSend}>
-                  Send private
-                </Button>
-                <Button variant="outlined" color="primary" fullWidth onClick={openUnshield}>
-                  Unshield
-                </Button>
-              </>
+              /* ── idle: Receive privately (your 0zk QR) — fills the space the
+                   public side gives to Recent Transactions ── */
+              <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 2, textAlign: "center" }}>
+                <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase", mb: 1.5 }}>
+                  Receive privately
+                </Typography>
+                <Box sx={{ display: "flex", justifyContent: "center", mb: 1.5 }}>
+                  <QrCode value={zk} size={196} />
+                </Box>
+                <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.55, lineHeight: 1.6, mb: 1.25 }}>
+                  Share your 0zk to receive a private transfer.
+                </Typography>
+                <Box
+                  onClick={copyZk}
+                  title="Tap to copy your 0zk"
+                  sx={{
+                    border: "1px solid",
+                    borderColor: zkCopied ? "success.main" : "divider",
+                    borderRadius: "2px",
+                    px: 1.25,
+                    py: 1,
+                    cursor: "pointer",
+                    transition: "border-color 0.15s",
+                    "&:hover": { borderColor: "primary.main" },
+                  }}
+                >
+                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 0.5 }}>
+                    <Typography sx={{ fontSize: "0.58rem", opacity: 0.6, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      Your 0zk
+                    </Typography>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: zkCopied ? "success.main" : "primary.main" }}>
+                      {zkCopied ? <CheckIcon sx={{ fontSize: "0.85rem" }} /> : <ContentCopyIcon sx={{ fontSize: "0.85rem" }} />}
+                      <Typography sx={{ fontSize: "0.62rem", letterSpacing: "0.04em" }}>
+                        {zkCopied ? "copied" : "copy"}
+                      </Typography>
+                    </Box>
+                  </Box>
+                  <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.66rem", wordBreak: "break-all", lineHeight: 1.5, textAlign: "left" }}>
+                    {zk}
+                  </Typography>
+                </Box>
+              </Box>
             )}
           </Stack>
+
+          {/* Fixed bottom action bar (shadow world). Hidden while a form is open
+              so the form has full room — mirrors the public side's sub-views. */}
+          {!(depositOpen || sendOpen || unshieldOpen) && (
+            <Box
+              sx={{
+                position: "fixed",
+                bottom: 0,
+                left: 0,
+                right: 0,
+                zIndex: 1100,
+                bgcolor: "background.default",
+                borderTop: "1px solid",
+                borderColor: "divider",
+                pb: "env(safe-area-inset-bottom)",
+              }}
+            >
+              <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
+                {[
+                  { key: "shield", glyph: "☗", label: "Shield", onClick: openDeposit },
+                  { key: "transfer", glyph: "⇄", label: "Transfer", onClick: openSend },
+                  { key: "unshield", glyph: "☖", label: "Unshield", onClick: openUnshield },
+                ].map((slot) => (
+                  <Button
+                    key={slot.key}
+                    onClick={slot.onClick}
+                    sx={{
+                      flex: 1,
+                      minWidth: 0,
+                      flexDirection: "column",
+                      gap: 0.25,
+                      py: 1.25,
+                      borderRadius: 0,
+                      color: "text.primary",
+                    }}
+                  >
+                    <Box component="span" sx={{ fontSize: "1.2rem", lineHeight: 1 }}>{slot.glyph}</Box>
+                    <Typography sx={{ fontSize: "0.6rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      {slot.label}
+                    </Typography>
+                  </Button>
+                ))}
+              </Stack>
+            </Box>
+          )}
         </>
       )}
 

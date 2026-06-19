@@ -23,6 +23,7 @@
     "@safe-global/relay-kit": "^5.0.0",
     "ethers": "^6.14.3",
     "hash-wasm": "^4.12.0",
+    "jsqr": "^1.4.0",
     "level-js": "^6.1.0",
     "localforage": "^1.10.0",
     "next": "15.5.9",

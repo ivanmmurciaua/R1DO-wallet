@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { Box, Button, Stack, Typography } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
+import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
+import { QrScanner } from "./QrScanner";
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { smartSend, getStealthTotal } from "@/lib/deploy";
 import { readDirectory } from "@/lib/registry-v2";
@@ -17,10 +19,22 @@ type SendEthProps = {
 
 type PrivacyStatus = "unknown" | "checking" | "private" | "public";
 
+// Pull a usable recipient out of a scanned QR. A PQ meta-address is kept whole
+// (never truncate it). Otherwise extract a 20-byte 0x address if present (also
+// handles EIP-681 "ethereum:0x…@chain?…"), else fall back to the raw text so a
+// username QR still fills the field.
+const recipientFromQr = (text: string): string => {
+  const t = text.trim();
+  if (isPQMetaAddress(t)) return t;
+  const m = t.match(/0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/);
+  return m ? m[0] : t;
+};
+
 export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) => {
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [privacyStatus, setPrivacyStatus] = useState<PrivacyStatus>("unknown");
   // Exact spendable in wei (main Safe + stealth UTXOs) — MAX/validation use this,
   // never the rounded `balance` prop (which can sit above the true balance).
@@ -156,6 +170,15 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
 
   return (
     <Box>
+      {scanning && (
+        <QrScanner
+          onResult={(text) => {
+            setRecipient(recipientFromQr(text));
+            setScanning(false);
+          }}
+          onClose={() => setScanning(false)}
+        />
+      )}
       <Stack
         spacing={1.7}
         direction="column"
@@ -163,14 +186,27 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
       >
         {/* Recipient input */}
         <Box>
-          <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
-            Recipient (Username, Address or Meta-address)
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+            <Typography variant="body2" sx={{ color: "text.secondary" }}>
+              Recipient (Username or Address)
+            </Typography>
+            <Button
+              variant="text"
+              color="primary"
+              size="small"
+              startIcon={<QrCodeScannerIcon sx={{ fontSize: "1rem" }} />}
+              onClick={() => setScanning(true)}
+              disabled={isLoading}
+              sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
+            >
+              Scan
+            </Button>
+          </Box>
           <input
             type="text"
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
-            placeholder="_ username, 0x address or 0x00… meta-address"
+            placeholder="_ username or 0x address"
             style={{
               fontSize: "1rem",
               fontFamily: "var(--font-geist-mono), monospace",
