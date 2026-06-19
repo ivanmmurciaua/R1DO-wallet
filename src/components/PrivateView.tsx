@@ -50,6 +50,11 @@ const fmt = (wei: bigint, decimals: number): string => {
   return Number.isInteger(n) ? n.toString() : parseFloat(n.toFixed(4)).toString();
 };
 
+// Compact display formatter (2 decimals, K/M/B) for headline balances — same as
+// the public side. `fmt` stays for forms/fees/coin lists where precision matters.
+const compactFmt = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+const fmtCompact = (wei: bigint, decimals: number): string => compactFmt.format(parseFloat(formatUnits(wei, decimals)));
+
 // Railgun takes `bps` basis points (25 = 0.25%) on shield/unshield. Two views of
 // the same op: gross (you move `amount`, receive amount − fee) or exact/net (you
 // receive exactly `amount`, we gross-up what's moved). `moves` is always the
@@ -793,7 +798,7 @@ export default function PrivateView({
             variant="h2"
             sx={{ fontSize: "2.6rem", color: "text.primary", mt: 1, userSelect: "none" }}
           >
-            {hideBalance ? <GlitchText length={7} /> : fmt(spendable, decimals)}{" "}
+            {hideBalance ? <GlitchText length={7} /> : fmtCompact(spendable, decimals)}{" "}
             <Box component="span" sx={{ color: "primary.main" }}>{symbol}</Box>
           </Typography>
 
@@ -815,33 +820,36 @@ export default function PrivateView({
             </IconButton>
           </Box>
 
-          {/* "validating in the background" — only when something is pending POI */}
+          {/* "validating in the background" — only when something is pending POI.
+              Block wrapper forces its own line (the badge is inline-flex and would
+              otherwise sit beside the inline-flex "shielded balance" row). */}
           {pending > 0n && (
-            <Box
-              sx={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 1,
-                mt: 2,
-                px: 1.5,
-                py: 0.5,
-                border: "1px solid",
-                borderColor: "divider",
-                borderRadius: "2px",
-              }}
-            >
+            <Box sx={{ mt: 2.5 }}>
               <Box
                 sx={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: "50%",
-                  bgcolor: "primary.main",
-                  animation: "r1doPulse 1.6s ease-in-out infinite",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 1,
+                  px: 1.5,
+                  py: 0.5,
+                  border: "1px solid",
+                  borderColor: "divider",
+                  borderRadius: "2px",
                 }}
-              />
-              <Typography variant="body2" sx={{ fontSize: "0.68rem", letterSpacing: "0.1em" }}>
-                {hideBalance ? <GlitchText length={4} /> : fmt(pending, decimals)} {symbol} validating
-              </Typography>
+              >
+                <Box
+                  sx={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    bgcolor: "primary.main",
+                    animation: "r1doPulse 1.6s ease-in-out infinite",
+                  }}
+                />
+                <Typography variant="body2" sx={{ fontSize: "0.68rem", letterSpacing: "0.1em" }}>
+                  {hideBalance ? <GlitchText length={4} /> : fmtCompact(pending, decimals)} {symbol} validating
+                </Typography>
+              </Box>
             </Box>
           )}
 
