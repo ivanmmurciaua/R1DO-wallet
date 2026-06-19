@@ -1,7 +1,11 @@
 import React, { useState } from "react";
-import { Box, Button, Stack, Typography, Collapse } from "@mui/material";
+import { Box, Button, Stack, Typography, Collapse, IconButton } from "@mui/material";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import CheckIcon from "@mui/icons-material/Check";
+import { QrCode } from "./QrCode";
 import { generateStealthPayment, derivePQKeysFromPRF, buildStealthTicket, extractStealthBlobs, checkPQPayment, type StealthUTXO } from "@/lib/stealth";
-import { getMetaAddress, saveMetaAddress, addStealthUTXO, getStealthUTXOs, patchStealthUTXO } from "@/lib/localstorage";
+import { getMetaAddress, saveMetaAddress, addStealthUTXO, getStealthUTXOs, patchStealthUTXO, getSymbol } from "@/lib/localstorage";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 
@@ -38,13 +42,17 @@ const loadReceives = (username: string): StealthUTXO[] =>
     .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 
 export const ReceivePrivate: React.FC<ReceivePrivateProps> = ({ username, onBack }) => {
-  const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [showTicket, setShowTicket] = useState(false);
+  // Label is decoupled from creation: the address is saved instantly (the
+  // crypto material is what matters), and you name/rename/clear it afterwards.
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [labelDraft, setLabelDraft] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
   const [receives, setReceives] = useState<StealthUTXO[]>(() => loadReceives(username));
+  const [paymentsOpen, setPaymentsOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const [importBusy, setImportBusy] = useState(false);
@@ -61,7 +69,24 @@ export const ReceivePrivate: React.FC<ReceivePrivateProps> = ({ username, onBack
 
   const openDetail = (d: Detail) => {
     setShowTicket(false);
+    setEditingLabel(false);
     setDetail(d);
+  };
+
+  // The memo for the address currently previewed (looked up live so it reflects
+  // renames without threading memo through the Detail type).
+  const detailMemo = detail ? receives.find((u) => u.stealthAddress === detail.address)?.memo : undefined;
+
+  const startEditLabel = () => {
+    setLabelDraft(detailMemo ?? "");
+    setEditingLabel(true);
+  };
+
+  const saveLabel = () => {
+    if (!detail) return;
+    patchStealthUTXO(username, detail.address, { memo: labelDraft.trim() || undefined });
+    setEditingLabel(false);
+    refresh();
   };
 
   const handleCreate = async () => {
@@ -86,11 +111,9 @@ export const ReceivePrivate: React.FC<ReceivePrivateProps> = ({ username, onBack
         kemCiphertext: pay.kemCiphertext,
         blockNumber: 0,
         createdAt: Date.now(),
-        memo: memo.trim() || undefined,
         viewTag: pay.viewTag,
       });
 
-      setMemo("");
       openDetail({ address: pay.stealthAddress, ticket: pay.calldataBlob });
       refresh();
     } catch (e) {
@@ -165,89 +188,168 @@ export const ReceivePrivate: React.FC<ReceivePrivateProps> = ({ username, onBack
 
   const hiddenCount = receives.filter((u) => u.hidden).length;
   const visible = receives.filter((u) => (showHidden ? true : !u.hidden));
+  const activeCount = receives.filter((u) => !u.hidden).length;
+  const symbol = getSymbol();
 
   return (
-    <Box>
-      <Stack spacing={1.7} direction="column" sx={{ width: "100%", maxWidth: 400, mx: "auto" }}>
-        <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6 }}>
-          Create a one-time address to receive a private payment from <b>any</b> wallet
-          (MetaMask, an exchange…). Share only the address — the payment stays unlinkable to you.
+    <Box sx={{ pb: 4 }}>
+      {/* Header — mirrors public Receive */}
+      <Box sx={{ display: "flex", alignItems: "center", maxWidth: 400, mx: "auto", mb: 1 }}>
+        <IconButton onClick={() => onBack()} size="small" aria-label="Back">
+          <ArrowBackIcon fontSize="small" />
+        </IconButton>
+        <Typography sx={{ flex: 1, textAlign: "center", fontWeight: 600, letterSpacing: "0.02em", mr: 4 }}>
+          Receive
+        </Typography>
+      </Box>
+
+      <Stack spacing={2} direction="column" sx={{ width: "100%", maxWidth: 400, mx: "auto" }}>
+        {/* Actions — stacked, explicit. Generate never fires automatically:
+            opening Receive must not burn a fresh stealth address, only a tap. */}
+        <Stack spacing={1} sx={{ mt: 6 }}>
+          <Button
+            fullWidth
+            variant="outlined"
+            color="primary"
+            onClick={handleCreate}
+            disabled={busy}
+            sx={{ py: 1.3, fontSize: "0.9rem", borderRadius: 2 }}
+          >
+            {busy ? "Generating…" : "Generate"}
+          </Button>
+          <Button
+            fullWidth
+            variant={paymentsOpen ? "contained" : "outlined"}
+            color="primary"
+            onClick={() => { setPaymentsOpen((o) => !o); setImportOpen(false); }}
+            sx={{ py: 1.3, fontSize: "0.9rem", borderRadius: 2 }}
+          >
+            Payments{activeCount > 0 ? ` (${activeCount})` : ""}
+          </Button>
+          <Button
+            fullWidth
+            variant={importOpen ? "contained" : "outlined"}
+            color="primary"
+            onClick={() => { setImportOpen((o) => !o); setPaymentsOpen(false); setImportMsg(null); }}
+            sx={{ py: 1.3, fontSize: "0.9rem", borderRadius: 2 }}
+          >
+            Import
+          </Button>
+        </Stack>
+
+        <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, fontSize: "0.7rem", opacity: 0.7 }}>
+          A one-time address — share it to receive a private payment from any wallet.
         </Typography>
 
-        {/* Optional label */}
-        <Box>
-          <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
-            Label (optional)
-          </Typography>
-          <input
-            type="text"
-            value={memo}
-            onChange={(e) => setMemo(e.target.value)}
-            placeholder="_ e.g. rent from Bob"
-            style={inputStyle}
-            onFocus={(e) => (e.target.style.opacity = "1")}
-            onBlur={(e) => (e.target.style.opacity = "0.7")}
-          />
-        </Box>
-
-        <Button
-          variant="outlined"
-          color="primary"
-          onClick={handleCreate}
-          disabled={busy}
-          sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2 }}
-        >
-          {busy ? "Creating…" : "Create receive address"}
-        </Button>
-
-        {/* Detail card — freshly created OR re-checked from the list */}
+        {/* Detail — QR + address (freshly created OR opened from the list) */}
         {detail && (
-          <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: "2px", p: 1.5, textAlign: "left" }}>
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.75 }}>
-              <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
-                Share this address
-              </Typography>
-              <Button size="small" variant="text" onClick={() => setDetail(null)} sx={{ minWidth: 0, px: 1, fontSize: "0.68rem" }}>
-                close
-              </Button>
-            </Box>
-            <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.8rem", wordBreak: "break-all", mb: 1 }}>
-              {detail.address}
+          <Stack spacing={2} alignItems="center" sx={{ mt: 0.5 }}>
+            <QrCode value={detail.address} size={232} />
+            <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, maxWidth: 300 }}>
+              Scan to send {symbol}, or copy the address below.
             </Typography>
-            <Stack direction="row" spacing={1}>
-              <Button size="small" variant="text" onClick={() => copy("addr", detail.address)} sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}>
-                {copied === "addr" ? "copied" : "copy address"}
-              </Button>
-              {detail.ticket && (
-                <Button size="small" variant="text" onClick={() => setShowTicket((s) => !s)} sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}>
-                  {showTicket ? "hide backup" : "backup ticket"}
+
+            {/* Address card — whole row copies */}
+            <Box
+              onClick={() => copy("addr", detail.address)}
+              title="Tap to copy this address"
+              sx={{
+                width: "100%",
+                border: "1px solid",
+                borderColor: copied === "addr" ? "success.main" : "primary.main",
+                borderRadius: 2,
+                px: 1.75,
+                py: 1.5,
+                cursor: "pointer",
+                transition: "border-color 0.15s",
+                "&:hover": { borderColor: "primary.main" },
+              }}
+            >
+              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 0.75 }}>
+                <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                  Share this address
+                </Typography>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: copied === "addr" ? "success.main" : "primary.main" }}>
+                  {copied === "addr" ? <CheckIcon sx={{ fontSize: "0.95rem" }} /> : <ContentCopyIcon sx={{ fontSize: "0.95rem" }} />}
+                  <Typography sx={{ fontSize: "0.68rem", letterSpacing: "0.04em" }}>
+                    {copied === "addr" ? "copied" : "copy"}
+                  </Typography>
+                </Box>
+              </Box>
+              <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.82rem", wordBreak: "break-all", lineHeight: 1.5 }}>
+                {detail.address}
+              </Typography>
+            </Box>
+
+            {/* Label — decoupled from creation: set / rename / clear anytime */}
+            <Box sx={{ width: "100%", textAlign: "center" }}>
+              {editingLabel ? (
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ width: "100%" }}>
+                  <input
+                    type="text"
+                    value={labelDraft}
+                    onChange={(e) => setLabelDraft(e.target.value)}
+                    placeholder="_ label (optional) — e.g. rent from Bob"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveLabel();
+                      if (e.key === "Escape") setEditingLabel(false);
+                    }}
+                    style={{ ...inputStyle, fontSize: "0.78rem", padding: "8px 12px" }}
+                    onFocus={(e) => (e.target.style.opacity = "1")}
+                  />
+                  <Button size="small" variant="text" onClick={saveLabel} sx={{ minWidth: 0, fontSize: "0.7rem" }}>
+                    save
+                  </Button>
+                </Stack>
+              ) : detailMemo ? (
+                <Stack direction="row" spacing={1} alignItems="center" justifyContent="center">
+                  <Typography sx={{ fontSize: "0.8rem" }}>{detailMemo}</Typography>
+                  <Button size="small" variant="text" color="secondary" onClick={startEditLabel} sx={{ minWidth: 0, fontSize: "0.66rem" }}>
+                    rename
+                  </Button>
+                </Stack>
+              ) : (
+                <Button size="small" variant="text" color="secondary" onClick={startEditLabel} sx={{ minWidth: 0, fontSize: "0.7rem" }}>
+                  + add label
                 </Button>
               )}
+            </Box>
+
+            {/* Backup ticket (off-chain Courier) — copy only, never in the QR.
+                Toggle sits beside "close preview"; the ticket itself expands below. */}
+            <Stack direction="row" spacing={2} justifyContent="center" sx={{ width: "100%" }}>
+              {detail.ticket && (
+                <Button size="small" variant="text" onClick={() => setShowTicket((s) => !s)} sx={{ minWidth: 0, fontSize: "0.7rem" }}>
+                  {showTicket ? "hide backup ticket" : "backup ticket"}
+                </Button>
+              )}
+              <Button size="small" variant="text" color="secondary" onClick={() => setDetail(null)} sx={{ minWidth: 0, fontSize: "0.7rem" }}>
+                close preview
+              </Button>
             </Stack>
+
             {detail.ticket && (
-              <Collapse in={showTicket}>
-                <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.7, mt: 1, lineHeight: 1.5 }}>
-                  Keep this ticket if you might use another device — it&apos;s the only way to recover
-                  this payment off this one. Anyone who sees it learns the address but <b>cannot spend</b>.
+              <Collapse in={showTicket} sx={{ width: "100%" }}>
+                <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.7, lineHeight: 1.5 }}>
+                  Keep this if you might use another device — it&apos;s the only way to recover this
+                  payment off this one. Anyone who sees it learns the address but <b>cannot spend</b>.
                 </Typography>
                 <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.6rem", wordBreak: "break-all", mt: 0.75, opacity: 0.75 }}>
                   {detail.ticket}
                 </Typography>
-                <Button size="small" variant="text" onClick={() => copy("ticket", detail.ticket!)} sx={{ minWidth: 0, px: 1, fontSize: "0.7rem", mt: 0.5 }}>
+                <Button size="small" variant="text" onClick={() => copy("ticket", detail.ticket!)} sx={{ minWidth: 0, px: 0, fontSize: "0.7rem", mt: 0.5 }}>
                   {copied === "ticket" ? "copied" : "copy ticket"}
                 </Button>
               </Collapse>
             )}
-          </Box>
+          </Stack>
         )}
 
-        {/* Previously created receive addresses */}
-        {visible.length > 0 && (
-          <Box sx={{ mt: 1 }}>
-            <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase", mb: 0.75 }}>
-              Your receive addresses
-            </Typography>
-            <Stack spacing={0.75} sx={{ maxHeight: 240, overflowY: "auto", pr: 0.5 }}>
+        {/* Payments list */}
+        <Collapse in={paymentsOpen}>
+          {visible.length > 0 ? (
+            <Stack spacing={0.75} sx={{ maxHeight: 280, overflowY: "auto", pr: 0.5 }}>
               {visible.map((u) => (
                 <Box
                   key={u.stealthAddress}
@@ -273,55 +375,44 @@ export const ReceivePrivate: React.FC<ReceivePrivateProps> = ({ username, onBack
                 </Box>
               ))}
             </Stack>
-          </Box>
-        )}
-
-        {hiddenCount > 0 && (
-          <Button variant="text" color="secondary" onClick={() => setShowHidden((s) => !s)} sx={{ fontSize: "0.7rem", py: 0.5 }}>
-            {showHidden ? "Show less" : `Show more (${hiddenCount})`}
-          </Button>
-        )}
-
-        {/* Secondary action: import a payment from a ticket (backup, another device, third party) */}
-        <Box sx={{ borderTop: "1px solid", borderColor: "divider", pt: 1.5, mt: 1 }}>
-          <Button
-            variant="text"
-            color="secondary"
-            onClick={() => { setImportOpen((o) => !o); setImportMsg(null); }}
-            sx={{ fontSize: "0.72rem", px: 0 }}
-          >
-            {importOpen ? "Cancel import" : "Import a payment (paste a ticket)"}
-          </Button>
-          <Collapse in={importOpen}>
-            <textarea
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-              placeholder="paste a ticket (0x…)"
-              style={{ ...inputStyle, minHeight: 70, resize: "vertical", fontSize: "0.7rem" }}
-              onFocus={(e) => (e.target.style.opacity = "1")}
-              onBlur={(e) => (e.target.style.opacity = "0.7")}
-            />
-            <Button
-              variant="outlined"
-              color="primary"
-              onClick={handleImport}
-              disabled={importBusy || !importText.trim()}
-              sx={{ mt: 1, py: 1, fontSize: "0.85rem", borderRadius: 2 }}
-              fullWidth
-            >
-              {importBusy ? "Importing…" : "Import"}
+          ) : (
+            <Typography variant="body2" sx={{ textAlign: "center", opacity: 0.6, fontSize: "0.72rem", py: 1.5 }}>
+              No receive addresses yet.
+            </Typography>
+          )}
+          {hiddenCount > 0 && (
+            <Button variant="text" color="secondary" onClick={() => setShowHidden((s) => !s)} sx={{ fontSize: "0.7rem", py: 0.5 }}>
+              {showHidden ? "Show less" : `Show more (${hiddenCount})`}
             </Button>
-            {importMsg && (
-              <Typography variant="body2" sx={{ fontSize: "0.66rem", opacity: 0.8, mt: 1, textAlign: "center" }}>
-                {importMsg}
-              </Typography>
-            )}
-          </Collapse>
-        </Box>
+          )}
+        </Collapse>
 
-        <Button variant="text" color="secondary" onClick={() => onBack()} sx={{ py: 1, fontSize: "0.9rem" }}>
-          Back
-        </Button>
+        {/* Import a payment from a ticket (backup, another device, third party) */}
+        <Collapse in={importOpen}>
+          <textarea
+            value={importText}
+            onChange={(e) => setImportText(e.target.value)}
+            placeholder="paste a ticket (0x…)"
+            style={{ ...inputStyle, minHeight: 70, resize: "vertical", fontSize: "0.7rem" }}
+            onFocus={(e) => (e.target.style.opacity = "1")}
+            onBlur={(e) => (e.target.style.opacity = "0.7")}
+          />
+          <Button
+            variant="outlined"
+            color="primary"
+            onClick={handleImport}
+            disabled={importBusy || !importText.trim()}
+            sx={{ mt: 1, py: 1, fontSize: "0.85rem", borderRadius: 2 }}
+            fullWidth
+          >
+            {importBusy ? "Importing…" : "Import"}
+          </Button>
+          {importMsg && (
+            <Typography variant="body2" sx={{ fontSize: "0.66rem", opacity: 0.8, mt: 1, textAlign: "center" }}>
+              {importMsg}
+            </Typography>
+          )}
+        </Collapse>
       </Stack>
     </Box>
   );

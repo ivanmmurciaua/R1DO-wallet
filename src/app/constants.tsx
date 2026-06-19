@@ -1,22 +1,23 @@
 import { Address, http, fallback } from "viem";
+import { activeNetwork, activeRpcUrls } from "@/lib/networks";
 
 // localStorage globals — namespaced under r1do/wallet/v1 (see lib/localstorage.tsx).
 export const LOCAL_WALLET_LIST = "r1do/wallet/v1/wallets";
 export const LOCAL_LAST_USER = "r1do/wallet/v1/lastUser";
-// Primary RPC (default). PublicNode handles Railgun's big batched scans well.
-export const RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
+// Chain config is derived from the active network (see lib/networks.ts) — the
+// single source of truth. These re-exports keep the existing wide imports
+// working unchanged while the actual values live in one extensible registry.
 // Failover order: PublicNode first (default), then community fallbacks. Used by
 // every read client and passed to Railgun's loadProvider so a single RPC blip
 // doesn't stall balances/scans (matters once many testers hit it at once).
-export const RPC_URLS = [
-  RPC_URL,
-  "https://eth-sepolia-testnet.api.pocket.network",
-  "https://0xrpc.io/sep",
-  "https://rpc.sepolia.ethpandaops.io",
-];
+export const RPC_URLS = activeRpcUrls();
+// Primary RPC (default). PublicNode handles Railgun's big batched scans well.
+export const RPC_URL = RPC_URLS[0];
 // Shared viem transport with automatic failover (tries RPC_URLS in order).
+// Name kept for back-compat; it follows the active chain, not Sepolia per se.
 export const sepoliaTransport = () => fallback(RPC_URLS.map((u) => http(u)));
-export const CHAIN_NAME = "sepolia";
+// Bundler/paymaster URL-path slug for the active chain (Pimlico).
+export const CHAIN_NAME = activeNetwork().bundlerSlug;
 export const BUNDLER_URL = `https://api.pimlico.io/v2/${CHAIN_NAME}/rpc?apikey=${process.env.NEXT_PUBLIC_PIMLICO_API_KEY}`;
 export const PAYMASTER_URL = `https://api.pimlico.io/v2/${CHAIN_NAME}/rpc?apikey=${process.env.NEXT_PUBLIC_PIMLICO_API_KEY}`;
 // v2: encrypted username directory (R1DODirectory.sol). Optional — login

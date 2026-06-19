@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { CircularProgress } from "@mui/material";
 import { createPasskey, loadFromDevice } from "@/lib/passkeys";
 import LoginWithPasskey from "@/components/LoginWithPasskey";
 import styles from "./page.module.css";
@@ -36,7 +37,9 @@ import {
   getMetaAddress,
   getDirectoryMark,
   setDirectoryMark,
+  hydrateStealthStore,
 } from "@/lib/localstorage";
+import { beginScan, endScan } from "@/lib/scanState";
 import { LOCAL_LAST_USER, DIRECTORY_ADDRESS } from "@/app/constants";
 import Popup from "@/components/Popup";
 import { useThemeMode } from "@/components/ThemeRegistry";
@@ -52,6 +55,10 @@ export default function Home() {
   const [popupMessage, setPopupMessage] = useState("");
   const [isRestoring, setIsRestoring] = useState(false);
   // const [recovery, setRecovery] = useState(false);
+
+  // Stealth UTXO store hydrated (idb → in-memory cache) for the logged-in user.
+  // Gates the wallet render so every sync read of UTXOs is valid (see localstorage).
+  const [storeReady, setStoreReady] = useState(false);
 
   // PWA install prompt state
   const [showInstall, setShowInstall] = useState(false);
@@ -118,6 +125,19 @@ export default function Home() {
       localStorage.setItem(LOCAL_LAST_USER, username);
     }
   }, [deployed, address, username]);
+
+  // Hydrate the stealth UTXO store (idb → cache) before the wallet renders, so
+  // sync reads in the wallet subtree are valid. Re-runs per user (F5, switch).
+  useEffect(() => {
+    if (!(username && deployed)) {
+      setStoreReady(false);
+      return;
+    }
+    let active = true;
+    setStoreReady(false);
+    hydrateStealthStore(username).finally(() => { if (active) setStoreReady(true); });
+    return () => { active = false; };
+  }, [username, deployed]);
 
   // F5 with an active session: LOCAL_LAST_USER remembers who was logged in
   // and we re-enter through the normal login path. The address derives from
@@ -352,7 +372,9 @@ export default function Home() {
   }
 
   async function runStealthScan(username: string, prfOutput: Uint8Array) {
+    beginScan();
     try {
+      await hydrateStealthStore(username); // ensure the cache is loaded before read/merge
       console.log("[stealthScan] Deriving PQ keys from PRF...");
       const keys = await derivePQKeysFromPRF(prfOutput);
       // Keep the shareable meta-address cached (public data, deterministic)
@@ -364,9 +386,9 @@ export default function Home() {
       // If no previous scan, go back ~3 days
       const fromBlock = lastBlock ?? (await (async () => {
         const { createPublicClient, http, fallback } = await import("viem");
-        const { sepolia } = await import("viem/chains");
+        const { activeChain } = await import("@/lib/networks");
         const { RPC_URLS } = await import("@/app/constants");
-        const c = createPublicClient({ chain: sepolia, transport: fallback(RPC_URLS.map((u) => http(u))) });
+        const c = createPublicClient({ chain: activeChain(), transport: fallback(RPC_URLS.map((u) => http(u))) });
         const latest = await c.getBlockNumber();
         return latest > STEALTH_SCAN_DEFAULT_BLOCKS ? latest - STEALTH_SCAN_DEFAULT_BLOCKS : 0n;
       })());
@@ -390,6 +412,8 @@ export default function Home() {
       console.log(`[stealthScan] ✓ Total UTXOs cached: ${merged.length}`);
     } catch (e) {
       console.warn("[stealthScan] Scan failed (non-fatal):", e);
+    } finally {
+      endScan();
     }
   }
 
@@ -416,8 +440,10 @@ export default function Home() {
     closePopup();
   }
 
+  const inWallet = !!(userWallet && username && address && deployed);
+
   return (
-    <div className={styles.page}>
+    <div className={`${styles.page}${inWallet ? ` ${styles.inWallet}` : ""}`}>
       {/* Threshold: cross into the private world (shadow) or back to the
           public one (light). Only visible inside the wallet — the private
           world belongs to your account. (This step only changes the look;
@@ -524,7 +550,9 @@ export default function Home() {
         )}
 
         {!showPopup && userWallet && username && address && deployed ? (
-          isPrivate ? (
+          !storeReady ? (
+            <CircularProgress size={50} sx={{ mt: 3 }} />
+          ) : isPrivate ? (
             <PrivateView username={username} wallet={userWallet} />
           ) : (
             <AccountDetails

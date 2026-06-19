@@ -13,16 +13,23 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
 import AddIcon from "@mui/icons-material/Add";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import CheckIcon from "@mui/icons-material/Check";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { SendEth } from "./SendEth";
 import { SpendStealthUTXO } from "./SpendStealthUTXO";
 import { ReceivePrivate } from "./ReceivePrivate";
+import { QrCode } from "./QrCode";
+import { GlitchText } from "./GlitchText";
 import Popup from "./Popup";
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { formatUnits, createPublicClient } from "viem";
 import { sepoliaTransport } from "@/app/constants";
-import { sepolia } from "viem/chains";
+import { activeChain, activeChainId, networkName, explorerTxUrl } from "@/lib/networks";
+import { getStealthBalances } from "@/lib/balances";
 import { getLastBlock } from "@/lib/client";
-import { getDecimals, getSymbol, getStealthUTXOs, getWalletMeta, saveStealthScan, getLastScannedBlock, patchStealthUTXO, getMetaAddress } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getStealthUTXOs, getWalletMeta, saveStealthScan, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
@@ -66,6 +73,11 @@ type EtherscanResponse = {
   result: EtherscanTransaction[];
 };
 
+// Compact amount formatter: 2 decimals max, K/M/B for large values
+// (11105.76 → "11.11K", 12.34 → "12.34", 1.23e6 → "1.23M").
+const compactFmt = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+const fmtAmount = (n: number) => compactFmt.format(n);
+
 export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, address }) => {
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
@@ -77,6 +89,15 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, a
   const [selectedUtxo, setSelectedUtxo] = useState<StealthUTXO | null>(null);
   const [selectedBalance, setSelectedBalance] = useState<number>(0);
   const [selectedWei, setSelectedWei] = useState<bigint>(0n);
+  const [hideBalance, setHide] = useState<boolean>(() => getHideBalance());
+
+  const toggleHideBalance = () => {
+    setHide((h) => {
+      const next = !h;
+      setHideBalance(next);
+      return next;
+    });
+  };
 
   const handleShowPopup = (message: string) => {
     setShowPopup(true);
@@ -95,22 +116,6 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, a
 
   const handleReceive = () => {
     setCurrentView(privacy ? "receivePrivate" : "receivePublic");
-  };
-
-  // Card tap: copy the shareable identifier — meta-address in privacy mode
-  // (off-chain pay-by-stealth), Safe address in public mode.
-  const handleCopyIdentity = async () => {
-    const value = privacy ? getMetaAddress(username) : address;
-    if (!value) {
-      handleShowPopup(privacy ? "Meta-address not available — log in again." : "Address not available.");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(value);
-      handleShowPopup(privacy ? "Meta-address copied — share it to receive privately" : "Address copied");
-    } catch {
-      handleShowPopup("Couldn't copy.");
-    }
   };
 
 const handleBackToMenu = (message: string = "") => {
@@ -148,7 +153,7 @@ const handleBackToMenu = (message: string = "") => {
       const block = await getLastBlock();
 
       const response = await fetch(
-        `https://api.etherscan.io/v2/api?chainid=11155111&module=account&action=txlistinternal&address=${address}&startblock=0&endblock=${block}&page=1&offset=10&sort=desc&apikey=${apiKey}`,
+        `https://api.etherscan.io/v2/api?chainid=${activeChainId()}&module=account&action=txlistinternal&address=${address}&startblock=0&endblock=${block}&page=1&offset=10&sort=desc&apikey=${apiKey}`,
       );
 
       const data: EtherscanResponse = await response.json();
@@ -193,16 +198,15 @@ const handleBackToMenu = (message: string = "") => {
     const utxos = getStealthUTXOs(username);
     if (utxos.length === 0) return;
     const decimals = getDecimals();
-    const pub = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
-    const rows = await Promise.all(
-      utxos.map(async (utxo) => {
-        const raw = await pub.getBalance({ address: utxo.stealthAddress });
-        // Displayed amount is rounded; sub-dust (e.g. 1 wei) rounds to 0 and is
-        // treated as "no funds" — both for the list and the received stamp.
-        const amount = parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4));
-        return { utxo, raw, amount };
-      }),
-    );
+    const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+    const balances = await getStealthBalances(pub, utxos.map((u) => u.stealthAddress));
+    const rows = utxos.map((utxo, i) => {
+      const raw = balances[i];
+      // Displayed amount is rounded; sub-dust (e.g. 1 wei) rounds to 0 and is
+      // treated as "no funds" — both for the list and the received stamp.
+      const amount = parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4));
+      return { utxo, raw, amount };
+    });
 
     // Stamp first-funding once (sequential → no read-modify-write race). This is
     // the persistent "received" signal the ReceivePrivate list reads, so status
@@ -242,7 +246,7 @@ const handleBackToMenu = (message: string = "") => {
       }
       const keys = await derivePQKeysFromPRF(prf);
       const lastBlock = getLastScannedBlock(username);
-      const pub = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
+      const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
       const fromBlock = lastBlock ?? (await pub.getBlockNumber() - 21600n);
       const { utxos: newUtxos, latestBlock } = await scanStealthPayments(
         keys.spendingPrivateKey,
@@ -296,35 +300,68 @@ const handleBackToMenu = (message: string = "") => {
   }
 
   if (currentView === "receivePublic") {
+    const copyAddress = () => {
+      navigator.clipboard?.writeText(address ?? "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    };
     return (
-      <Box>
-        <Stack spacing={1.7} direction="column" sx={{ width: "100%", maxWidth: 400, mx: "auto" }}>
-          <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6 }}>
-            Share this address to receive {symbol} from any wallet.
+      <Box sx={{ pb: 4 }}>
+        {/* Header */}
+        <Box sx={{ display: "flex", alignItems: "center", maxWidth: 400, mx: "auto", mb: 1 }}>
+          <IconButton onClick={() => setCurrentView("menu")} size="small" aria-label="Back">
+            <ArrowBackIcon fontSize="small" />
+          </IconButton>
+          <Typography sx={{ flex: 1, textAlign: "center", fontWeight: 600, letterSpacing: "0.02em", mr: 4 }}>
+            Receive
           </Typography>
-          <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 1.5, textAlign: "left" }}>
-            <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase", mb: 0.75 }}>
-              Your address
-            </Typography>
-            <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.8rem", wordBreak: "break-all", mb: 1 }}>
+        </Box>
+
+        <Stack spacing={2.5} direction="column" alignItems="center" sx={{ width: "100%", maxWidth: 400, mx: "auto" }}>
+          {/* QR */}
+          <Box sx={{ display: "flex", justifyContent: "center", mt: 1 }}>
+            <QrCode value={address ?? ""} size={232} />
+          </Box>
+
+          <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, maxWidth: 300 }}>
+            Scan to send {symbol}, or copy your address below.
+          </Typography>
+
+          {/* Address card — whole row copies */}
+          <Box
+            onClick={copyAddress}
+            title="Tap to copy your address"
+            sx={{
+              width: "100%",
+              border: "1px solid",
+              borderColor: copied ? "success.main" : "divider",
+              borderRadius: 2,
+              px: 1.75,
+              py: 1.5,
+              cursor: "pointer",
+              transition: "border-color 0.15s",
+              "&:hover": { borderColor: "primary.main" },
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 0.75 }}>
+              <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                Your address
+              </Typography>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, color: copied ? "success.main" : "primary.main" }}>
+                {copied ? <CheckIcon sx={{ fontSize: "0.95rem" }} /> : <ContentCopyIcon sx={{ fontSize: "0.95rem" }} />}
+                <Typography sx={{ fontSize: "0.68rem", letterSpacing: "0.04em" }}>
+                  {copied ? "copied" : "copy"}
+                </Typography>
+              </Box>
+            </Box>
+            <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.82rem", wordBreak: "break-all", lineHeight: 1.5 }}>
               {address}
             </Typography>
-            <Button
-              size="small"
-              variant="text"
-              onClick={() => {
-                navigator.clipboard?.writeText(address ?? "");
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
-              }}
-              sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
-            >
-              {copied ? "copied" : "copy address"}
-            </Button>
           </Box>
-          <Button variant="text" color="secondary" onClick={() => setCurrentView("menu")} sx={{ py: 1, fontSize: "0.9rem" }}>
-            Back
-          </Button>
+
+          <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.62rem", opacity: 0.5, letterSpacing: "0.06em", textAlign: "center" }}>
+            {networkName()}
+          </Typography>
         </Stack>
       </Box>
     );
@@ -337,21 +374,28 @@ const handleBackToMenu = (message: string = "") => {
         direction="column"
         sx={{ width: "100%", maxWidth: 400, mx: "auto" }}
       >
-        {/* Wallet-home balance card — tap to copy your address / meta-address */}
+        {/* Wallet-home balance card */}
         <Box
-          onClick={handleCopyIdentity}
-          title={privacy ? "Tap to copy your meta-address" : "Tap to copy your address"}
           sx={{
             border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 2, textAlign: "left",
-            cursor: "pointer", transition: "border-color 0.15s",
-            "&:hover": { borderColor: "primary.main" },
           }}
         >
-          <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase", mb: 0.5 }}>
-            Your balance
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 0.5 }}>
+            <Typography sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              Your balance
+            </Typography>
+            <IconButton
+              onClick={toggleHideBalance}
+              size="small"
+              aria-label={hideBalance ? "Show balance" : "Hide balance"}
+              title={hideBalance ? "Show balance" : "Hide balance"}
+              sx={{ p: 0.25 }}
+            >
+              {hideBalance ? <VisibilityOffIcon sx={{ fontSize: "1rem" }} /> : <VisibilityIcon sx={{ fontSize: "1rem" }} />}
+            </IconButton>
+          </Box>
           <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "2rem", lineHeight: 1.1, fontWeight: 500, wordBreak: "break-all" }}>
-            {shownBalance.toFixed(4)} {symbol}
+            {hideBalance ? <GlitchText length={7} /> : fmtAmount(shownBalance)} {symbol}
           </Typography>
           <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.7rem", opacity: 0.6, mt: 0.75, letterSpacing: "0.04em" }}>
             {username} · {privacy ? "private" : "public"} · light
@@ -402,7 +446,7 @@ const handleBackToMenu = (message: string = "") => {
                 <Box
                   key={transaction.id}
                   component={transaction.type !== "private" ? "a" : "div"}
-                  href={transaction.type !== "private" ? `https://sepolia.etherscan.io/tx/${transaction.id}` : undefined}
+                  href={transaction.type !== "private" ? (explorerTxUrl(transaction.id) ?? undefined) : undefined}
                   target={transaction.type !== "private" ? "_blank" : undefined}
                   rel={transaction.type !== "private" ? "noopener noreferrer" : undefined}
                   onClick={transaction.type === "private" ? () => handleOpenSpend(transaction) : undefined}
@@ -431,7 +475,7 @@ const handleBackToMenu = (message: string = "") => {
                       </Typography>
                     )}
                     <Typography variant="body2" sx={{ fontFamily: "inherit", letterSpacing: "0.04em", fontWeight: 500, ml: "auto" }}>
-                      {transaction.amount} {symbol}
+                      {hideBalance ? <GlitchText length={4} /> : fmtAmount(transaction.amount)} {symbol}
                     </Typography>
                   </Box>
                 </Box>

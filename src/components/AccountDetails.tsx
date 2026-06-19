@@ -2,11 +2,13 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { useEffect, useState } from "react";
 import { CircularProgress } from "@mui/material";
 import { formatUnits, createPublicClient } from "viem";
-import { sepolia } from "viem/chains";
+import { activeChain } from "@/lib/networks";
+import { getStealthBalances } from "@/lib/balances";
 import { sepoliaTransport } from "@/app/constants";
 import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
 import { getDecimals, getSymbol, getWalletMeta, getStealthUTXOs } from "@/lib/localstorage";
+import { useScanning } from "@/lib/scanState";
 
 type props = {
   username: string;
@@ -21,8 +23,9 @@ export default function AccountDetails({ username, wallet, address }: props) {
   const [userBalance, setBalance] = useState<number>(0.0);
   const [stealthTotal, setStealthTotal] = useState<number>(0.0);
   const privacy = getWalletMeta(username)?.privacy ?? false;
+  const scanning = useScanning();
 
-  const publicClient = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
 
   useEffect(() => {
     if (!wallet) return;
@@ -67,12 +70,8 @@ export default function AccountDetails({ username, wallet, address }: props) {
       const utxos = getStealthUTXOs(username);
       if (utxos.length === 0) return;
 
-      const balances = await Promise.all(
-        utxos.map(async (utxo) => {
-          const raw = await publicClient.getBalance({ address: utxo.stealthAddress });
-          return parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4));
-        }),
-      );
+      const raws = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+      const balances = raws.map((raw) => parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4)));
 
       if (!mounted) return;
       setStealthTotal(balances.reduce((sum, b) => sum + b, 0));
@@ -86,7 +85,23 @@ export default function AccountDetails({ username, wallet, address }: props) {
 
   return isLoaded && decimals > 0 ? (
     <div>
-      {/*<h2>👋 Welcome back {username}!</h2>*/}
+      {scanning && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            fontFamily: "var(--font-geist-mono), monospace",
+            fontSize: "0.72rem",
+            opacity: 0.7,
+            marginBottom: 16,
+          }}
+        >
+          <CircularProgress size={12} />
+          <span>Scanning the chain for your private payments…</span>
+        </div>
+      )}
       <div style={{ textAlign: "center" }}>
         <div>
           {userBalance + stealthTotal > 0.0 ? (

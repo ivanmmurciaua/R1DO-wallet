@@ -12,7 +12,8 @@ import {
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { encodeFunctionData, createPublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { sepolia } from "viem/chains";
+import { activeChain } from "@/lib/networks";
+import { getStealthBalances } from "@/lib/balances";
 import { log } from "./common";
 import { getStealthUTXOs } from "./localstorage";
 import { getWalletCredential } from "./credstore";
@@ -323,13 +324,9 @@ export const getStealthCoins = async (
 ): Promise<{ utxo: StealthUTXO; balance: bigint }[]> => {
   const utxos = getStealthUTXOs(username);
   if (utxos.length === 0) return [];
-  const publicClient = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
-  const coins = await Promise.all(
-    utxos.map(async (utxo) => ({
-      utxo,
-      balance: await publicClient.getBalance({ address: utxo.stealthAddress }),
-    })),
-  );
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+  const coins = utxos.map((utxo, i) => ({ utxo, balance: balances[i] }));
   return coins.filter((c) => c.balance > 0n).sort((a, b) => (a.balance < b.balance ? 1 : -1));
 };
 
@@ -338,10 +335,8 @@ export const getStealthCoins = async (
 export const getStealthTotal = async (username: string): Promise<bigint> => {
   const utxos = getStealthUTXOs(username);
   if (utxos.length === 0) return 0n;
-  const publicClient = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
-  const balances = await Promise.all(
-    utxos.map((u) => publicClient.getBalance({ address: u.stealthAddress })),
-  );
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
   return balances.reduce((s, b) => s + b, 0n);
 };
 
@@ -413,12 +408,10 @@ export const smartShield = async (
   const keys = await derivePQKeysFromPRF(prf);
 
   const utxos = getStealthUTXOs(username);
-  const publicClient = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
-  const candidates = (
-    await Promise.all(
-      utxos.map(async (utxo) => ({ utxo, balance: await publicClient.getBalance({ address: utxo.stealthAddress }) })),
-    )
-  )
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const shieldBalances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+  const candidates = utxos
+    .map((utxo, i) => ({ utxo, balance: shieldBalances[i] }))
     .filter((c) => c.balance > 0n)
     .sort((a, b) => (a.balance < b.balance ? 1 : -1));
 
@@ -476,7 +469,7 @@ export const shieldCoins = async (
     return { success: false, shieldedAmount: 0n, txHashes: [], error: "Could not access your passkey. Try again." };
   }
   const keys = await derivePQKeysFromPRF(prf);
-  const publicClient = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
 
   console.log(`[shieldCoins] shielding ${selected.length} selected coin(s) → pool`);
   const txHashes: string[] = [];
@@ -559,12 +552,10 @@ export const smartSend = async (
   const keys = await derivePQKeysFromPRF(prf);
 
   const utxos = getStealthUTXOs(username);
-  const publicClient = createPublicClient({ chain: sepolia, transport: sepoliaTransport() });
-  const candidates = (
-    await Promise.all(
-      utxos.map(async (utxo) => ({ utxo, balance: await publicClient.getBalance({ address: utxo.stealthAddress }) })),
-    )
-  )
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const sendBalances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+  const candidates = utxos
+    .map((utxo, i) => ({ utxo, balance: sendBalances[i] }))
     .filter((c) => c.balance > 0n)
     .sort((a, b) => (a.balance < b.balance ? 1 : -1));
 

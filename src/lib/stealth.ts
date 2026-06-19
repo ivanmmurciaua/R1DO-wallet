@@ -321,10 +321,15 @@ export async function scanStealthPayments(
   fromBlock:          bigint,
 ): Promise<{ utxos: StealthUTXO[]; latestBlock: bigint }> {
   const { createPublicClient, http, fallback, parseAbiItem } = await import("viem");
-  const { sepolia } = await import("viem/chains");
+  const { activeChain } = await import("@/lib/networks");
   const { RPC_URLS } = await import("@/app/constants");
 
-  const publicClient = createPublicClient({ chain: sepolia, transport: fallback(RPC_URLS.map((u) => http(u))) });
+  // JSON-RPC batching: the getTransaction fan-out (Promise.all below) fires many
+  // node calls in one tick — coalesce them into a single POST per 17 instead of
+  // N round-trips. Conservative batchSize so picky public RPCs accept it; if one
+  // rejects a batch, the fallback transport rotates to the next.
+  const batchHttp = (u: string) => http(u, { batch: { batchSize: 17, wait: 16 } });
+  const publicClient = createPublicClient({ chain: activeChain(), transport: fallback(RPC_URLS.map(batchHttp)) });
   const latestBlock = await publicClient.getBlockNumber();
 
   const totalBlocks = latestBlock - fromBlock;

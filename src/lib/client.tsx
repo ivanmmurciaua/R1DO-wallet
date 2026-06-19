@@ -10,10 +10,10 @@ import {
 } from "@/app/constants";
 import { PaymasterOptions, Safe4337Pack } from "@safe-global/relay-kit";
 import { createPublicClient } from "viem";
-import { sepolia } from "viem/chains";
+import { activeChain } from "@/lib/networks";
 
 export const client = createPublicClient({
-  chain: sepolia,
+  chain: activeChain(),
   transport: sepoliaTransport(),
 });
 
