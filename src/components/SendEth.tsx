@@ -1,15 +1,18 @@
-import React, { useState, useEffect } from "react";
-import { Box, Button, Slider, Stack, Typography } from "@mui/material";
+import React, { useState, useEffect, useMemo } from "react";
+import { Box, Button, MenuItem, Select, Slider, Stack, Typography } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import ArrowBackIcon from "@mui/icons-material/ArrowBackIosNew";
 import { QrScanner } from "./QrScanner";
 import { Safe4337Pack } from "@safe-global/relay-kit";
-import { smartSend, getStealthTotal } from "@/lib/deploy";
+import { smartSend, smartSendToken, getStealthTotal } from "@/lib/deploy";
 import { readDirectory } from "@/lib/registry-v2";
-import { getDecimals, getSymbol } from "@/lib/localstorage";
-import { parseUnits, formatUnits, zeroAddress } from "viem";
-import { networkName } from "@/lib/networks";
+import { getTokenBalances } from "@/lib/balances";
+import { getStealthUTXOs } from "@/lib/localstorage";
+import { nativeAsset, activeTokens, type Asset } from "@/lib/assets";
+import { parseUnits, formatUnits, zeroAddress, createPublicClient } from "viem";
+import { activeChain, networkName } from "@/lib/networks";
+import { sepoliaTransport } from "@/app/constants";
 import { isPQMetaAddress } from "@/lib/stealth";
 
 type SendEthProps = {
@@ -51,28 +54,81 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
-  // Exact spendable in wei (main Safe + stealth UTXOs) — MAX/slider/validation
-  // use this, never the rounded `balance` prop (which can sit above the truth).
-  const [availableWei, setAvailableWei] = useState<bigint | null>(null);
 
-  const symbol = getSymbol();
-  const decimals = getDecimals();
+  // Selected asset (native ⧫ or a curated ERC20). Drives symbol/decimals and the
+  // send path. Default = native.
+  const [asset, setAsset] = useState<Asset>(() => nativeAsset());
+  // Exact spendable in raw units, keyed per asset. Native = main Safe + stealth
+  // UTXOs (those hold only native); ERC20 = main Safe only (stealth ERC20 is a
+  // later phase). Loaded once on open. Key: token address (lowercased) or "native".
+  const [assetBalances, setAssetBalances] = useState<Map<string, bigint>>(new Map());
+
+  const keyOf = (a: Asset) => a.address?.toLowerCase() ?? "native";
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
+        const client = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+        const safe = (await wallet.protocolKit.getAddress()) as `0x${string}`;
         const mainWei = BigInt((await wallet.protocolKit.getBalance()).toString());
         const stealthWei = await getStealthTotal(username);
-        if (alive) setAvailableWei(mainWei + stealthWei);
+
+        const map = new Map<string, bigint>();
+        map.set("native", mainWei + stealthWei);
+
+        // Per token, read over the main Safe + the stealth addresses TAGGED with
+        // that token (so private holdings are detected and shown), and sum. The
+        // tag narrows each read to the right addresses.
+        const stealthUtxos = getStealthUTXOs(username);
+        const tokens = activeTokens();
+        await Promise.all(
+          tokens.map(async (t) => {
+            const tokenAddr = t.address as `0x${string}`;
+            const addrs = [
+              safe,
+              ...stealthUtxos.filter((u) => u.asset?.toLowerCase() === tokenAddr.toLowerCase()).map((u) => u.stealthAddress),
+            ];
+            const bals = await getTokenBalances(client, tokenAddr, addrs);
+            map.set(tokenAddr.toLowerCase(), bals.reduce((s, b) => s + b, 0n));
+          }),
+        );
+        if (alive) setAssetBalances(map);
       } catch (e) {
-        console.warn("[SendEth] could not load exact balance:", e);
+        console.warn("[SendEth] could not load asset balances:", e);
       }
     })();
     return () => {
       alive = false;
     };
   }, [wallet, username]);
+
+  const symbol = asset.symbol;
+  const decimals = asset.decimals;
+  // Exact spendable of the selected asset (MAX/slider/validation use this, never
+  // a rounded display string). null until balances load.
+  const availableWei = assetBalances.has(keyOf(asset)) ? assetBalances.get(keyOf(asset))! : null;
+
+  // Assets the user can actually send: balance > 0. Native goes first. For a
+  // PRIVATE recipient only the native asset is offered (ERC20 to a stealth Safe
+  // is a later phase) — we never silently downgrade a private send to public.
+  const fundedAssets = useMemo(() => {
+    const all = [nativeAsset(), ...activeTokens()];
+    return all.filter((a) => (assetBalances.get(a.address?.toLowerCase() ?? "native") ?? 0n) > 0n);
+  }, [assetBalances]);
+  const selectable = fundedAssets;
+
+  // Keep the selected asset valid for the resolved recipient: if the current
+  // pick isn't selectable (e.g. recipient turned out private), snap to the first
+  // available and reset the amount (decimals/scale differ between assets).
+  useEffect(() => {
+    if (step !== 2 || selectable.length === 0) return;
+    if (!selectable.some((a) => keyOf(a) === keyOf(asset))) {
+      setAsset(selectable[0]);
+      setAmount("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, selectable]);
 
   const handleBackToMenu = (message: string = "") => {
     onBack(message);
@@ -166,6 +222,30 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
     }
     setIsLoading(true);
     try {
+      // ERC20 — one path for public and private: draws from the main Safe and,
+      // if short, drains stealth UTXOs tagged with this token (private derives a
+      // one-time stealth destination + blob). Mirrors the native smartSend.
+      if (asset.kind === "erc20") {
+        const result = await smartSendToken(
+          wallet,
+          asset.address as `0x${string}`,
+          (resolved.address ?? zeroAddress) as `0x${string}`,
+          amtWei,
+          username,
+          resolved.metaAddress,
+        );
+        const priv = resolved.isPrivate ? " privately" : "";
+        if (result.success) {
+          handleBackToMenu(`Sent ${amount} ${symbol}${priv} to ${resolved.display}`);
+        } else if (result.sentAmount > 0n) {
+          const sentFormatted = formatUnits(result.sentAmount, decimals);
+          handleBackToMenu(`Sent ${sentFormatted} of ${amount} ${symbol} to ${resolved.display} — try again to send the rest.`);
+        } else {
+          handleBackToMenu(result.error ?? `Failed to send ${amount} ${symbol} to ${resolved.display}. Try again later`);
+        }
+        return;
+      }
+
       const result = await smartSend(
         wallet,
         (resolved.address ?? zeroAddress) as `0x${string}`,
@@ -317,6 +397,48 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
               </Typography>
               <PrivacyChip isPrivate={resolved.isPrivate} />
             </Stack>
+
+            {/* Asset selector — only assets the user actually holds (>0). A single
+                holding renders as a fixed label (nothing to switch to). */}
+            <Box>
+              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+                <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                  Asset
+                </Typography>
+                {selectable.length > 1 ? (
+                  <Select
+                    value={keyOf(asset)}
+                    onChange={(e) => {
+                      const next = selectable.find((a) => keyOf(a) === e.target.value);
+                      if (next) {
+                        setAsset(next);
+                        setAmount("");
+                      }
+                    }}
+                    size="small"
+                    variant="standard"
+                    sx={{
+                      fontFamily: "var(--font-geist-mono), monospace",
+                      fontSize: "0.9rem",
+                      letterSpacing: "0.04em",
+                      minWidth: 120,
+                    }}
+                  >
+                    {selectable.map((a) => (
+                      <MenuItem key={keyOf(a)} value={keyOf(a)} sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.85rem" }}>
+                        {a.symbol}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                ) : (
+                  <Typography
+                    sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.9rem", letterSpacing: "0.04em" }}
+                  >
+                    {(selectable[0] ?? asset).symbol}
+                  </Typography>
+                )}
+              </Box>
+            </Box>
 
             <Box>
               <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>

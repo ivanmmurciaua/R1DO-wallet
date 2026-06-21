@@ -288,7 +288,10 @@ interface Prefs {
   hideBalance?: boolean; // mask the balance + amounts with "*" (sticky across F5)
 }
 
-export const DEFAULT_DECIMALS = 13;
+// Default to ETH's real 18 — now that the wallet handles actual ETH/ERC20s, the
+// native unit should match on-chain by default. The user can still re-theme
+// decimals/symbol in config.
+export const DEFAULT_DECIMALS = 18;
 export const DEFAULT_SYMBOL = "⧫";
 
 const readPrefs = (): Prefs => {

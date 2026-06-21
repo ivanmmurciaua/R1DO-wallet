@@ -13,7 +13,7 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { encodeFunctionData, createPublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { activeChain } from "@/lib/networks";
-import { getStealthBalances } from "@/lib/balances";
+import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { log } from "./common";
 import { getStealthUTXOs } from "./localstorage";
 import { getWalletCredential } from "./credstore";
@@ -119,6 +119,104 @@ export const sendTxViaSafe = async (
     throw e;
   }
   return "";
+};
+
+// Minimal ERC20 transfer — the only write a public token send needs.
+const ERC20_TRANSFER_ABI = [
+  {
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    name: "transfer",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+/**
+ * Public ERC20 send — the token sibling of makeTx. Tokens live in the main Safe
+ * (stealth UTXOs hold only native, so there's no chunking/stealth path here —
+ * that's the ERC20 stealth phase). One sponsored UserOp: `transfer(to, amount)`
+ * to the token contract, value 0. Returns the tx hash ("" on failure).
+ */
+export const sendToken = async (
+  wallet: Safe4337Pack,
+  tokenAddress: `0x${string}`,
+  to: `0x${string}`,
+  amount: bigint,
+): Promise<string> => {
+  const data = encodeFunctionData({
+    abi: ERC20_TRANSFER_ABI,
+    functionName: "transfer",
+    args: [to, amount],
+  });
+  return sendTxViaSafe(wallet, { to: tokenAddress, data, value: "0" });
+};
+
+/**
+ * Private ERC20 send — moves a token to a one-time stealth address AND carries
+ * the delivery blob, in ONE sponsored UserOp with two calls:
+ *   1. token.transfer(stealthAddress, amount) — funds land at the codeless Safe
+ *      (an ERC20 balance is just a mapping entry; the Safe needn't be deployed).
+ *   2. call(stealthAddress, value 0, data = blob) — the announce blob rides the
+ *      tx calldata exactly like native sendStealth (minus the value). Detection
+ *      is asset-agnostic: the scanner finds the UTXO from the blob regardless.
+ * No announcer. Returns the tx hash ("" on failure).
+ */
+export const sendStealthToken = async (
+  wallet: Safe4337Pack,
+  stealthAddress: `0x${string}`,
+  tokenAddress: `0x${string}`,
+  amount: bigint,
+  calldataBlob: `0x${string}`,
+): Promise<string> => {
+  try {
+    const transferData = encodeFunctionData({
+      abi: ERC20_TRANSFER_ABI,
+      functionName: "transfer",
+      args: [stealthAddress, amount],
+    });
+    console.log(`[sendStealthToken] token ${tokenAddress} → stealth ${stealthAddress} | amount: ${amount} | blob: ${(calldataBlob.length - 2) / 2} bytes`);
+
+    const safeOperation = await wallet.createTransaction({
+      transactions: [
+        { to: tokenAddress, data: transferData, value: "0" },
+        { to: stealthAddress, data: calldataBlob, value: "0" },
+      ],
+    });
+    const signedOp = await wallet.signSafeOperation(safeOperation);
+    if (signedOp) {
+      const userOpHash = await wallet.executeTransaction({ executable: signedOp });
+      console.log(`[sendStealthToken] UserOp submitted: ${userOpHash}`);
+      const receipt = await waitForUserOpReceipt(wallet, userOpHash);
+      if (!receipt.success) throw new Error("Stealth token send reverted");
+      const txHash = receipt.receipt.transactionHash;
+      console.log(`[sendStealthToken] ✓ confirmed — tx: ${txHash}`);
+      return txHash;
+    }
+  } catch (e: unknown) {
+    await log("sendStealthToken", e);
+    throw e;
+  }
+  return "";
+};
+
+/**
+ * Private ERC20 send by meta-address — derives the one-time stealth payment and
+ * delivers the token + blob in one UserOp (sendStealthToken). Token sibling of
+ * the metaAddress branch of smartSend; funds come from the main Safe (token
+ * stealth UTXOs aren't drained here — that's the spend phase).
+ */
+export const sendTokenPrivate = async (
+  wallet: Safe4337Pack,
+  tokenAddress: `0x${string}`,
+  metaAddress: `0x${string}`,
+  amount: bigint,
+): Promise<string> => {
+  const payment = await generateStealthPayment(metaAddress);
+  return sendStealthToken(wallet, payment.stealthAddress, tokenAddress, amount, payment.calldataBlob);
 };
 
 /**
@@ -286,6 +384,43 @@ export const spendStealthUTXO = async (
   const predictedAddress = await stealthPack.protocolKit.getAddress();
   if (predictedAddress.toLowerCase() !== utxo.stealthAddress.toLowerCase()) {
     throw new Error(`Predicted Safe address mismatch: ${predictedAddress} ≠ ${utxo.stealthAddress}`);
+  }
+
+  // Token UTXO — the stealth Safe EXECUTES token.transfer (no native value moves;
+  // the token address is the one tagged on the UTXO at discovery). Public spend =
+  // one call; private chained spend = transfer + blob call to the next stealth
+  // address, the same two-call shape as sendStealthToken (detection stays
+  // asset-agnostic, and the destination UTXO gets tagged by the receiver's probe).
+  if (utxo.asset) {
+    const transferData = encodeFunctionData({
+      abi: ERC20_TRANSFER_ABI,
+      functionName: "transfer",
+      args: [recipient, BigInt(amount)],
+    });
+    const transactions = calldataBlob
+      ? [
+          { to: utxo.asset, data: transferData, value: "0" },
+          { to: recipient, data: calldataBlob, value: "0" },
+        ]
+      : [{ to: utxo.asset, data: transferData, value: "0" }];
+    try {
+      console.log(`[spendStealthUTXO] token ${utxo.asset} spend → ${recipient}${calldataBlob ? " (chained private)" : ""}`);
+      const safeOperation = await stealthPack.createTransaction({ transactions });
+      const signedOp = await stealthPack.signSafeOperation(safeOperation);
+      if (signedOp) {
+        const userOpHash = await stealthPack.executeTransaction({ executable: signedOp });
+        console.log(`[spendStealthUTXO] token UserOp submitted: ${userOpHash}`);
+        const receipt = await waitForUserOpReceipt(stealthPack, userOpHash);
+        if (!receipt.success) throw new Error("Stealth token spend reverted");
+        const txHash = receipt.receipt.transactionHash;
+        console.log(`[spendStealthUTXO] ✓ token spend confirmed — tx: ${txHash}`);
+        return txHash;
+      }
+    } catch (e: unknown) {
+      await log("spendStealthUTXO", e);
+      throw e;
+    }
+    return "";
   }
 
   if (!calldataBlob) {
@@ -609,6 +744,120 @@ export const smartSend = async (
       sent += amount;
     } catch (e: unknown) {
       console.error("[smartSend] Chunk failed:", e);
+      return { success: false, sentAmount: sent, txHashes };
+    }
+  }
+
+  return { success: true, sentAmount: sent, txHashes };
+};
+
+// ERC20 sibling of smartSend: sends `totalAmount` of `token` to `recipientAddress`
+// (or, if `metaAddress` is set, to a fresh stealth address), drawing first from
+// the main Safe and then from stealth UTXOs tagged with THIS token (largest
+// first). Same plan/blob/single-passkey discipline as smartSend; only the
+// primitives differ — balanceOf reads, asset-filtered candidates, token sends.
+export const smartSendToken = async (
+  wallet: Safe4337Pack,
+  token: `0x${string}`,
+  recipientAddress: `0x${string}`,
+  totalAmount: bigint,
+  username: string,
+  metaAddress: `0x${string}` | null,
+): Promise<SmartSendResult> => {
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const safeAddress = (await wallet.protocolKit.getAddress()) as `0x${string}`;
+  const [mainBalance] = await getTokenBalances(publicClient, token, [safeAddress]);
+
+  // One destination for the whole logical send — generated once if private.
+  let destination = recipientAddress;
+  let blob: `0x${string}` | undefined;
+  if (metaAddress) {
+    const payment = await generateStealthPayment(metaAddress);
+    destination = payment.stealthAddress;
+    blob = payment.calldataBlob;
+  }
+
+  // Cheap path — the main Safe alone covers it (no passkey needed).
+  if (mainBalance >= totalAmount) {
+    const tx = blob
+      ? await sendStealthToken(wallet, destination, token, totalAmount, blob)
+      : await sendToken(wallet, token, destination, totalAmount);
+    return tx
+      ? { success: true, sentAmount: totalAmount, txHashes: [tx] }
+      : { success: false, sentAmount: 0n, txHashes: [], error: "Send failed." };
+  }
+
+  console.log(`[smartSendToken] Main ${token} balance (${mainBalance}) short of ${totalAmount} — drawing from stealth UTXOs`);
+
+  const cred = await getWalletCredential(username).catch(() => null);
+  if (!cred) {
+    return { success: false, sentAmount: 0n, txHashes: [], error: "Passkey not found on this device." };
+  }
+  const prf = await loadFromDevice(cred.rawId);
+  if (!prf || prf.length === 0) {
+    return { success: false, sentAmount: 0n, txHashes: [], error: "Could not access your passkey. Try again." };
+  }
+  const keys = await derivePQKeysFromPRF(prf);
+
+  // Only UTXOs holding THIS token are spendable for it — a USDT UTXO can't pay
+  // DAI. The tag narrows the read to the right addresses.
+  const tokenUtxos = getStealthUTXOs(username).filter((u) => u.asset?.toLowerCase() === token.toLowerCase());
+  const sendBalances = await getTokenBalances(publicClient, token, tokenUtxos.map((u) => u.stealthAddress));
+  const candidates = tokenUtxos
+    .map((utxo, i) => ({ utxo, balance: sendBalances[i] ?? 0n }))
+    .filter((c) => c.balance > 0n)
+    .sort((a, b) => (a.balance < b.balance ? 1 : -1));
+
+  const stealthAvailable = candidates.reduce((sum, c) => sum + c.balance, 0n);
+  if (mainBalance + stealthAvailable < totalAmount) {
+    return { success: false, sentAmount: 0n, txHashes: [], error: "Insufficient balance." };
+  }
+
+  type Source = { type: "main" } | { type: "utxo"; utxo: StealthUTXO };
+  const plan: { source: Source; amount: bigint }[] = [];
+  let remaining = totalAmount;
+  if (mainBalance > 0n) {
+    const take = mainBalance < remaining ? mainBalance : remaining;
+    plan.push({ source: { type: "main" }, amount: take });
+    remaining -= take;
+  }
+  for (const { utxo, balance } of candidates) {
+    if (remaining <= 0n) break;
+    const take = balance < remaining ? balance : remaining;
+    plan.push({ source: { type: "utxo", utxo }, amount: take });
+    remaining -= take;
+  }
+
+  console.log(`[smartSendToken] Plan: ${plan.length} chunk(s) of ${token} → ${destination}`);
+
+  const txHashes: string[] = [];
+  let sent = 0n;
+  for (let i = 0; i < plan.length; i++) {
+    const { source, amount } = plan[i];
+    // The blob rides only on the first chunk — the scanner finds the UTXO from
+    // it and the remaining chunks land on the same stealth address.
+    const chunkBlob = i === 0 ? blob : undefined;
+    try {
+      const tx =
+        source.type === "main"
+          ? chunkBlob
+            ? await sendStealthToken(wallet, destination, token, amount, chunkBlob)
+            : await sendToken(wallet, token, destination, amount)
+          : await spendStealthUTXO(
+              source.utxo,
+              amount.toString(),
+              destination,
+              keys.spendingPrivateKey,
+              keys.viewingPrivateKey,
+              keys.mlkemDecapsKey,
+              chunkBlob,
+            );
+
+      if (!tx) throw new Error("Operation returned no transaction hash");
+      txHashes.push(tx);
+      sent += amount;
+    } catch (e: unknown) {
+      console.error("[smartSendToken] Chunk failed:", e);
       return { success: false, sentAmount: sent, txHashes };
     }
   }

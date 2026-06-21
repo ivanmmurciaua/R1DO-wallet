@@ -27,7 +27,7 @@ import type { Safe4337Pack } from "@safe-global/relay-kit";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { ensureZkInDirectory, resolvePoolAddress } from "@/lib/registry-v2";
-import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO, getHideBalance, setHideBalance, DEFAULT_DECIMALS, DEFAULT_SYMBOL } from "@/lib/localstorage";
 import { QrCode } from "./QrCode";
 import { GlitchText } from "./GlitchText";
 import { QrScanner } from "./QrScanner";
@@ -95,8 +95,8 @@ export default function PrivateView({
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [balances, setBalances] = useState<PoolBalances | null>(null);
-  const [decimals, setDecimals] = useState(13);
-  const [symbol, setSymbol] = useState("⧫");
+  const [decimals, setDecimals] = useState(DEFAULT_DECIMALS);
+  const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   // Deposit (shield) state. Source coin: stealth total (privacy) or the public
   // Safe balance (public). privacy-by-default → smartShield from stealth UTXOs.
   const isPrivacy = getWalletMeta(username)?.privacy ?? false;

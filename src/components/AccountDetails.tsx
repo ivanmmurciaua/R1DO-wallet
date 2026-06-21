@@ -7,7 +7,7 @@ import { getStealthBalances } from "@/lib/balances";
 import { sepoliaTransport } from "@/app/constants";
 import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
-import { getDecimals, getSymbol, getWalletMeta, getStealthUTXOs } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getWalletMeta, getStealthUTXOs, DEFAULT_DECIMALS, DEFAULT_SYMBOL } from "@/lib/localstorage";
 import { useScanning } from "@/lib/scanState";
 
 type props = {
@@ -17,8 +17,8 @@ type props = {
 };
 
 export default function AccountDetails({ username, wallet, address }: props) {
-  const [decimals, setDecimals] = useState<number>(13);
-  const [symbol, setSymbol] = useState<string>("⧫");
+  const [decimals, setDecimals] = useState<number>(DEFAULT_DECIMALS);
+  const [symbol, setSymbol] = useState<string>(DEFAULT_SYMBOL);
   const [isLoaded, setLoaded] = useState(false);
   const [userBalance, setBalance] = useState<number>(0.0);
   const [stealthTotal, setStealthTotal] = useState<number>(0.0);
