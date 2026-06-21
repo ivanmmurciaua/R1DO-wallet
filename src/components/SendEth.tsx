@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from "react";
-import { Box, Button, Stack, Typography } from "@mui/material";
+import { Box, Button, Slider, Stack, Typography } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
+import ArrowBackIcon from "@mui/icons-material/ArrowBackIosNew";
 import { QrScanner } from "./QrScanner";
 import { Safe4337Pack } from "@safe-global/relay-kit";
 import { smartSend, getStealthTotal } from "@/lib/deploy";
 import { readDirectory } from "@/lib/registry-v2";
 import { getDecimals, getSymbol } from "@/lib/localstorage";
 import { parseUnits, formatUnits, zeroAddress } from "viem";
+import { networkName } from "@/lib/networks";
 import { isPQMetaAddress } from "@/lib/stealth";
 
 type SendEthProps = {
@@ -17,7 +19,15 @@ type SendEthProps = {
   onBack: (message: string) => void;
 };
 
-type PrivacyStatus = "unknown" | "checking" | "private" | "public";
+// Recipient resolved at step 1 — front-loads validation so steps 2/3 are clean.
+type Resolved = {
+  isPrivate: boolean;
+  address: string | null; // public destination (or null/zero when pure meta-address)
+  metaAddress: `0x${string}` | null;
+  display: string; // human label for the review/screens
+};
+
+const shorten = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 // Pull a usable recipient out of a scanned QR. A PQ meta-address is kept whole
 // (never truncate it). Otherwise extract a 20-byte 0x address if present (also
@@ -31,15 +41,22 @@ const recipientFromQr = (text: string): string => {
 };
 
 export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) => {
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+
   const [recipient, setRecipient] = useState("");
+  const [resolved, setResolved] = useState<Resolved | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState("");
+
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [privacyStatus, setPrivacyStatus] = useState<PrivacyStatus>("unknown");
-  // Exact spendable in wei (main Safe + stealth UTXOs) — MAX/validation use this,
-  // never the rounded `balance` prop (which can sit above the true balance).
+  // Exact spendable in wei (main Safe + stealth UTXOs) — MAX/slider/validation
+  // use this, never the rounded `balance` prop (which can sit above the truth).
   const [availableWei, setAvailableWei] = useState<bigint | null>(null);
+
   const symbol = getSymbol();
+  const decimals = getDecimals();
 
   useEffect(() => {
     let alive = true;
@@ -58,107 +75,112 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
   }, [wallet, username]);
 
   const handleBackToMenu = (message: string = "") => {
-    setRecipient("");
-    setAmount("");
-    setPrivacyStatus("unknown");
     onBack(message);
   };
 
-  // v2: usernames resolve through the Argon2id-encrypted directory (~1s).
-  // If the entry carries a PQ meta-address, the send turns private for free.
-  const resolveRecipient = async (
-    input: string,
-  ): Promise<{ address: string | null; metaAddress: `0x${string}` | null }> => {
-    const trimmed = input.trim();
-    if (!trimmed) return { address: null, metaAddress: null };
+  // ── helpers ───────────────────────────────────────────────────────────────
 
-    if (trimmed.startsWith("0x") && trimmed.length === 42) {
-      return { address: trimmed, metaAddress: null };
+  const amountToWei = (a: string): bigint | null => {
+    const t = a.trim();
+    if (!t) return null;
+    try {
+      return parseUnits(t, decimals);
+    } catch {
+      return null;
     }
-
-    const entry = await readDirectory(trimmed);
-    if (!entry) return { address: null, metaAddress: null };
-    return { address: entry.safeAddress, metaAddress: entry.metaAddress };
   };
 
-  // Δ1: no registry lookup — a payment is private when the recipient field
-  // holds a PQ meta-address (1251 bytes, shared off-chain). Username/address
-  // inputs are public sends.
-  useEffect(() => {
-    const trimmed = recipient.trim();
-    if (!trimmed) {
-      setPrivacyStatus("unknown");
-      return;
+  const amtWei = amountToWei(amount);
+  const amountValid =
+    amtWei != null && amtWei > 0n && (availableWei == null || amtWei <= availableWei);
+  const overBalance = amtWei != null && availableWei != null && amtWei > availableWei;
+
+  // Display-only formatting (grouped thousands). Exact value always stays in wei
+  // (amtWei / availableWei) — the send never uses these rounded strings.
+  const fmtDisplay = (n: number, maximumFractionDigits: number) =>
+    new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(n);
+  const availDisplay =
+    availableWei != null ? fmtDisplay(Number(formatUnits(availableWei, decimals)), 4) : "…";
+  const amountDisplay = amount ? fmtDisplay(Number(amount), 8) : amount;
+
+  // Slider as a % of the available balance (derived from the typed amount).
+  const pct =
+    availableWei && availableWei > 0n && amtWei != null
+      ? Math.min(100, Number((amtWei * 10000n) / availableWei) / 100)
+      : 0;
+
+  const setPct = (p: number) => {
+    if (!availableWei || availableWei <= 0n) return;
+    const bips = BigInt(Math.round(Math.max(0, Math.min(100, p)) * 100)); // 0..10000
+    const wei = (availableWei * bips) / 10000n;
+    setAmount(formatUnits(wei, decimals));
+  };
+
+  // v2: usernames resolve through the Argon2id-encrypted directory (~1s). If the
+  // entry carries a PQ meta-address, the send turns private for free.
+  const resolveStep1 = async (
+    input: string,
+  ): Promise<{ ok: true; res: Resolved } | { ok: false; error: string }> => {
+    const t = input.trim();
+    if (!t) return { ok: false, error: "Enter a recipient" };
+
+    if (isPQMetaAddress(t)) {
+      return {
+        ok: true,
+        res: { isPrivate: true, address: zeroAddress, metaAddress: t as `0x${string}`, display: `${t.slice(0, 10)}…` },
+      };
     }
-    setPrivacyStatus(isPQMetaAddress(trimmed) ? "private" : "public");
-  }, [recipient]);
+    if (t.startsWith("0x") && t.length === 42) {
+      return { ok: true, res: { isPrivate: false, address: t, metaAddress: null, display: shorten(t) } };
+    }
 
-  const handleSendTransaction = async () => {
-    if (!wallet || !recipient.trim() || !amount.trim() || parseFloat(amount) <= 0) return;
+    const entry = await readDirectory(t);
+    if (!entry) return { ok: false, error: "Recipient not found" };
+    if (entry.metaAddress) {
+      return { ok: true, res: { isPrivate: true, address: entry.safeAddress, metaAddress: entry.metaAddress, display: t } };
+    }
+    return { ok: true, res: { isPrivate: false, address: entry.safeAddress, metaAddress: null, display: `${t} → ${shorten(entry.safeAddress)}` } };
+  };
 
-    let totalAmount: bigint;
+  const continueFromRecipient = async () => {
+    setResolving(true);
+    setResolveError("");
     try {
-      totalAmount = parseUnits(amount, getDecimals());
-    } catch {
-      handleBackToMenu("Invalid amount.");
-      return;
-    }
-    // Compare in exact wei (the rounded `balance` can sit above the real one).
-    if (availableWei != null && totalAmount > availableWei) {
-      handleBackToMenu(`Amount exceeds your balance (${formatUnits(availableWei, getDecimals())} ${symbol}).`);
-      return;
-    }
-
-    setIsLoading(true);
-
-    try {
-      const trimmed = recipient.trim();
-
-      let metaAddress: `0x${string}` | null = isPQMetaAddress(trimmed)
-        ? (trimmed as `0x${string}`)
-        : null;
-      let recipientAddress: string | null = zeroAddress;
-
-      if (!metaAddress) {
-        const resolved = await resolveRecipient(trimmed);
-        if (resolved.metaAddress) {
-          // Directory entry carries a meta-address → pay privately by name
-          metaAddress = resolved.metaAddress;
-        } else {
-          recipientAddress = resolved.address;
-          if (!recipientAddress) {
-            handleBackToMenu("Recipient not found.");
-            return;
-          }
-        }
+      const r = await resolveStep1(recipient);
+      if (!r.ok) {
+        setResolveError(r.error);
+        return;
       }
+      setResolved(r.res);
+      setStep(2);
+    } finally {
+      setResolving(false);
+    }
+  };
 
-      const isPrivate = !!metaAddress;
-      // The typing-time hint only knows about pasted meta-addresses; the
-      // directory resolution above is what actually decides the mode.
-      setPrivacyStatus(isPrivate ? "private" : "public");
-      console.log(`[SendEth] Sending ${amount} ${symbol} to ${trimmed} | private: ${isPrivate}`);
-
+  const handleConfirm = async () => {
+    if (!resolved || amtWei == null) return;
+    if (availableWei != null && amtWei > availableWei) {
+      handleBackToMenu(`Amount exceeds your balance (${formatUnits(availableWei, decimals)} ${symbol}).`);
+      return;
+    }
+    setIsLoading(true);
+    try {
       const result = await smartSend(
         wallet,
-        recipientAddress as `0x${string}`,
-        totalAmount,
+        (resolved.address ?? zeroAddress) as `0x${string}`,
+        amtWei,
         username,
-        metaAddress,
+        resolved.metaAddress,
       );
-
-      const recipientLabel = isPrivate
-        ? isPQMetaAddress(trimmed)
-          ? `${trimmed.slice(0, 10)}…(meta-address)`
-          : trimmed
-        : recipient;
+      const priv = resolved.isPrivate ? " privately" : "";
       if (result.success) {
-        handleBackToMenu(`Sent ${amount} ${symbol}${metaAddress ? " privately" : ""} to ${recipientLabel}`);
+        handleBackToMenu(`Sent ${amount} ${symbol}${priv} to ${resolved.display}`);
       } else if (result.sentAmount > 0n) {
-        const sentFormatted = formatUnits(result.sentAmount, getDecimals());
-        handleBackToMenu(`Sent ${sentFormatted} of ${amount} ${symbol} to ${recipientLabel} — try again to send the rest.`);
+        const sentFormatted = formatUnits(result.sentAmount, decimals);
+        handleBackToMenu(`Sent ${sentFormatted} of ${amount} ${symbol} to ${resolved.display} — try again to send the rest.`);
       } else {
-        handleBackToMenu(result.error ?? `Failed to send ${amount} ${symbol} to ${recipientLabel}. Try again later`);
+        handleBackToMenu(result.error ?? `Failed to send ${amount} ${symbol} to ${resolved.display}. Try again later`);
       }
     } catch (error) {
       console.error("Send transaction error:", error);
@@ -168,135 +190,296 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
     }
   };
 
+  // ── UI ──────────────────────────────────────────────────────────────────
+
+  const PrivacyChip = ({ isPrivate }: { isPrivate: boolean }) => (
+    <Box
+      component="span"
+      sx={{
+        fontSize: "0.62rem",
+        letterSpacing: "0.12em",
+        px: 0.9,
+        py: 0.25,
+        borderRadius: "2px",
+        border: "1px solid currentColor",
+        color: isPrivate ? "primary.main" : "text.secondary",
+        opacity: 0.85,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {isPrivate ? "PRIVATE" : "PUBLIC"}
+    </Box>
+  );
+
   return (
     <Box>
       {scanning && (
         <QrScanner
           onResult={(text) => {
             setRecipient(recipientFromQr(text));
+            setResolved(null);
+            setResolveError("");
             setScanning(false);
           }}
           onClose={() => setScanning(false)}
         />
       )}
-      <Stack
-        spacing={1.7}
-        direction="column"
-        sx={{ width: "100%", maxWidth: 400, mx: "auto" }}
-      >
-        {/* Recipient input */}
-        <Box>
-          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
-            <Typography variant="body2" sx={{ color: "text.secondary" }}>
-              Recipient (Username or Address)
-            </Typography>
+
+      <Stack spacing={1.7} direction="column" sx={{ width: "100%", maxWidth: 400, mx: "auto" }}>
+        {/* Step indicator */}
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "center", mb: 0.5 }}>
+          {(["Recipient", "Amount", "Review"] as const).map((label, i) => {
+            const n = (i + 1) as 1 | 2 | 3;
+            const active = step === n;
+            const done = step > n;
+            return (
+              <React.Fragment key={label}>
+                {i > 0 && <Box sx={{ width: 18, height: "1px", bgcolor: "text.secondary", opacity: 0.4 }} />}
+                <Typography
+                  variant="caption"
+                  sx={{
+                    fontSize: "0.7rem",
+                    letterSpacing: "0.04em",
+                    color: active ? "primary.main" : "text.secondary",
+                    opacity: active ? 1 : done ? 0.8 : 0.45,
+                    fontWeight: active ? 700 : 400,
+                  }}
+                >
+                  {done ? "✓ " : `${n}. `}
+                  {label}
+                </Typography>
+              </React.Fragment>
+            );
+          })}
+        </Stack>
+
+        {/* ── STEP 1 — Recipient ── */}
+        {step === 1 && (
+          <>
+            <Box>
+              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+                <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                  To (username or address)
+                </Typography>
+                <Button
+                  variant="text"
+                  color="primary"
+                  size="small"
+                  startIcon={<QrCodeScannerIcon sx={{ fontSize: "1rem" }} />}
+                  onClick={() => setScanning(true)}
+                  disabled={resolving}
+                  sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
+                >
+                  Scan
+                </Button>
+              </Box>
+              <input
+                type="text"
+                value={recipient}
+                onChange={(e) => {
+                  setRecipient(e.target.value);
+                  setResolved(null);
+                  setResolveError("");
+                }}
+                placeholder="_ username or 0x address"
+                style={inputStyle}
+                onFocus={(e) => (e.target.style.opacity = "1")}
+                onBlur={(e) => (e.target.style.opacity = "0.7")}
+              />
+              {resolveError && (
+                <Typography variant="caption" sx={{ color: "error.main", mt: 0.8, display: "block" }}>
+                  {resolveError}
+                </Typography>
+              )}
+            </Box>
+
+            <Button
+              variant="outlined"
+              color="primary"
+              onClick={continueFromRecipient}
+              disabled={resolving || !recipient.trim()}
+              sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 2 }}
+            >
+              {resolving ? "Resolving…" : "Continue"}
+            </Button>
+            <Button variant="text" color="secondary" onClick={() => handleBackToMenu()} sx={{ py: 1, fontSize: "0.9rem" }}>
+              Cancel
+            </Button>
+          </>
+        )}
+
+        {/* ── STEP 2 — Amount ── */}
+        {step === 2 && resolved && (
+          <>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 0.5 }}>
+              <Typography variant="body2" sx={{ color: "text.secondary", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                To {resolved.display}
+              </Typography>
+              <PrivacyChip isPrivate={resolved.isPrivate} />
+            </Stack>
+
+            <Box>
+              <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
+                Amount ({symbol})
+              </Typography>
+              <input
+                type="number"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="0.00"
+                min="0"
+                step="0.01"
+                style={inputStyle}
+                onFocus={(e) => (e.target.style.opacity = "1")}
+                onBlur={(e) => (e.target.style.opacity = "0.7")}
+              />
+              <Typography
+                variant="caption"
+                sx={{
+                  color: overBalance ? "error.main" : "text.secondary",
+                  display: "block",
+                  mt: 0.8,
+                  letterSpacing: "0.03em",
+                  opacity: 0.85,
+                }}
+              >
+                Available: {availDisplay} {symbol}
+              </Typography>
+            </Box>
+
+            {/* Balance slider + quick percentages */}
+            <Box sx={{ px: 0.5 }}>
+              <Slider
+                value={pct}
+                onChange={(_, v) => setPct(v as number)}
+                disabled={!availableWei || availableWei <= 0n}
+                marks={[0, 25, 50, 75, 100].map((v) => ({ value: v }))}
+                step={1}
+                min={0}
+                max={100}
+                size="small"
+                sx={{ color: "primary.main" }}
+              />
+              <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", mt: 0.5 }}>
+                {[25, 50, 75, 100].map((p) => (
+                  <Button
+                    key={p}
+                    variant="text"
+                    size="small"
+                    onClick={() => setPct(p)}
+                    disabled={!availableWei || availableWei <= 0n}
+                    sx={{ minWidth: 0, px: 1, fontSize: "0.7rem", flex: 1 }}
+                  >
+                    {p === 100 ? "MAX" : `${p}%`}
+                  </Button>
+                ))}
+              </Stack>
+            </Box>
+
+            <Button
+              variant="outlined"
+              color="primary"
+              onClick={() => setStep(3)}
+              disabled={!amountValid}
+              sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 2 }}
+            >
+              {overBalance ? "Exceeds balance" : "Review"}
+            </Button>
             <Button
               variant="text"
+              color="secondary"
+              startIcon={<ArrowBackIcon sx={{ fontSize: "0.8rem" }} />}
+              onClick={() => setStep(1)}
+              sx={{ py: 1, fontSize: "0.9rem" }}
+            >
+              Back
+            </Button>
+          </>
+        )}
+
+        {/* ── STEP 3 — Review ── */}
+        {step === 3 && resolved && (
+          <>
+            <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 2, p: 2 }}>
+              <ReviewRow label="To" value={resolved.display} />
+              <ReviewRow label="Amount" value={`${amountDisplay} ${symbol}`} />
+              <ReviewRow
+                label="Type"
+                value={
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                    <PrivacyChip isPrivate={resolved.isPrivate} />
+                    <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                      · {networkName()}
+                    </Typography>
+                  </Box>
+                }
+              />
+              <ReviewRow label="Fee" value="Free · gas sponsored" last />
+            </Box>
+
+            <Button
+              variant="outlined"
               color="primary"
-              size="small"
-              startIcon={<QrCodeScannerIcon sx={{ fontSize: "1rem" }} />}
-              onClick={() => setScanning(true)}
+              startIcon={<SendIcon />}
+              onClick={handleConfirm}
               disabled={isLoading}
-              sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
+              sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 2 }}
             >
-              Scan
+              {isLoading ? "Sending…" : "Confirm & Send"}
             </Button>
-          </Box>
-          <input
-            type="text"
-            value={recipient}
-            onChange={(e) => setRecipient(e.target.value)}
-            placeholder="_ username or 0x address"
-            style={{
-              fontSize: "1rem",
-              fontFamily: "var(--font-geist-mono), monospace",
-              borderRadius: "2px",
-              border: "1px solid currentColor",
-              background: "transparent",
-              color: "inherit",
-              width: "100%",
-              padding: "12px 14px",
-              boxSizing: "border-box",
-              outline: "none",
-              letterSpacing: "0.04em",
-              opacity: 0.7,
-              transition: "opacity 0.15s",
-            }}
-            onFocus={(e) => (e.target.style.opacity = "1")}
-            onBlur={(e) => (e.target.style.opacity = "0.7")}
-          />
-        </Box>
-
-        {/* Amount input */}
-        <Box>
-          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
-            <Typography variant="body2" sx={{ color: "text.secondary" }}>
-              Amount ({symbol})
-            </Typography>
             <Button
               variant="text"
-              color="primary"
-              size="small"
-              onClick={() => availableWei != null && setAmount(formatUnits(availableWei, getDecimals()))}
-              disabled={isLoading || availableWei == null || availableWei <= 0n}
-              sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
+              color="secondary"
+              startIcon={<ArrowBackIcon sx={{ fontSize: "0.8rem" }} />}
+              onClick={() => setStep(2)}
+              disabled={isLoading}
+              sx={{ py: 1, fontSize: "0.9rem" }}
             >
-              MAX
+              Back
             </Button>
-          </Box>
-          <input
-            type="number"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="0.00"
-            min="0"
-            step="0.01"
-            style={{
-              fontSize: "1rem",
-              fontFamily: "var(--font-geist-mono), monospace",
-              borderRadius: "2px",
-              border: "1px solid currentColor",
-              background: "transparent",
-              color: "inherit",
-              width: "100%",
-              padding: "12px 14px",
-              boxSizing: "border-box",
-              outline: "none",
-              letterSpacing: "0.04em",
-              opacity: 0.7,
-              transition: "opacity 0.15s",
-            }}
-            onFocus={(e) => (e.target.style.opacity = "1")}
-            onBlur={(e) => (e.target.style.opacity = "0.7")}
-          />
-        </Box>
-
-        {/* Send button */}
-        <Button
-          variant="outlined"
-          color="primary"
-          startIcon={<SendIcon />}
-          onClick={handleSendTransaction}
-          disabled={isLoading || !recipient.trim() || !amount.trim() || privacyStatus === "checking"}
-          sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 3 }}
-        >
-          {isLoading
-            ? "Sending..."
-            : privacyStatus === "private"
-              ? `Send ${amount || "0"} ${symbol} privately`
-              : `Send ${amount || "0"} ${symbol}`}
-        </Button>
-
-        {/* Cancel button */}
-        <Button
-          variant="text"
-          color="secondary"
-          onClick={() => handleBackToMenu()}
-          sx={{ py: 1, fontSize: "0.9rem" }}
-        >
-          Cancel
-        </Button>
+          </>
+        )}
       </Stack>
     </Box>
   );
+};
+
+const ReviewRow = ({ label, value, last }: { label: string; value: React.ReactNode; last?: boolean }) => (
+  <Box
+    sx={{
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      py: 1,
+      borderBottom: last ? "none" : "1px solid",
+      borderColor: "divider",
+    }}
+  >
+    <Typography variant="body2" sx={{ color: "text.secondary" }}>
+      {label}
+    </Typography>
+    {typeof value === "string" ? (
+      <Typography variant="body2" sx={{ textAlign: "right", wordBreak: "break-word", ml: 2 }}>
+        {value}
+      </Typography>
+    ) : (
+      value
+    )}
+  </Box>
+);
+
+const inputStyle: React.CSSProperties = {
+  fontSize: "1rem",
+  fontFamily: "var(--font-geist-mono), monospace",
+  borderRadius: "2px",
+  border: "1px solid currentColor",
+  background: "transparent",
+  color: "inherit",
+  width: "100%",
+  padding: "12px 14px",
+  boxSizing: "border-box",
+  outline: "none",
+  letterSpacing: "0.04em",
+  opacity: 0.7,
+  transition: "opacity 0.15s",
 };
