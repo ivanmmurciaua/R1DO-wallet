@@ -7,6 +7,7 @@ import {
   Stack,
   Paper,
   CircularProgress,
+  Slider,
   TextField,
   Snackbar,
   Alert,
@@ -109,9 +110,14 @@ export default function PrivateView({
   const [coinMode, setCoinMode] = useState<"amount" | "coins">("amount");
   const [coins, setCoins] = useState<Coin[] | null>(null); // null = loading
   const [selectedCoins, setSelectedCoins] = useState<Set<string>>(new Set());
-  // Transfer (private 0zk → 0zk) state
+  // Transfer (private 0zk → 0zk) state — 3-step wizard (Recipient → Amount → Review)
   const [sendOpen, setSendOpen] = useState(false);
+  const [sendStep, setSendStep] = useState<1 | 2 | 3>(1);
   const [sendTo, setSendTo] = useState("");
+  const [sendToZk, setSendToZk] = useState(""); // recipient resolved to a 0zk at step 1
+  const [sendDisplay, setSendDisplay] = useState(""); // human label for steps 2/3
+  const [sendResolving, setSendResolving] = useState(false);
+  const [sendResolveError, setSendResolveError] = useState("");
   const [sendAmt, setSendAmt] = useState("");
   const [sendStage, setSendStage] = useState<"idle" | "resolving" | "proving" | "submitting">("idle");
   const [proveProgress, setProveProgress] = useState(0);
@@ -359,10 +365,47 @@ export default function PrivateView({
   const openSend = () => {
     setDepositOpen(false);
     setUnshieldOpen(false);
+    setSendStep(1);
     setSendTo("");
+    setSendToZk("");
+    setSendDisplay("");
+    setSendResolveError("");
+    setSendResolving(false);
     setSendAmt("");
     setSendStage("idle");
     setSendOpen(true);
+  };
+
+  // Step 1 → resolve the recipient (0zk used as-is; a nick resolves through the
+  // directory) before advancing, so steps 2/3 work with a confirmed 0zk.
+  const continueSendRecipient = async () => {
+    const to = sendTo.trim();
+    if (!to) {
+      setSendResolveError("Enter a recipient");
+      return;
+    }
+    setSendResolving(true);
+    setSendResolveError("");
+    try {
+      let zkAddr = to;
+      if (!to.toLowerCase().startsWith("0zk")) {
+        const resolved = await resolvePoolAddress(to);
+        if (!resolved) {
+          setSendResolveError(`"${to}" has no shielded account to receive`);
+          return;
+        }
+        zkAddr = resolved;
+      }
+      setSendToZk(zkAddr);
+      setSendDisplay(
+        to.toLowerCase().startsWith("0zk")
+          ? `${to.slice(0, 10)}…${to.slice(-4)}`
+          : `${to} → ${zkAddr.slice(0, 8)}…`,
+      );
+      setSendStep(2);
+    } finally {
+      setSendResolving(false);
+    }
   };
 
   // Transfer private (0zk → 0zk). Recipient: a 0zk address or a nick (resolved
@@ -392,12 +435,12 @@ export default function PrivateView({
       return;
     }
     try {
-      // Resolve recipient → 0zk
-      let zkAddr = to;
-      if (!to.toLowerCase().startsWith("0zk")) {
+      // Recipient already resolved to a 0zk at step 1 (sendToZk). Fall back to a
+      // fresh resolve only if it's somehow missing.
+      let zkAddr = sendToZk || to;
+      if (!zkAddr.toLowerCase().startsWith("0zk")) {
         setSendStage("resolving");
         console.log(`[private] resolving recipient "${to}"…`);
-        const { resolvePoolAddress } = await import("@/lib/registry-v2");
         const resolved = await resolvePoolAddress(to);
         if (!resolved) throw new Error(`"${to}" has no shielded account to receive`);
         zkAddr = resolved;
@@ -653,6 +696,32 @@ export default function PrivateView({
     (balances?.missingInternal ?? 0n) +
     (balances?.shieldPending ?? 0n);
 
+  // Transfer amount helpers (wizard step 2) — exact value stays in wei; the
+  // balance slider works as a % of spendable, mirroring the public send.
+  const sendAmtWei = (() => {
+    const t = sendAmt.trim();
+    if (!t) return null;
+    try {
+      return parseUnits(t, decimals);
+    } catch {
+      return null;
+    }
+  })();
+  const sendOver = sendAmtWei != null && sendAmtWei > spendable;
+  const sendAmtValid = sendAmtWei != null && sendAmtWei > 0n && !sendOver;
+  const sendPct =
+    spendable > 0n && sendAmtWei != null
+      ? Math.min(100, Number((sendAmtWei * 10000n) / spendable) / 100)
+      : 0;
+  const setSendPct = (p: number) => {
+    if (spendable <= 0n) return;
+    const bips = BigInt(Math.round(Math.max(0, Math.min(100, p)) * 100));
+    setSendAmt(formatUnits((spendable * bips) / 10000n, decimals));
+  };
+  const sendAmtDisplay = sendAmt
+    ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 }).format(Number(sendAmt))
+    : sendAmt;
+
   // Live fee breakdown for the shield/unshield forms (null when no valid amount).
   const previewFee = (raw: string, bps: number, exact: boolean, cap?: bigint) => {
     const n = raw.trim();
@@ -686,6 +755,8 @@ export default function PrivateView({
           onResult={(text) => {
             // Transfer recipient is a 0zk address or a username → use as-is.
             setSendTo(text.trim());
+            setSendToZk("");
+            setSendResolveError("");
             setScanning(false);
           }}
           onClose={() => setScanning(false)}
@@ -820,9 +891,7 @@ export default function PrivateView({
             </IconButton>
           </Box>
 
-          {/* "validating in the background" — only when something is pending POI.
-              Block wrapper forces its own line (the badge is inline-flex and would
-              otherwise sit beside the inline-flex "shielded balance" row). */}
+          {/* "validating in the background" — only when something is pending POI. */}
           {pending > 0n && (
             <Box sx={{ mt: 2.5 }}>
               <Box
@@ -853,9 +922,9 @@ export default function PrivateView({
             </Box>
           )}
 
-          {/* finalizing: a spent-POI is being generated in the background (the
-              transfer's change/output). Clear warning, never a blocking spinner. */}
-          {poolActivity.finalizing && (
+          {/* finalizing: SEPARATE badge — shows "stay on this screen" and switches
+              to "generating proof… %" while a proof is actively generating. */}
+          {(poolActivity.finalizing || pending > 0n) && (
             <Box
               sx={{
                 display: "flex",
@@ -883,8 +952,8 @@ export default function PrivateView({
               />
               <Typography variant="body2" sx={{ fontSize: "0.62rem", letterSpacing: "0.03em", textAlign: "left", lineHeight: 1.5 }}>
                 {poolActivity.generatingProof
-                  ? `Finalizing your private transfer — generating proof… ${poolActivity.proofProgress}%`
-                  : "Finalizing your private transfer — keep the private side open a moment."}
+                  ? `Generating proof… ${poolActivity.proofProgress}%. Keep this screen open to finish now.`
+                  : "Finalizing your private transfer — stay on this screen so it completes now. If you leave, no worries: it resumes next time you unlock your private balance."}
               </Typography>
             </Box>
           )}
@@ -1098,7 +1167,7 @@ export default function PrivateView({
                 )}
               </Box>
             ) : sendOpen ? (
-              /* ── Send private (0zk → 0zk) ── */
+              /* ── Send private (0zk → 0zk) — wizard ── */
               <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 1.5, textAlign: "left" }}>
                 <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.25 }}>
                   <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.6, letterSpacing: "0.1em", textTransform: "uppercase" }}>
@@ -1116,71 +1185,187 @@ export default function PrivateView({
                   </Button>
                 </Box>
 
-                <TextField
-                  fullWidth
-                  size="small"
-                  placeholder="username or 0zk…"
-                  label="To"
-                  value={sendTo}
-                  onChange={(e) => setSendTo(e.target.value)}
-                  disabled={sendBusy}
-                  InputProps={{
-                    endAdornment: (
-                      <IconButton
+                {/* step indicator */}
+                <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "center", mb: 1.5 }}>
+                  {(["Recipient", "Amount", "Review"] as const).map((label, i) => {
+                    const n = (i + 1) as 1 | 2 | 3;
+                    const active = sendStep === n;
+                    const done = sendStep > n;
+                    return (
+                      <Box key={label} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        {i > 0 && <Box sx={{ width: 14, height: "1px", bgcolor: "text.secondary", opacity: 0.4 }} />}
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            fontSize: "0.62rem",
+                            letterSpacing: "0.04em",
+                            color: active ? "primary.main" : "text.secondary",
+                            opacity: active ? 1 : done ? 0.8 : 0.45,
+                            fontWeight: active ? 700 : 400,
+                          }}
+                        >
+                          {done ? "✓ " : `${n}. `}
+                          {label}
+                        </Typography>
+                      </Box>
+                    );
+                  })}
+                </Stack>
+
+                {/* STEP 1 — Recipient */}
+                {sendStep === 1 && (
+                  <>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      placeholder="username or 0zk…"
+                      label="To"
+                      value={sendTo}
+                      onChange={(e) => {
+                        setSendTo(e.target.value);
+                        setSendToZk("");
+                        setSendResolveError("");
+                      }}
+                      disabled={sendResolving}
+                      error={!!sendResolveError}
+                      helperText={sendResolveError || undefined}
+                      InputProps={{
+                        endAdornment: (
+                          <IconButton
+                            size="small"
+                            onClick={() => setScanning(true)}
+                            disabled={sendResolving}
+                            aria-label="Scan a QR address"
+                            title="Scan a QR address"
+                            sx={{ p: 0.5 }}
+                          >
+                            <QrCodeScannerIcon sx={{ fontSize: "1.1rem" }} />
+                          </IconButton>
+                        ),
+                      }}
+                      sx={{ mb: 1.5 }}
+                    />
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      fullWidth
+                      onClick={continueSendRecipient}
+                      disabled={sendResolving || !sendTo.trim()}
+                      startIcon={sendResolving ? <CircularProgress size={14} /> : undefined}
+                    >
+                      {sendResolving ? "Resolving…" : "Continue"}
+                    </Button>
+                  </>
+                )}
+
+                {/* STEP 2 — Amount */}
+                {sendStep === 2 && (
+                  <>
+                    <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.7, mb: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      To {sendDisplay}
+                    </Typography>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      type="number"
+                      placeholder="0"
+                      label={`Amount (${symbol})`}
+                      value={sendAmt}
+                      onChange={(e) => setSendAmt(e.target.value)}
+                      sx={{ mb: 0.5 }}
+                    />
+                    <Box sx={{ px: 0.5 }}>
+                      <Slider
+                        value={sendPct}
+                        onChange={(_, v) => setSendPct(v as number)}
+                        disabled={spendable <= 0n}
+                        marks={[0, 25, 50, 75, 100].map((v) => ({ value: v }))}
+                        step={1}
+                        min={0}
+                        max={100}
                         size="small"
-                        onClick={() => setScanning(true)}
-                        disabled={sendBusy}
-                        aria-label="Scan a QR address"
-                        title="Scan a QR address"
-                        sx={{ p: 0.5 }}
-                      >
-                        <QrCodeScannerIcon sx={{ fontSize: "1.1rem" }} />
-                      </IconButton>
-                    ),
-                  }}
-                  sx={{ mb: 1.25 }}
-                />
+                        sx={{ color: "primary.main" }}
+                      />
+                      <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between", mt: 0.25 }}>
+                        {[25, 50, 75, 100].map((p) => (
+                          <Button
+                            key={p}
+                            variant="text"
+                            size="small"
+                            onClick={() => setSendPct(p)}
+                            disabled={spendable <= 0n}
+                            sx={{ minWidth: 0, px: 1, fontSize: "0.7rem", flex: 1 }}
+                          >
+                            {p === 100 ? "MAX" : `${p}%`}
+                          </Button>
+                        ))}
+                      </Stack>
+                    </Box>
+                    <Typography variant="body2" sx={{ fontSize: "0.58rem", color: sendOver ? "error.main" : "text.secondary", opacity: sendOver ? 1 : 0.6, mt: 0.75, mb: 1.25, lineHeight: 1.5 }}>
+                      Spendable: {fmt(spendable, decimals)} {symbol}. First send downloads ~50MB (one-time).
+                    </Typography>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      fullWidth
+                      onClick={() => setSendStep(3)}
+                      disabled={!sendAmtValid}
+                      sx={{ mb: 0.75 }}
+                    >
+                      {sendOver ? "Exceeds balance" : "Review"}
+                    </Button>
+                    <Button variant="text" color="primary" fullWidth onClick={() => setSendStep(1)} sx={{ fontSize: "0.8rem" }}>
+                      ‹ Back
+                    </Button>
+                  </>
+                )}
 
-                <TextField
-                  fullWidth
-                  size="small"
-                  type="number"
-                  placeholder="0"
-                  label={`Amount (${symbol})`}
-                  value={sendAmt}
-                  onChange={(e) => setSendAmt(e.target.value)}
-                  disabled={sendBusy}
-                  InputProps={{
-                    endAdornment: (
-                      <Button
-                        variant="text"
-                        color="primary"
-                        size="small"
-                        disabled={sendBusy}
-                        onClick={() => setSendAmt(formatUnits(spendable, decimals))}
-                        sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
-                      >
-                        MAX
-                      </Button>
-                    ),
-                  }}
-                  sx={{ mb: 0.75 }}
-                />
-
-                <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: 1.25, lineHeight: 1.5 }}>
-                  Spendable: {fmt(spendable, decimals)} {symbol}. First send downloads ~50MB (one-time).
-                </Typography>
-
-                <Button
-                  variant="contained"
-                  color="primary"
-                  fullWidth
-                  onClick={doSend}
-                  disabled={sendBusy}
-                  startIcon={sendBusy ? <CircularProgress size={14} /> : undefined}
-                >
-                  {sendLabel}
-                </Button>
+                {/* STEP 3 — Review */}
+                {sendStep === 3 && (
+                  <>
+                    <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 1.25, mb: 1.25 }}>
+                      {[
+                        ["To", sendDisplay],
+                        ["Amount", `${sendAmtDisplay} ${symbol}`],
+                        ["Type", `Private · ${proto}`],
+                        ["Fee", "Free · gas sponsored"],
+                      ].map(([label, value], idx, arr) => (
+                        <Box
+                          key={label}
+                          sx={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 1,
+                            py: 0.75,
+                            borderBottom: idx < arr.length - 1 ? "1px solid" : "none",
+                            borderColor: "divider",
+                          }}
+                        >
+                          <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.6 }}>
+                            {label}
+                          </Typography>
+                          <Typography variant="body2" sx={{ fontSize: "0.62rem", textAlign: "right", wordBreak: "break-word" }}>
+                            {value}
+                          </Typography>
+                        </Box>
+                      ))}
+                    </Box>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      fullWidth
+                      onClick={doSend}
+                      disabled={sendBusy}
+                      startIcon={sendBusy ? <CircularProgress size={14} /> : undefined}
+                      sx={{ mb: 0.75 }}
+                    >
+                      {sendBusy ? sendLabel : "Confirm & Send"}
+                    </Button>
+                    <Button variant="text" color="primary" fullWidth onClick={() => setSendStep(2)} disabled={sendBusy} sx={{ fontSize: "0.8rem" }}>
+                      ‹ Back
+                    </Button>
+                  </>
+                )}
               </Box>
             ) : unshieldOpen ? (
               /* ── Unshield (0zk → public address) ── */

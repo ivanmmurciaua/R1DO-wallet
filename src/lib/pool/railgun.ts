@@ -532,7 +532,12 @@ function wireCallbacks() {
     if (!poolWallet || e.railgunWalletID !== poolWallet.id) return;
     const pct = Math.round(e.progress ?? 0);
     const done = e.status === "AllProofsCompleted" || (e.totalCount ?? 0) === 0;
-    activity.generatingProof = !done && (e.totalCount ?? 0) > 0;
+    // The banner shows ONLY while a proof is actively generating: InProgress,
+    // totalCount > 0 AND progress > 0. A false-positive txid only ever emits
+    // AllProofsCompleted / totalCount 0 / 0% → this never flips true → the banner
+    // never sticks. finalizing tracks this 1:1 (no pending-list guesswork).
+    activity.generatingProof = !done && (e.totalCount ?? 0) > 0 && pct > 0;
+    activity.finalizing = activity.generatingProof;
     activity.proofProgress = pct;
     console.log(`[watcher] POI proof ${e.status} ${pct}% (${e.index + 1}/${e.totalCount})`);
     notifyActivity();
@@ -565,21 +570,18 @@ async function watcherTick(): Promise<void> {
   const pending = await getChainTxidsStillPendingSpentPOIs(TXID, POOL_NETWORK, poolWallet.id).catch(
     () => [] as string[],
   );
-  // Surface "finalizing" so the UI can warn there's a pending POI being worked on.
-  activity.finalizing = pending.length > 0;
-  notifyActivity();
+  // Push real spent-POIs forward. The proof runs ASYNC: InProgress events arrive
+  // over the next ticks and the progress callback drives the "finalizing" banner.
+  // For a false-positive txid (nothing to generate) this just returns
+  // AllProofsCompleted/totalCount 0 — a cheap no-op that never lights the banner.
+  // (We intentionally do NOT derive the banner from this list — it returns
+  // phantom txids that never clear.)
   if (pending.length > 0) {
-    console.log(`[watcher] ${pending.length} spent POI(s) pending → generating…`);
+    const short = `[${pending.map((t) => t.slice(0, 10) + "…").join(", ")}]`;
+    console.log(`[watcher] ${pending.length} pending spent-POI txid(s) → generate ${short}`);
     await withTimeout(generatePOIsForWallet(POOL_NETWORK, poolWallet.id), 180_000, "generatePOIs").catch(
       (e) => console.warn("[watcher] generate:", e?.message ?? e),
     );
-    // re-check: cleared once the proof is generated+submitted (pendingSpent→0)
-    const after = await getChainTxidsStillPendingSpentPOIs(TXID, POOL_NETWORK, poolWallet.id).catch(
-      () => pending,
-    );
-    activity.finalizing = after.length > 0;
-    activity.generatingProof = false;
-    notifyActivity();
   }
   await scanBalances();
 }
