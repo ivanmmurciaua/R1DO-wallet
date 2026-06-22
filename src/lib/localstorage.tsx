@@ -2,6 +2,7 @@ import localforage from "localforage";
 import { LOCAL_WALLET_LIST } from "@/app/constants";
 import { WalletMeta } from "@/types";
 import type { StealthUTXO } from "@/lib/stealth";
+import { activeChainId } from "@/lib/networks";
 
 // ── localStorage layout (r1do/wallet/v1) ─────────────────────────────────────
 // Everything the wallet keeps locally lives under one versioned namespace, so
@@ -28,7 +29,15 @@ import type { StealthUTXO } from "@/lib/stealth";
 
 const NS = "r1do/wallet/v1";
 const acctKey       = (u: string) => `${NS}/acct/${u.toLowerCase()}`;
-const scanCursorKey = (u: string) => `${NS}/scan/${u.toLowerCase()}/cursor`;
+// Scan state is partitioned per {username, chainId}: stealth UTXOs and the scan
+// cursor are chain-specific (an address scanned on chain A means nothing on B),
+// so each chain gets its own keys — no cross-chain mixing when the network
+// switcher lands. Reads/writes always target the ACTIVE chain (read internally,
+// not threaded through call sites, so every sync render reader stays untouched).
+// The pre-chain keys (no chainId segment) are kept as LEGACY for one-way
+// migration: existing testers' data adopts forward into the active-chain key.
+const scanCursorKey       = (u: string) => `${NS}/scan/${u.toLowerCase()}/${activeChainId()}/cursor`;
+const scanCursorKeyLegacy = (u: string) => `${NS}/scan/${u.toLowerCase()}/cursor`;
 const scanUtxosKey  = (u: string) => `${NS}/scan/${u.toLowerCase()}/utxos`;
 const PREFS_KEY     = `${NS}/prefs`;
 
@@ -154,7 +163,11 @@ interface ScanCursor {
 
 const readCursor = (username: string): ScanCursor => {
   try {
-    const c = JSON.parse(localStorage.getItem(scanCursorKey(username)) || "{}");
+    // Prefer the chain-scoped key; fall back to the pre-chain (legacy) key so an
+    // existing tester's scan continues from where it was instead of resetting to
+    // genesis. The first writeCursor stamps the new key; the legacy one then idles.
+    const raw = localStorage.getItem(scanCursorKey(username)) ?? localStorage.getItem(scanCursorKeyLegacy(username)) ?? "{}";
+    const c = JSON.parse(raw);
     return { block: typeof c.block === "string" ? c.block : null, count: Number(c.count) || 0 };
   } catch {
     return { block: null, count: 0 };
@@ -175,7 +188,10 @@ const utxoDB = (): LocalForage => {
   return _utxoDB;
 };
 
-const ukey = (u: string) => u.toLowerCase();
+// UTXO store key — partitioned per {username, chainId} (see scanCursorKey note).
+// `ukeyBare` is the pre-chain key, kept for one-way migration on hydrate.
+const ukey = (u: string) => `${u.toLowerCase()}:${activeChainId()}`;
+const ukeyBare = (u: string) => u.toLowerCase();
 const readUtxos = (username: string): StealthUTXO[] => utxoCache.get(ukey(username)) ?? [];
 
 // Best-effort durability: write-through persists promptly, but a write fired in
@@ -209,6 +225,22 @@ export const hydrateStealthStore = async (username: string): Promise<void> => {
   let arr: StealthUTXO[] = [];
   try { arr = (await utxoDB().getItem<StealthUTXO[]>(k)) ?? []; } catch { arr = []; }
 
+  // Chain-scope migration: UTXOs used to live under the bare username key (pre
+  // network-partitioning). If the chain-scoped key is empty but the bare one has
+  // data, adopt it forward into the active chain's partition and drop the bare
+  // key (that data is necessarily from the chain in use at migration time). One
+  // way, non-destructive on error. Must run before the localStorage legacy tier.
+  if (arr.length === 0 && ukey(username) !== ukeyBare(username)) {
+    try {
+      const bare = (await utxoDB().getItem<StealthUTXO[]>(ukeyBare(username))) ?? [];
+      if (bare.length > 0) {
+        arr = bare;
+        await utxoDB().setItem(k, arr);
+        await utxoDB().removeItem(ukeyBare(username));
+      }
+    } catch { /* on any error, leave the bare key untouched */ }
+  }
+
   // TEMP migration (remove alongside localstorage-migrate.tsx once all existing
   // testers have logged in once post-change): UTXOs used to live in localStorage.
   // If idb is empty but the legacy array exists, adopt it into idb and drop the
@@ -234,6 +266,14 @@ export const hydrateStealthStore = async (username: string): Promise<void> => {
 
 export const getStealthUTXOs = (username: string): StealthUTXO[] => readUtxos(username);
 
+// Spendable UTXOs only — drops the tombstoned (spentAt) ones. Use this for every
+// balance sum and spend planner so dead, one-time addresses stop costing RPC.
+// History / receive / merge paths keep using the raw getStealthUTXOs (a spent
+// UTXO re-discovered after a cursor reset must dedup against its tombstone, not
+// resurrect as fresh).
+export const getSpendableUTXOs = (username: string): StealthUTXO[] =>
+  readUtxos(username).filter((u) => !u.spentAt);
+
 export const getLastScannedBlock = (username: string): bigint | null => {
   const { block } = readCursor(username);
   return block ? BigInt(block) : null;
@@ -258,7 +298,9 @@ export const saveStealthScan = (
 export const addStealthUTXO = (username: string, utxo: StealthUTXO): void => {
   const existing = readUtxos(username);
   if (existing.some((u) => u.stealthAddress.toLowerCase() === utxo.stealthAddress.toLowerCase())) return;
-  const next = [...existing, utxo];
+  // No on-chain blob backs these (ghost-mode / Courier) → the local note is the
+  // only spending-key material. Mark localOnly so purge never hard-deletes them.
+  const next = [...existing, { ...utxo, localOnly: true }];
   writeUtxos(username, next);
   const cur = readCursor(username);
   writeCursor(username, { block: cur.block, count: next.length });
@@ -280,12 +322,56 @@ export const patchStealthUTXO = (
   );
 };
 
+// Hard-removes one UTXO (matched by address) and fixes the cursor count so it
+// stays a valid change signal. Unlike patch/hide this changes the set length —
+// only ever call it on re-derivable notes (a chain re-scan can re-find them);
+// NEVER on localOnly notes. applyStealthCleanup enforces that.
+export const removeStealthUTXO = (username: string, stealthAddress: string): void => {
+  const a = stealthAddress.toLowerCase();
+  const next = readUtxos(username).filter((u) => u.stealthAddress.toLowerCase() !== a);
+  writeUtxos(username, next);
+  const cur = readCursor(username);
+  writeCursor(username, { block: cur.block, count: next.length });
+};
+
+// Called when a refresh observes a previously-funded UTXO drained to 0. In
+// "tombstone" mode (default) it stamps spentAt so the address drops out of
+// future reads but the record + spending key survive. In "purge" mode it hard-
+// removes re-derivable notes (smaller local footprint) but STILL only tombstones
+// localOnly notes — deleting those = funds unspendable forever. Idempotent.
+export const applyStealthCleanup = (username: string, stealthAddress: string): void => {
+  const a = stealthAddress.toLowerCase();
+  const utxo = readUtxos(username).find((u) => u.stealthAddress.toLowerCase() === a);
+  if (!utxo || utxo.spentAt) return; // unknown or already tombstoned → no-op
+  if (getUtxoCleanup() === "purge" && !utxo.localOnly) {
+    removeStealthUTXO(username, stealthAddress);
+  } else {
+    patchStealthUTXO(username, stealthAddress, { spentAt: Date.now() });
+  }
+};
+
+// One-shot sweep: hard-remove every tombstoned re-derivable note (localOnly
+// stays). For the "purge now" action when a user opts into minimal footprint.
+export const purgeSpentUTXOs = (username: string): void => {
+  const next = readUtxos(username).filter((u) => !(u.spentAt && !u.localOnly));
+  writeUtxos(username, next);
+  const cur = readCursor(username);
+  writeCursor(username, { block: cur.block, count: next.length });
+};
+
 // ── UI preferences ───────────────────────────────────────────────────────────
+
+export type UtxoCleanup = "tombstone" | "purge";
 
 interface Prefs {
   decimals?: number;
   symbol?: string;
   hideBalance?: boolean; // mask the balance + amounts with "*" (sticky across F5)
+  // Spent-UTXO policy. "tombstone" (default): keep the record, just stop querying
+  // it. "purge": also hard-delete re-derivable spent notes (localOnly always kept).
+  // UI switch is locked to "tombstone" for now; the purge path is wired for when
+  // it unlocks.
+  utxoCleanup?: UtxoCleanup;
 }
 
 // Default to ETH's real 18 — now that the wallet handles actual ETH/ERC20s, the
@@ -325,3 +411,8 @@ export const setSymbolConfig = (symbol: string): void => patchPrefs({ symbol });
 export const getHideBalance = (): boolean => readPrefs().hideBalance ?? false;
 
 export const setHideBalance = (hide: boolean): void => patchPrefs({ hideBalance: hide });
+
+// Spent-UTXO policy (see Prefs). Default "tombstone"; switch locked there for now.
+export const getUtxoCleanup = (): UtxoCleanup => readPrefs().utxoCleanup ?? "tombstone";
+
+export const setUtxoCleanup = (mode: UtxoCleanup): void => patchPrefs({ utxoCleanup: mode });

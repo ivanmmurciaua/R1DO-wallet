@@ -1,5 +1,5 @@
 import { Address, http, fallback } from "viem";
-import { activeNetwork, activeRpcUrls } from "@/lib/networks";
+import { activeRpcUrls } from "@/lib/networks";
 
 // localStorage globals — namespaced under r1do/wallet/v1 (see lib/localstorage.tsx).
 export const LOCAL_WALLET_LIST = "r1do/wallet/v1/wallets";
@@ -16,10 +16,18 @@ export const RPC_URL = RPC_URLS[0];
 // Shared viem transport with automatic failover (tries RPC_URLS in order).
 // Name kept for back-compat; it follows the active chain, not Sepolia per se.
 export const sepoliaTransport = () => fallback(RPC_URLS.map((u) => http(u)));
-// Bundler/paymaster URL-path slug for the active chain (Pimlico).
-export const CHAIN_NAME = activeNetwork().bundlerSlug;
-export const BUNDLER_URL = `https://api.pimlico.io/v2/${CHAIN_NAME}/rpc?apikey=${process.env.NEXT_PUBLIC_PIMLICO_API_KEY}`;
-export const PAYMASTER_URL = `https://api.pimlico.io/v2/${CHAIN_NAME}/rpc?apikey=${process.env.NEXT_PUBLIC_PIMLICO_API_KEY}`;
+// Bundler + paymaster go through our OWN server proxy (app/api/pimlico) so the
+// Pimlico API key never reaches the client bundle — it lives server-side as
+// PIMLICO_API_KEY (NOT NEXT_PUBLIC_). The relay-kit just sees a JSON-RPC URL;
+// the proxy injects the key and forwards to Pimlico. Bundler and paymaster share
+// the same upstream, so one route serves both. Built as an absolute URL from the
+// runtime origin (client-only); on server/SSR `window` is absent and it falls
+// back to a relative path, never actually used (wallet init runs client-side).
+// NOTE: the static IPFS export has no server → no proxy; that build is frozen.
+const PIMLICO_PROXY_PATH = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/pimlico`;
+const PIMLICO_PROXY_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
+export const BUNDLER_URL = `${PIMLICO_PROXY_ORIGIN}${PIMLICO_PROXY_PATH}`;
+export const PAYMASTER_URL = BUNDLER_URL;
 // v2: encrypted username directory (R1DODirectory.sol). Optional — login
 // never depends on it; it only powers pay-by-username.
 export const DIRECTORY_ADDRESS = process.env

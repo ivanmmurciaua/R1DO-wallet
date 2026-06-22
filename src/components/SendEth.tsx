@@ -8,7 +8,7 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { smartSend, smartSendToken, getStealthTotal } from "@/lib/deploy";
 import { readDirectory } from "@/lib/registry-v2";
 import { getTokenBalances } from "@/lib/balances";
-import { getStealthUTXOs } from "@/lib/localstorage";
+import { getSpendableUTXOs, getWalletMeta } from "@/lib/localstorage";
 import { nativeAsset, activeTokens, type Asset } from "@/lib/assets";
 import { parseUnits, formatUnits, zeroAddress, createPublicClient } from "viem";
 import { activeChain, networkName } from "@/lib/networks";
@@ -44,6 +44,7 @@ const recipientFromQr = (text: string): string => {
 };
 
 export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) => {
+  const privacy = getWalletMeta(username)?.privacy ?? false;
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
   const [recipient, setRecipient] = useState("");
@@ -72,7 +73,9 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
         const client = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
         const safe = (await wallet.protocolKit.getAddress()) as `0x${string}`;
         const mainWei = BigInt((await wallet.protocolKit.getBalance()).toString());
-        const stealthWei = await getStealthTotal(username);
+        // Only a private wallet holds stealth funds — a public one never scans, so
+        // skip the stealth store entirely (no needless reads, no impression of it).
+        const stealthWei = privacy ? await getStealthTotal(username) : 0n;
 
         const map = new Map<string, bigint>();
         map.set("native", mainWei + stealthWei);
@@ -80,7 +83,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
         // Per token, read over the main Safe + the stealth addresses TAGGED with
         // that token (so private holdings are detected and shown), and sum. The
         // tag narrows each read to the right addresses.
-        const stealthUtxos = getStealthUTXOs(username);
+        const stealthUtxos = privacy ? getSpendableUTXOs(username) : [];
         const tokens = activeTokens();
         await Promise.all(
           tokens.map(async (t) => {
@@ -101,7 +104,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
     return () => {
       alive = false;
     };
-  }, [wallet, username]);
+  }, [wallet, username, privacy]);
 
   const symbol = asset.symbol;
   const decimals = asset.decimals;

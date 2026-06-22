@@ -15,7 +15,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { activeChain } from "@/lib/networks";
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { log } from "./common";
-import { getStealthUTXOs } from "./localstorage";
+import { getSpendableUTXOs } from "./localstorage";
 import { getWalletCredential } from "./credstore";
 import { loadFromDevice } from "./passkeys";
 import {
@@ -116,6 +116,40 @@ export const sendTxViaSafe = async (
     }
   } catch (e: unknown) {
     await log("sendTxViaSafe", e);
+    throw e;
+  }
+  return "";
+};
+
+/**
+ * Batch sibling of sendTxViaSafe — submits SEVERAL pre-built calls as ONE
+ * sponsored UserOp (Safe executes them atomically, in order). Used for the ERC20
+ * shield, which is [approve(proxy, amount), shield]: the approve must land in the
+ * same op so the proxy can transferFrom. A single call works too (native shield).
+ * Returns the tx hash.
+ */
+export const sendTxsViaSafe = async (
+  wallet: Safe4337Pack,
+  txs: { to: string; data: string; value: string }[],
+): Promise<string> => {
+  if (txs.length === 0) throw new Error("sendTxsViaSafe: no calls");
+  try {
+    console.log(`[sendTxsViaSafe] ${txs.length} call(s): ${txs.map((t) => t.to).join(", ")}`);
+    const safeOperation = await wallet.createTransaction({
+      transactions: txs.map((t) => ({ to: t.to, data: t.data, value: t.value })),
+    });
+    const signedOp = await wallet.signSafeOperation(safeOperation);
+    if (signedOp) {
+      const userOpHash = await wallet.executeTransaction({ executable: signedOp });
+      console.log(`[sendTxsViaSafe] UserOp submitted: ${userOpHash}`);
+      const receipt = await waitForUserOpReceipt(wallet, userOpHash);
+      if (!receipt.success) throw new Error("Transaction reverted on-chain");
+      const txHash = receipt.receipt.transactionHash;
+      console.log(`[sendTxsViaSafe] ✓ confirmed — tx: ${txHash}`);
+      return txHash;
+    }
+  } catch (e: unknown) {
+    await log("sendTxsViaSafe", e);
     throw e;
   }
   return "";
@@ -457,7 +491,7 @@ export const spendStealthUTXO = async (
 export const getStealthCoins = async (
   username: string,
 ): Promise<{ utxo: StealthUTXO; balance: bigint }[]> => {
-  const utxos = getStealthUTXOs(username);
+  const utxos = getSpendableUTXOs(username);
   if (utxos.length === 0) return [];
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
   const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
@@ -468,7 +502,7 @@ export const getStealthCoins = async (
 // Total shieldable balance held across the user's stealth UTXOs (the source
 // "coin" total for the privacy-by-default deposit).
 export const getStealthTotal = async (username: string): Promise<bigint> => {
-  const utxos = getStealthUTXOs(username);
+  const utxos = getSpendableUTXOs(username);
   if (utxos.length === 0) return 0n;
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
   const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
@@ -542,7 +576,7 @@ export const smartShield = async (
   }
   const keys = await derivePQKeysFromPRF(prf);
 
-  const utxos = getStealthUTXOs(username);
+  const utxos = getSpendableUTXOs(username);
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
   const shieldBalances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
   const candidates = utxos
@@ -686,7 +720,7 @@ export const smartSend = async (
   }
   const keys = await derivePQKeysFromPRF(prf);
 
-  const utxos = getStealthUTXOs(username);
+  const utxos = getSpendableUTXOs(username);
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
   const sendBalances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
   const candidates = utxos
@@ -801,7 +835,7 @@ export const smartSendToken = async (
 
   // Only UTXOs holding THIS token are spendable for it — a USDT UTXO can't pay
   // DAI. The tag narrows the read to the right addresses.
-  const tokenUtxos = getStealthUTXOs(username).filter((u) => u.asset?.toLowerCase() === token.toLowerCase());
+  const tokenUtxos = getSpendableUTXOs(username).filter((u) => u.asset?.toLowerCase() === token.toLowerCase());
   const sendBalances = await getTokenBalances(publicClient, token, tokenUtxos.map((u) => u.stealthAddress));
   const candidates = tokenUtxos
     .map((utxo, i) => ({ utxo, balance: sendBalances[i] ?? 0n }))

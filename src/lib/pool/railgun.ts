@@ -28,6 +28,7 @@ import {
   getChainTxidsStillPendingSpentPOIs,
   setOnWalletPOIProofProgressCallback,
   populateShieldBaseToken,
+  populateShield,
   gasEstimateForUnprovenTransfer,
   generateTransferProof,
   populateProvedTransfer,
@@ -43,6 +44,7 @@ import * as snarkjs from "snarkjs";
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 import { Mnemonic, JsonRpcProvider } from "ethers";
+import { encodeFunctionData } from "viem";
 import { RPC_URLS } from "@/app/constants";
 import { activeNetwork, type NetworkId } from "@/lib/networks";
 
@@ -61,7 +63,7 @@ export const POOL_NETWORK = (() => {
   return name;
 })();
 const TXID = TXIDVersion.V2_PoseidonMerkle;
-const { chain: CHAIN, baseToken } = NETWORK_CONFIG[POOL_NETWORK];
+const { chain: CHAIN, baseToken, proxyContract: POOL_PROXY } = NETWORK_CONFIG[POOL_NETWORK];
 const WETH = baseToken.wrappedAddress;
 // Primary RPC (PublicNode) for the light ethers reads (block number, feeData);
 // Railgun's heavy batched scans get the full failover list via loadProvider.
@@ -331,6 +333,76 @@ export async function populateShieldTx(
   };
 }
 
+// Minimal ERC20 approve — the only extra write an ERC20 shield needs (the proxy
+// pulls the tokens with transferFrom).
+const ERC20_APPROVE_ABI = [
+  {
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    name: "approve",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+export type ShieldCall = { to: string; data: string; value: string };
+
+/* ── shield (asset-agnostic) ──────────────────────────────────────────────
+   Build the on-chain shield as a list of calls the caller submits in ONE Safe
+   UserOp (the caller never touches the SDK; it just batches what it's given):
+     · native (tokenAddress null) → the existing base-token shield, a single
+       call (the ETH `value` rides its own field, no approve needed).
+     · ERC20 → TWO calls: approve(proxy, amount) so Railgun's proxy can
+       transferFrom, then the shield itself (value 0). Batched, so there's no
+       standing allowance and no extra passkey tap.
+   Recipient is always this user's own 0zk. */
+export async function populateShieldCalls(
+  tokenAddress: string | null,
+  amount: bigint,
+): Promise<ShieldCall[]> {
+  if (!poolWallet) throw new Error("no 0zk wallet — unlock first");
+  if (!shieldPrivateKey) throw new Error("shield key not derived");
+
+  if (!tokenAddress) {
+    // Native base-token path — reuse the single-call builder above.
+    return [await populateShieldTx(amount)];
+  }
+
+  const { transaction } = await populateShield(
+    TXID,
+    POOL_NETWORK,
+    shieldPrivateKey,
+    [{ tokenAddress, amount, recipientAddress: poolWallet.railgunAddress }],
+    [], // no NFTs
+    undefined,
+  );
+
+  // The proxy is what runs transferFrom on a direct shield — approve it for
+  // exactly `amount`. Warn (don't fail) if the SDK ever targets something else,
+  // so a future relay-adapt routing surfaces instead of silently under-approving.
+  if (transaction.to && (transaction.to as string).toLowerCase() !== POOL_PROXY.toLowerCase()) {
+    console.warn(`[pool] shield target ${transaction.to} ≠ proxy ${POOL_PROXY} — approving proxy anyway`);
+  }
+  const approveData = encodeFunctionData({
+    abi: ERC20_APPROVE_ABI,
+    functionName: "approve",
+    args: [POOL_PROXY as `0x${string}`, amount],
+  });
+
+  return [
+    { to: tokenAddress, data: approveData, value: "0" },
+    {
+      to: transaction.to as string,
+      data: transaction.data as string,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      value: BigInt((transaction as any).value ?? 0n).toString(),
+    },
+  ];
+}
+
 /* ── transfer (STEP 3 — private 0zk → 0zk) ────────────────────────────────
    Has a ZK proof: gasEstimate → generateTransferProof (Groth16 ~9s, with a
    progress callback) → populateProvedTransfer → {to,data,value}. The proven tx
@@ -493,6 +565,31 @@ export function onPoolBalances(cb: (b: PoolBalances) => void): void {
   cb({ ...balances });
 }
 
+// Per-token shielded balances — the full picture (the native `balances` above is
+// just the WETH slice of this, kept for the WETH-centric send/unshield flows).
+// Keyed by lowercased token address. The balance callback fires once PER BUCKET
+// carrying that bucket's full token list, so each event resets that one bucket
+// across all known tokens, then applies the list.
+export type TokenBuckets = {
+  spendable: bigint;
+  missingExternal: bigint;
+  missingInternal: bigint;
+  shieldPending: bigint;
+};
+const tokenBalances = new Map<string, TokenBuckets>();
+let onTokenBalances: ((m: Map<string, TokenBuckets>) => void) | null = null;
+
+/** Snapshot of every shielded token's balances (by lowercased token address). */
+export function getPoolTokenBalances(): Map<string, TokenBuckets> {
+  return new Map(tokenBalances);
+}
+
+/** Subscribe to per-token balance updates (fires immediately with the current). */
+export function onPoolTokenBalances(cb: (m: Map<string, TokenBuckets>) => void): void {
+  onTokenBalances = cb;
+  cb(new Map(tokenBalances));
+}
+
 /* POI activity — so the UI can clearly tell the user "there's a pending POI
    being finalized" (transfer's change/output need a spent-POI WE generate). */
 export type PoolActivity = {
@@ -516,15 +613,42 @@ function wireCallbacks() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setOnBalanceUpdateCallback((e: any) => {
     if (!poolWallet || e.railgunWalletID !== poolWallet.id) return;
+    // Which TokenBuckets field this bucket maps to (ignore ShieldBlocked /
+    // ProofSubmitted / Spent — not part of the spendable/pending picture).
+    const field: keyof TokenBuckets | undefined = (
+      {
+        Spendable: "spendable",
+        MissingExternalPOI: "missingExternal",
+        MissingInternalPOI: "missingInternal",
+        ShieldPending: "shieldPending",
+      } as Record<string, keyof TokenBuckets>
+    )[e.balanceBucket];
+    if (!field) return;
+
+    // The event carries the FULL token list for this one bucket → zero the field
+    // across known tokens first, then apply, so a token that left this bucket
+    // drops to 0 (not stale).
+    for (const v of tokenBalances.values()) v[field] = 0n;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const w = e.erc20Amounts.find((a: any) => a.tokenAddress.toLowerCase() === WETH.toLowerCase());
-    const amt = w ? BigInt(w.amount) : 0n;
-    if (e.balanceBucket === "Spendable") balances.spendable = amt;
-    else if (e.balanceBucket === "MissingExternalPOI") balances.missingExternal = amt;
-    else if (e.balanceBucket === "MissingInternalPOI") balances.missingInternal = amt;
-    else if (e.balanceBucket === "ShieldPending") balances.shieldPending = amt;
-    console.log(`[pool] balance: ${e.balanceBucket} = ${amt}`);
+    for (const a of e.erc20Amounts as any[]) {
+      const k = (a.tokenAddress as string).toLowerCase();
+      const cur = tokenBalances.get(k) ?? { spendable: 0n, missingExternal: 0n, missingInternal: 0n, shieldPending: 0n };
+      cur[field] = BigInt(a.amount);
+      tokenBalances.set(k, cur);
+    }
+
+    // Keep the WETH-centric `balances` in sync for the existing native flows.
+    const weth = tokenBalances.get(WETH.toLowerCase());
+    balances.spendable = weth?.spendable ?? 0n;
+    balances.missingExternal = weth?.missingExternal ?? 0n;
+    balances.missingInternal = weth?.missingInternal ?? 0n;
+    balances.shieldPending = weth?.shieldPending ?? 0n;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const summary = (e.erc20Amounts as any[]).map((a) => `${a.tokenAddress}=${a.amount}`).join(", ") || "(none)";
+    console.log(`[pool] balance: ${e.balanceBucket} — ${summary}`);
     onBalances?.({ ...balances });
+    onTokenBalances?.(new Map(tokenBalances));
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -631,7 +755,9 @@ export async function resetPool(): Promise<void> {
   balances.missingExternal = 0n;
   balances.missingInternal = 0n;
   balances.shieldPending = 0n;
+  tokenBalances.clear();
   onBalances = null;
+  onTokenBalances = null;
   activity.finalizing = false;
   activity.generatingProof = false;
   activity.proofProgress = 0;

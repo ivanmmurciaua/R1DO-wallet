@@ -7,7 +7,7 @@ import { getStealthBalances } from "@/lib/balances";
 import { sepoliaTransport } from "@/app/constants";
 import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
-import { getDecimals, getSymbol, getWalletMeta, getStealthUTXOs, DEFAULT_DECIMALS, DEFAULT_SYMBOL } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getWalletMeta, getSpendableUTXOs, applyStealthCleanup, DEFAULT_DECIMALS, DEFAULT_SYMBOL } from "@/lib/localstorage";
 import { useScanning } from "@/lib/scanState";
 
 type props = {
@@ -67,11 +67,20 @@ export default function AccountDetails({ username, wallet, address }: props) {
     let mounted = true;
 
     const fetchStealthBalances = async () => {
-      const utxos = getStealthUTXOs(username);
+      const utxos = getSpendableUTXOs(username).filter((u) => !u.asset); // native headline
       if (utxos.length === 0) return;
 
       const raws = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
       const balances = raws.map((raw) => parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4)));
+
+      // Tombstone any native address that reads 0 — it drops out of future reads
+      // (the multicall above shrinks over time). Confirmed 0 only: a thrown read
+      // never reaches here. TEMP backlog sweep: tombstone even without a prior
+      // receivedAt (cleans up addresses spent before tombstoning existed), except
+      // a Courier receive still awaiting funds (localOnly + never funded = pending).
+      utxos.forEach((u, i) => {
+        if (raws[i] === 0n && !(u.localOnly && !u.receivedAt)) applyStealthCleanup(username, u.stealthAddress);
+      });
 
       if (!mounted) return;
       setStealthTotal(balances.reduce((sum, b) => sum + b, 0));
@@ -137,7 +146,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
           )}
         </div>
       </div>
-      <Settings />
+      <Settings privacy={privacy} />
     </div>
   ) : (
     <CircularProgress size={50} sx={{ alignItems: "center", mb: 2, mt: 3 }} />

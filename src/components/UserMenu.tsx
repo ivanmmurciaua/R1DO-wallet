@@ -30,7 +30,7 @@ import { activeChain, activeChainId, networkName, explorerTxUrl } from "@/lib/ne
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { activeTokens, assetByAddress, formatAsset, type Asset } from "@/lib/assets";
 import { getLastBlock } from "@/lib/client";
-import { getDecimals, getSymbol, getStealthUTXOs, getWalletMeta, saveStealthScan, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealthCleanup, getWalletMeta, saveStealthScan, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
@@ -130,7 +130,9 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, a
     const fetchTokens = async () => {
       try {
         if (tokenBals === null) setTokensLoading(true);
-        const stealth = getStealthUTXOs(username).map((u) => u.stealthAddress);
+        // Public wallets hold no stealth funds (they never scan) → don't touch the
+        // stealth store; query token balances on the main address only.
+        const stealth = privacy ? getSpendableUTXOs(username).map((u) => u.stealthAddress) : [];
         const addrs = [address, ...stealth] as `0x${string}`[];
         const out = await Promise.all(
           tokens.map(async (t) => {
@@ -278,7 +280,7 @@ const handleBackToMenu = (message: string = "") => {
   }, [wallet, fetchTransactions]);
 
   const fetchStealthBalances = useCallback(async () => {
-    const utxos = getStealthUTXOs(username);
+    const utxos = getSpendableUTXOs(username);
     if (utxos.length === 0) return;
     const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
 
@@ -324,8 +326,16 @@ const handleBackToMenu = (message: string = "") => {
     // Stamp first-funding once (sequential → no read-modify-write race). This is
     // the persistent "received" signal the ReceivePrivate list reads, so status
     // never needs its own balance fetch.
-    for (const { utxo, amount } of rows) {
+    for (const { utxo, raw, amount } of rows) {
       if (amount > 0 && !utxo.receivedAt) patchStealthUTXO(username, utxo.stealthAddress, { receivedAt: Date.now() });
+      // Tombstone any address that reads 0 here: it leaves every future read
+      // (native or token group above). Confirmed 0 only — a thrown multicall
+      // never reaches here. TEMP backlog sweep: we tombstone even WITHOUT a prior
+      // receivedAt so addresses spent before tombstoning existed get cleaned up
+      // too. The ONLY exception is a Courier receive address still awaiting funds
+      // (localOnly + never funded) — that 0 is "pending", not "spent". localOnly
+      // notes are never hard-purged (the cleanup helper enforces it), only tombstoned.
+      else if (raw === 0n && !(utxo.localOnly && !utxo.receivedAt)) applyStealthCleanup(username, utxo.stealthAddress);
     }
 
     setStealthTxs(

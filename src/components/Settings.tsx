@@ -1,15 +1,19 @@
 "use client";
 import { useState } from "react";
 import SettingsIcon from "@mui/icons-material/Settings";
-import { IconButton, Paper, TextField } from "@mui/material";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import { IconButton, Paper, TextField, MenuItem, Tooltip } from "@mui/material";
 import {
   getSymbol,
   setSymbolConfig,
   getDecimals,
   setDecimalsConfig,
+  getUtxoCleanup,
   DEFAULT_SYMBOL,
   DEFAULT_DECIMALS,
 } from "@/lib/localstorage";
+import { NETWORKS, activeNetwork } from "@/lib/networks";
 
 const inputSx = {
   "& .MuiInputBase-input": {
@@ -22,14 +26,20 @@ const inputSx = {
   },
 };
 
-export function Settings() {
+export function Settings({ privacy = false }: { privacy?: boolean }) {
   const [open, setOpen] = useState(false);
   const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   const [decimals, setDecimals] = useState(DEFAULT_DECIMALS);
+  // Both controls below are LOCKED for now (single network, tombstone-only). The
+  // UI is wired so flipping `disabled` off later is all it takes to ship them.
+  const [cleanup, setCleanup] = useState<string>("tombstone");
+  const [network, setNetwork] = useState<string>(activeNetwork().id);
 
   const handleOpen = () => {
     setSymbol(getSymbol());
     setDecimals(getDecimals());
+    setCleanup(getUtxoCleanup());
+    setNetwork(activeNetwork().id);
     setOpen(true);
   };
 
@@ -101,7 +111,7 @@ export function Settings() {
 
             <div>
               <p style={{ fontSize: "0.8rem", marginBottom: "10px" }}>
-                Unit display
+                Native unit display
               </p>
               <div style={{ display: "flex", gap: "0.8rem" }}>
                 <TextField
@@ -122,6 +132,60 @@ export function Settings() {
                 />
               </div>
             </div>
+
+            <div>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+                Network
+                <LockOutlinedIcon sx={{ fontSize: "0.8rem", opacity: 0.5 }} />
+              </p>
+              <TextField
+                select
+                size="small"
+                value={network}
+                disabled
+                onChange={(e) => setNetwork(e.target.value)}
+                sx={{ ...inputSx, width: "100%" }}
+              >
+                {NETWORKS.map((n) => (
+                  <MenuItem key={n.id} value={n.id}>{n.chain.name}</MenuItem>
+                ))}
+              </TextField>
+            </div>
+
+            {privacy && (
+            <div>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+                Spent addresses
+                <LockOutlinedIcon sx={{ fontSize: "0.8rem", opacity: 0.5 }} />
+                <Tooltip
+                  arrow
+                  title={
+                    <span style={{ fontSize: "0.7rem", lineHeight: 1.6 }}>
+                      One-time addresses never refund, so once drained they stop
+                      being queried. <b>Keep</b> retains the spent record (history).{" "}
+                      <b>Purge</b> also deletes the spent record to shrink local
+                      storage — except notes that can only be spent from this
+                      device, which are always kept (deleting them would lose the
+                      funds for good).
+                    </span>
+                  }
+                >
+                  <InfoOutlinedIcon sx={{ fontSize: "0.8rem", opacity: 0.6, cursor: "help" }} />
+                </Tooltip>
+              </p>
+              <TextField
+                select
+                size="small"
+                value={cleanup}
+                disabled
+                onChange={(e) => setCleanup(e.target.value)}
+                sx={{ ...inputSx, width: "100%" }}
+              >
+                <MenuItem value="tombstone">Keep spent records</MenuItem>
+                <MenuItem value="purge">Purge spent records</MenuItem>
+              </TextField>
+            </div>
+            )}
 
             <div>
               <p style={{ fontSize: "0.8rem" }}>
