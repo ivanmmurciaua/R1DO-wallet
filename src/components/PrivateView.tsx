@@ -142,12 +142,14 @@ export default function PrivateView({
   const [sendResolving, setSendResolving] = useState(false);
   const [sendResolveError, setSendResolveError] = useState("");
   const [sendAmt, setSendAmt] = useState("");
+  const [sendAsset, setSendAsset] = useState<Asset>(nativeAsset()); // which shielded asset to transfer
   const [sendStage, setSendStage] = useState<"idle" | "resolving" | "proving" | "submitting">("idle");
   const [proveProgress, setProveProgress] = useState(0);
   // Unshield (private 0zk → public address) state
   const [unshieldOpen, setUnshieldOpen] = useState(false);
   const [unshieldTo, setUnshieldTo] = useState("");
   const [unshieldAmt, setUnshieldAmt] = useState("");
+  const [unshieldAsset, setUnshieldAsset] = useState<Asset>(nativeAsset()); // which shielded asset to withdraw
   const [unshieldStage, setUnshieldStage] = useState<"idle" | "proving" | "submitting">("idle");
   const [unshieldProgress, setUnshieldProgress] = useState(0);
   // Railgun protocol fees (basis points), read live in bootEngine. The "exact"
@@ -409,6 +411,7 @@ export default function PrivateView({
     setSendResolveError("");
     setSendResolving(false);
     setSendAmt("");
+    setSendAsset(nativeAsset());
     setSendStage("idle");
     setSendOpen(true);
   };
@@ -462,12 +465,12 @@ export default function PrivateView({
     }
     let amountWei: bigint;
     try {
-      amountWei = parseUnits(amt, decimals);
+      amountWei = parseUnits(amt, sendDecimals);
     } catch {
       setToast({ msg: "Enter a valid amount", sev: "error" });
       return;
     }
-    if (amountWei > spendable) {
+    if (amountWei > sendSpendable) {
       setToast({ msg: "Amount exceeds your spendable balance", sev: "error" });
       return;
     }
@@ -484,9 +487,10 @@ export default function PrivateView({
       }
       setSendStage("proving");
       setProveProgress(0);
-      console.log(`[private] transfer ${amt} ${symbol} → ${zkAddr.slice(0, 12)}…`);
+      console.log(`[private] transfer ${amt} ${sendSymbol} → ${zkAddr.slice(0, 12)}…`);
       const mod = await import("@/lib/pool/railgun");
-      const tx = await mod.populateTransferTx(zkAddr, amountWei, (p) => setProveProgress(p));
+      const tokenAddress = sendAsset.kind === "native" ? undefined : sendAsset.address;
+      const tx = await mod.populateTransferTx(zkAddr, amountWei, (p) => setProveProgress(p), tokenAddress);
       setSendStage("submitting");
       const deploy = await import("@/lib/deploy");
       let txHash: string;
@@ -533,6 +537,7 @@ export default function PrivateView({
     setSendOpen(false);
     setUnshieldTo("");
     setUnshieldAmt("");
+    setUnshieldAsset(nativeAsset());
     setUnshieldStage("idle");
     setUnshieldStealth(null);
     setUnshieldAnnounce(true);
@@ -578,24 +583,31 @@ export default function PrivateView({
     }
     let typedWei: bigint;
     try {
-      typedWei = parseUnits(amt, decimals);
+      typedWei = parseUnits(amt, unDecimals);
     } catch {
       setToast({ msg: "Enter a valid amount", sev: "error" });
       return;
     }
+    const isToken = unshieldAsset.kind !== "native";
+    if (isToken && isPrivacy) {
+      // Private ERC20 unshield (ephemeral relay + stealth dest) is the next sub-step.
+      setToast({ msg: `Private ${unSymbol} unshield is coming soon`, sev: "info" });
+      return;
+    }
     // "exact" mode grosses-up so the address receives the typed amount; capped at
     // spendable (can't unshield more than you hold → falls back to gross there).
-    const { moves } = computeFee(typedWei, fees.unshieldBps, unshieldExact, spendable);
-    if (moves > spendable) {
+    const { moves } = computeFee(typedWei, fees.unshieldBps, unshieldExact, unSpendable);
+    if (moves > unSpendable) {
       setToast({ msg: "Amount exceeds your spendable balance", sev: "error" });
       return;
     }
     try {
       setUnshieldStage("proving");
       setUnshieldProgress(0);
-      console.log(`[private] unshield ${fmt(moves, decimals)} ${symbol} (net ${amt}) → ${to}`);
+      console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
       const mod = await import("@/lib/pool/railgun");
-      const tx = await mod.populateUnshieldTx(to, moves, (p) => setUnshieldProgress(p));
+      const tokenAddress = isToken ? unshieldAsset.address : undefined;
+      const tx = await mod.populateUnshieldTx(to, moves, (p) => setUnshieldProgress(p), tokenAddress);
       setUnshieldStage("submitting");
       const deploy = await import("@/lib/deploy");
       let txHash: string;
@@ -753,6 +765,32 @@ export default function PrivateView({
         .map(([addr, b]) => ({ asset: assetByAddress(addr), buckets: b }))
         .filter((r) => !!r.asset && r.buckets.spendable > 0n) as { asset: Asset; buckets: TokenBuckets }[];
 
+  // Send wizard — which shielded asset to transfer + its views/cap. Native uses
+  // the WETH spendable; a token uses its own slice of tokenBals. Selectable =
+  // assets with a shielded spendable >0 (native + the shielded-tokens list).
+  const sendDecimals = sendAsset.kind === "native" ? decimals : sendAsset.decimals;
+  const sendSymbol = sendAsset.kind === "native" ? symbol : sendAsset.symbol;
+  const sendSpendable = sendAsset.kind === "native"
+    ? spendable
+    : (tokenBals?.get(keyOf(sendAsset))?.spendable ?? 0n);
+  const sendAssets: Asset[] = [
+    ...(spendable > 0n ? [nativeAsset()] : []),
+    ...shieldedTokens.map((t) => t.asset),
+  ];
+
+  // Unshield wizard — same per-asset views/cap as send. ERC20 unshield is the
+  // PUBLIC sub-step for now → the token options are offered ONLY on a non-privacy
+  // wallet (privacy unshield ERC20 = next sub-step), so privacy stays native-only.
+  const unDecimals = unshieldAsset.kind === "native" ? decimals : unshieldAsset.decimals;
+  const unSymbol = unshieldAsset.kind === "native" ? symbol : unshieldAsset.symbol;
+  const unSpendable = unshieldAsset.kind === "native"
+    ? spendable
+    : (tokenBals?.get(keyOf(unshieldAsset))?.spendable ?? 0n);
+  const unshieldAssets: Asset[] = [
+    ...(spendable > 0n ? [nativeAsset()] : []),
+    ...(isPrivacy ? [] : shieldedTokens.map((t) => t.asset)),
+  ];
+
   // Assets with a pending POI (native + tokens) — drives the "validating" /
   // finalizing badges for ANY asset, each shown in its own symbol/decimals (we
   // can't sum mixed-decimals into one number, so it's a per-asset list).
@@ -772,21 +810,21 @@ export default function PrivateView({
     const t = sendAmt.trim();
     if (!t) return null;
     try {
-      return parseUnits(t, decimals);
+      return parseUnits(t, sendDecimals);
     } catch {
       return null;
     }
   })();
-  const sendOver = sendAmtWei != null && sendAmtWei > spendable;
+  const sendOver = sendAmtWei != null && sendAmtWei > sendSpendable;
   const sendAmtValid = sendAmtWei != null && sendAmtWei > 0n && !sendOver;
   const sendPct =
-    spendable > 0n && sendAmtWei != null
-      ? Math.min(100, Number((sendAmtWei * 10000n) / spendable) / 100)
+    sendSpendable > 0n && sendAmtWei != null
+      ? Math.min(100, Number((sendAmtWei * 10000n) / sendSpendable) / 100)
       : 0;
   const setSendPct = (p: number) => {
-    if (spendable <= 0n) return;
+    if (sendSpendable <= 0n) return;
     const bips = BigInt(Math.round(Math.max(0, Math.min(100, p)) * 100));
-    setSendAmt(formatUnits((spendable * bips) / 10000n, decimals));
+    setSendAmt(formatUnits((sendSpendable * bips) / 10000n, sendDecimals));
   };
   const sendAmtDisplay = sendAmt
     ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 }).format(Number(sendAmt))
@@ -803,7 +841,7 @@ export default function PrivateView({
     }
   };
   const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined, shDecimals);
-  const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, spendable);
+  const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, unSpendable, unDecimals);
 
   const registered = !!registeredZk;
   const btnLabel = working
@@ -1391,12 +1429,31 @@ export default function PrivateView({
                     <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.7, mb: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       To {sendDisplay}
                     </Typography>
+                    {sendAssets.length > 1 && (
+                      <Select
+                        size="small"
+                        fullWidth
+                        value={keyOf(sendAsset)}
+                        disabled={sendBusy}
+                        onChange={(e) => {
+                          const a = sendAssets.find((x) => keyOf(x) === e.target.value);
+                          if (a) { setSendAsset(a); setSendAmt(""); }
+                        }}
+                        sx={{ mb: 1, fontSize: "0.8rem" }}
+                      >
+                        {sendAssets.map((a) => (
+                          <MenuItem key={keyOf(a)} value={keyOf(a)} sx={{ fontSize: "0.8rem" }}>
+                            {a.kind === "native" ? symbol : a.symbol}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    )}
                     <TextField
                       fullWidth
                       size="small"
                       type="number"
                       placeholder="0"
-                      label={`Amount (${symbol})`}
+                      label={`Amount (${sendSymbol})`}
                       value={sendAmt}
                       onChange={(e) => setSendAmt(e.target.value)}
                       sx={{ mb: 0.5 }}
@@ -1405,7 +1462,7 @@ export default function PrivateView({
                       <Slider
                         value={sendPct}
                         onChange={(_, v) => setSendPct(v as number)}
-                        disabled={spendable <= 0n}
+                        disabled={sendSpendable <= 0n}
                         marks={[0, 25, 50, 75, 100].map((v) => ({ value: v }))}
                         step={1}
                         min={0}
@@ -1420,7 +1477,7 @@ export default function PrivateView({
                             variant="text"
                             size="small"
                             onClick={() => setSendPct(p)}
-                            disabled={spendable <= 0n}
+                            disabled={sendSpendable <= 0n}
                             sx={{ minWidth: 0, px: 1, fontSize: "0.7rem", flex: 1 }}
                           >
                             {p === 100 ? "MAX" : `${p}%`}
@@ -1429,7 +1486,7 @@ export default function PrivateView({
                       </Stack>
                     </Box>
                     <Typography variant="body2" sx={{ fontSize: "0.58rem", color: sendOver ? "error.main" : "text.secondary", opacity: sendOver ? 1 : 0.6, mt: 0.75, mb: 1.25, lineHeight: 1.5 }}>
-                      Spendable: {fmt(spendable, decimals)} {symbol}. First send downloads ~50MB (one-time).
+                      Spendable: {fmt(sendSpendable, sendDecimals)} {sendSymbol}. First send downloads ~50MB (one-time).
                     </Typography>
                     <Button
                       variant="contained"
@@ -1453,7 +1510,7 @@ export default function PrivateView({
                     <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 1.25, mb: 1.25 }}>
                       {[
                         ["To", sendDisplay],
-                        ["Amount", `${sendAmtDisplay} ${symbol}`],
+                        ["Amount", `${sendAmtDisplay} ${sendSymbol}`],
                         ["Type", `Private · ${proto}`],
                         ["Fee", "Free · gas sponsored"],
                       ].map(([label, value], idx, arr) => (
@@ -1585,12 +1642,32 @@ export default function PrivateView({
                   </Box>
                 )}
 
+                {unshieldAssets.length > 1 && (
+                  <Select
+                    size="small"
+                    fullWidth
+                    value={keyOf(unshieldAsset)}
+                    disabled={unshieldBusy}
+                    onChange={(e) => {
+                      const a = unshieldAssets.find((x) => keyOf(x) === e.target.value);
+                      if (a) { setUnshieldAsset(a); setUnshieldAmt(""); }
+                    }}
+                    sx={{ mb: 1, fontSize: "0.8rem" }}
+                  >
+                    {unshieldAssets.map((a) => (
+                      <MenuItem key={keyOf(a)} value={keyOf(a)} sx={{ fontSize: "0.8rem" }}>
+                        {a.kind === "native" ? symbol : a.symbol}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                )}
+
                 <TextField
                   fullWidth
                   size="small"
                   type="number"
                   placeholder="0"
-                  label={`Amount (${symbol})`}
+                  label={`Amount (${unSymbol})`}
                   value={unshieldAmt}
                   onChange={(e) => setUnshieldAmt(e.target.value)}
                   disabled={unshieldBusy}
@@ -1601,7 +1678,7 @@ export default function PrivateView({
                         color="primary"
                         size="small"
                         disabled={unshieldBusy}
-                        onClick={() => setUnshieldAmt(formatUnits(spendable, decimals))}
+                        onClick={() => setUnshieldAmt(formatUnits(unSpendable, unDecimals))}
                         sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
                       >
                         MAX
@@ -1627,8 +1704,8 @@ export default function PrivateView({
                 <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: 1.25, lineHeight: 1.5 }}>
                   {unshieldPreview ? (
                     <>
-                      {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, decimals)} {symbol} →
-                      you receive {fmt(unshieldPreview.receive, decimals)} {symbol}
+                      {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, unDecimals)} {unSymbol} →
+                      you receive {fmt(unshieldPreview.receive, unDecimals)} {unSymbol}
                       {unshieldExact && unshieldPreview.forcedGross ? " · capped to spendable (fee not covered)" : ""}
                       . Funds land on confirmation; the POI finalizes in the background.
                     </>

@@ -35,6 +35,9 @@ import {
   gasEstimateForUnprovenUnshieldBaseToken,
   generateUnshieldBaseTokenProof,
   populateProvedUnshieldBaseToken,
+  gasEstimateForUnprovenUnshield,
+  generateUnshieldProof,
+  populateProvedUnshield,
 } from "@railgun-community/wallet";
 import * as RailgunSDK from "@railgun-community/wallet";
 import { NetworkName, NETWORK_CONFIG, TXIDVersion, EVMGasType } from "@railgun-community/shared-models";
@@ -414,10 +417,13 @@ export async function populateTransferTx(
   toZkAddress: string,
   amount: bigint,
   onProgress?: (pct: number) => void,
+  tokenAddress: string = WETH, // default native (WETH); pass an ERC20 to move that token
 ): Promise<{ to: string; data: string; value: string }> {
   if (!poolWallet) throw new Error("no 0zk wallet — unlock first");
   if (!walletEncryptionKey) throw new Error("encryption key not derived");
-  const recipients = [{ tokenAddress: WETH, amount, recipientAddress: toZkAddress }];
+  // 0zk→0zk transfer is the generic ERC20 path (NOT base-token), pool-internal,
+  // so no approve and no unwrap — just parameterize which token moves.
+  const recipients = [{ tokenAddress, amount, recipientAddress: toZkAddress }];
 
   console.log("[pool] transfer gas estimate…");
   const { gasEstimate } = await gasEstimateForUnprovenTransfer(
@@ -484,9 +490,62 @@ export async function populateUnshieldTx(
   toAddress: string,
   amount: bigint,
   onProgress?: (pct: number) => void,
+  tokenAddress?: string, // undefined/WETH = native (base-token, unwrap→ETH); an ERC20 = generic unshield
 ): Promise<{ to: string; data: string; value: string }> {
   if (!poolWallet) throw new Error("no 0zk wallet — unlock first");
   if (!walletEncryptionKey) throw new Error("encryption key not derived");
+
+  // ERC20 unshield: the generic (NON base-token) path. The proxy already holds
+  // the tokens (NO approve) and sends `tokenAddress` straight to the public 0x —
+  // no unwrap. The 0.25% fee goes to Railgun's treasury as a separate transfer.
+  if (tokenAddress && tokenAddress.toLowerCase() !== WETH.toLowerCase()) {
+    const erc20AmountRecipients = [{ tokenAddress, amount, recipientAddress: toAddress }];
+    console.log("[pool] unshield (ERC20) gas estimate…");
+    const { gasEstimate } = await gasEstimateForUnprovenUnshield(
+      TXID,
+      POOL_NETWORK,
+      poolWallet.id,
+      walletEncryptionKey,
+      erc20AmountRecipients,
+      [], // nft
+      await dummyGas(),
+      undefined, // feeTokenDetails
+      true, // sendWithPublicWallet (self-relay)
+    );
+    console.log("[pool] generating unshield proof (ERC20; 1st time downloads ~50MB artifacts)…");
+    await generateUnshieldProof(
+      TXID,
+      POOL_NETWORK,
+      poolWallet.id,
+      walletEncryptionKey,
+      erc20AmountRecipients,
+      [], // nft
+      undefined, // broadcasterFeeERC20AmountRecipient
+      true, // sendWithPublicWallet
+      undefined, // overallBatchMinGasPrice
+      (p: number) => onProgress?.(Math.round(p)),
+    );
+    console.log("[pool] ✓ unshield proof generated (ERC20)");
+    const { transaction } = await populateProvedUnshield(
+      TXID,
+      POOL_NETWORK,
+      poolWallet.id,
+      erc20AmountRecipients,
+      [], // nft
+      undefined, // broadcasterFeeERC20AmountRecipient
+      true, // sendWithPublicWallet
+      undefined, // overallBatchMinGasPrice
+      await gasDetails(gasEstimate),
+    );
+    return {
+      to: transaction.to as string,
+      data: transaction.data as string,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      value: BigInt((transaction as any).value ?? 0n).toString(),
+    };
+  }
+
+  // Native base-token path (unwrap WETH→ETH) — unchanged.
   const wrappedERC20Amount = { tokenAddress: WETH, amount };
 
   console.log("[pool] unshield gas estimate…");
