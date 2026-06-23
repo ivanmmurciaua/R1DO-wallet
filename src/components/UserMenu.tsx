@@ -328,14 +328,11 @@ const handleBackToMenu = (message: string = "") => {
     // never needs its own balance fetch.
     for (const { utxo, raw, amount } of rows) {
       if (amount > 0 && !utxo.receivedAt) patchStealthUTXO(username, utxo.stealthAddress, { receivedAt: Date.now() });
-      // Tombstone any address that reads 0 here: it leaves every future read
-      // (native or token group above). Confirmed 0 only — a thrown multicall
-      // never reaches here. TEMP backlog sweep: we tombstone even WITHOUT a prior
-      // receivedAt so addresses spent before tombstoning existed get cleaned up
-      // too. The ONLY exception is a Courier receive address still awaiting funds
-      // (localOnly + never funded) — that 0 is "pending", not "spent". localOnly
-      // notes are never hard-purged (the cleanup helper enforces it), only tombstoned.
-      else if (raw === 0n && !(utxo.localOnly && !utxo.receivedAt)) applyStealthCleanup(username, utxo.stealthAddress);
+      // Tombstone an address that was funded (receivedAt) and now reads 0: it's
+      // been spent, so it drops out of every future read. Confirmed 0 only — a
+      // thrown multicall never reaches here. Never funded → leave it (a Courier
+      // receive awaiting funds reads 0 too, but that's "pending", not "spent").
+      else if (raw === 0n && utxo.receivedAt) applyStealthCleanup(username, utxo.stealthAddress);
     }
 
     setStealthTxs(
