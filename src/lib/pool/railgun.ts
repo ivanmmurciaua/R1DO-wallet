@@ -896,6 +896,10 @@ export function startWatcher(): void {
   }
   watcherActive = true;
   console.log("[watcher] POI+balance watcher active (every 20s)");
+  // Paint balances IMMEDIATELY (warm engine reads its cached scan state) so a
+  // funded user never sees a 0 while the first tick's syncTxid/POI work runs.
+  // Enqueued on the engine lock first → resolves before the first watcherTick.
+  withEngineLock(scanBalances).catch((e) => console.warn("[watcher] initial balance paint:", e));
   (async () => {
     while (watcherActive && poolWallet) {
       try {

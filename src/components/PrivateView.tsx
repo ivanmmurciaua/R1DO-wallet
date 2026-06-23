@@ -620,11 +620,6 @@ export default function PrivateView({
       return;
     }
     const isToken = unshieldAsset.kind !== "native";
-    if (isToken && isPrivacy) {
-      // Private ERC20 unshield (ephemeral relay + stealth dest) is the next sub-step.
-      setToast({ msg: `Private ${unSymbol} unshield is coming soon`, sev: "info" });
-      return;
-    }
     // "exact" mode grosses-up so the address receives the typed amount; capped at
     // spendable (can't unshield more than you hold → falls back to gross there).
     const { moves } = computeFee(typedWei, fees.unshieldBps, unshieldExact, unSpendable);
@@ -665,6 +660,9 @@ export default function PrivateView({
           ephemeralPubkey: unshieldStealth.ephemeralPubkey,
           kemCiphertext: unshieldStealth.kemCiphertext,
           blockNumber: 0,
+          // Ghost notes skip the scanner's asset probe, so tag the token here;
+          // else a ghost ERC20 unshield would read as native (0). Native = undefined.
+          ...(isToken ? { asset: unshieldAsset.address as `0x${string}` } : {}),
         };
         if (unshieldAnnounce) {
           try {
@@ -816,7 +814,7 @@ export default function PrivateView({
     : (tokenBals?.get(keyOf(unshieldAsset))?.spendable ?? 0n);
   const unshieldAssets: Asset[] = [
     ...(spendable > 0n ? [nativeAsset()] : []),
-    ...(isPrivacy ? [] : shieldedTokens.map((t) => t.asset)),
+    ...shieldedTokens.map((t) => t.asset), // tokens now offered in BOTH worlds
   ];
 
   // Assets with a pending POI (native + tokens) — drives the "validating" /
