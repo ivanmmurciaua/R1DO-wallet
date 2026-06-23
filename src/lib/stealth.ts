@@ -249,7 +249,21 @@ export interface StealthUTXO {
   memo?:           string;        // optional human label ("rent from Bob")
   viewTag?:        number;        // h[0] — lets us rebuild the ticket for re-check
   receivedAt?:     number;        // epoch ms first seen funded (status + safe-hide)
+  spentAt?:        number;        // epoch ms first seen drained to 0 AFTER funding —
+  //   the tombstone. Its presence means "spent": the UTXO drops out of every
+  //   balance multicall and spend planner (one-time addresses never refund), so
+  //   dead addresses stop costing RPC. Data KEPT (history); purge is opt-in and
+  //   only ever touches re-derivable notes (see localOnly).
+  localOnly?:      boolean;       // true = the local note is the ONLY copy of the
+  //   spending key (ghost-mode unshield / off-chain Courier import — no on-chain
+  //   blob to re-derive from). NEVER hard-purged, even in purge mode: deleting it
+  //   = funds unspendable forever. Absent/false = re-derivable by chain re-scan.
   hidden?:         boolean;       // user hid it from the list (data KEPT — never deleted)
+  // Asset held at this stealth address, TAGGED ONCE on first discovery (the blob
+  // carries no asset). undefined = native ETH; an ERC20 contract address = that
+  // token. One-time addresses ⇒ exactly one asset per UTXO, so this never needs
+  // re-probing: refresh/spend read only this one token, not the whole curated set.
+  asset?:          `0x${string}`;
 }
 
 // Trial-decrypts one blob. Returns the derived stealth Safe address if the
@@ -391,6 +405,27 @@ export async function scanStealthPayments(
           });
         }
       }
+    }
+  }
+
+  // Tag each freshly-found UTXO with its asset ONCE (the blob carries none).
+  // Each curated token is probed in a single Multicall3 over all new addresses;
+  // a stealth address holding a token (>0) is tagged with that token, otherwise
+  // it stays native (undefined). One-time addresses ⇒ one asset per UTXO, so
+  // this never re-runs for known UTXOs — refresh/spend then read only that token.
+  if (utxos.length > 0) {
+    try {
+      const { activeTokens } = await import("@/lib/assets");
+      const { getTokenBalances } = await import("@/lib/balances");
+      const addrs = utxos.map((u) => u.stealthAddress);
+      for (const t of activeTokens()) {
+        const bals = await getTokenBalances(publicClient, t.address as `0x${string}`, addrs);
+        bals.forEach((b, i) => {
+          if (b > 0n && !utxos[i].asset) utxos[i].asset = t.address as `0x${string}`;
+        });
+      }
+    } catch (e) {
+      console.warn("[scanStealthPayments] asset tagging failed (UTXOs stay native):", e);
     }
   }
 

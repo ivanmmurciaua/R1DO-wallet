@@ -5,6 +5,7 @@ import { spendStealthUTXO } from "@/lib/deploy";
 import { loadFromDevice } from "@/lib/passkeys";
 import { readDirectory } from "@/lib/registry-v2";
 import { getDecimals, getSymbol } from "@/lib/localstorage";
+import { assetByAddress } from "@/lib/assets";
 import { getWalletCredential } from "@/lib/credstore";
 import { derivePQKeysFromPRF, generateStealthPayment, isPQMetaAddress, type StealthUTXO } from "@/lib/stealth";
 import { parseUnits, formatUnits } from "viem";
@@ -37,8 +38,11 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const symbol = getSymbol();
-  const decimals = getDecimals();
+  // Token UTXOs (tagged at discovery) spend in the token's own symbol/decimals;
+  // native UTXOs use the themeable ⧫/13 globals. Drives parse, validation and MAX.
+  const tokenAsset = utxo.asset ? assetByAddress(utxo.asset) : undefined;
+  const symbol = tokenAsset?.symbol ?? getSymbol();
+  const decimals = tokenAsset?.decimals ?? getDecimals();
 
   const handleCancel = (message: string = "") => {
     setRecipient("");

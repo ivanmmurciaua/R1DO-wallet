@@ -13,9 +13,9 @@ import { Safe4337Pack } from "@safe-global/relay-kit";
 import { encodeFunctionData, createPublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { activeChain } from "@/lib/networks";
-import { getStealthBalances } from "@/lib/balances";
+import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { log } from "./common";
-import { getStealthUTXOs } from "./localstorage";
+import { getSpendableUTXOs } from "./localstorage";
 import { getWalletCredential } from "./credstore";
 import { loadFromDevice } from "./passkeys";
 import {
@@ -119,6 +119,138 @@ export const sendTxViaSafe = async (
     throw e;
   }
   return "";
+};
+
+/**
+ * Batch sibling of sendTxViaSafe — submits SEVERAL pre-built calls as ONE
+ * sponsored UserOp (Safe executes them atomically, in order). Used for the ERC20
+ * shield, which is [approve(proxy, amount), shield]: the approve must land in the
+ * same op so the proxy can transferFrom. A single call works too (native shield).
+ * Returns the tx hash.
+ */
+export const sendTxsViaSafe = async (
+  wallet: Safe4337Pack,
+  txs: { to: string; data: string; value: string }[],
+): Promise<string> => {
+  if (txs.length === 0) throw new Error("sendTxsViaSafe: no calls");
+  try {
+    console.log(`[sendTxsViaSafe] ${txs.length} call(s): ${txs.map((t) => t.to).join(", ")}`);
+    const safeOperation = await wallet.createTransaction({
+      transactions: txs.map((t) => ({ to: t.to, data: t.data, value: t.value })),
+    });
+    const signedOp = await wallet.signSafeOperation(safeOperation);
+    if (signedOp) {
+      const userOpHash = await wallet.executeTransaction({ executable: signedOp });
+      console.log(`[sendTxsViaSafe] UserOp submitted: ${userOpHash}`);
+      const receipt = await waitForUserOpReceipt(wallet, userOpHash);
+      if (!receipt.success) throw new Error("Transaction reverted on-chain");
+      const txHash = receipt.receipt.transactionHash;
+      console.log(`[sendTxsViaSafe] ✓ confirmed — tx: ${txHash}`);
+      return txHash;
+    }
+  } catch (e: unknown) {
+    await log("sendTxsViaSafe", e);
+    throw e;
+  }
+  return "";
+};
+
+// Minimal ERC20 transfer — the only write a public token send needs.
+const ERC20_TRANSFER_ABI = [
+  {
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    name: "transfer",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+/**
+ * Public ERC20 send — the token sibling of makeTx. Tokens live in the main Safe
+ * (stealth UTXOs hold only native, so there's no chunking/stealth path here —
+ * that's the ERC20 stealth phase). One sponsored UserOp: `transfer(to, amount)`
+ * to the token contract, value 0. Returns the tx hash ("" on failure).
+ */
+export const sendToken = async (
+  wallet: Safe4337Pack,
+  tokenAddress: `0x${string}`,
+  to: `0x${string}`,
+  amount: bigint,
+): Promise<string> => {
+  const data = encodeFunctionData({
+    abi: ERC20_TRANSFER_ABI,
+    functionName: "transfer",
+    args: [to, amount],
+  });
+  return sendTxViaSafe(wallet, { to: tokenAddress, data, value: "0" });
+};
+
+/**
+ * Private ERC20 send — moves a token to a one-time stealth address AND carries
+ * the delivery blob, in ONE sponsored UserOp with two calls:
+ *   1. token.transfer(stealthAddress, amount) — funds land at the codeless Safe
+ *      (an ERC20 balance is just a mapping entry; the Safe needn't be deployed).
+ *   2. call(stealthAddress, value 0, data = blob) — the announce blob rides the
+ *      tx calldata exactly like native sendStealth (minus the value). Detection
+ *      is asset-agnostic: the scanner finds the UTXO from the blob regardless.
+ * No announcer. Returns the tx hash ("" on failure).
+ */
+export const sendStealthToken = async (
+  wallet: Safe4337Pack,
+  stealthAddress: `0x${string}`,
+  tokenAddress: `0x${string}`,
+  amount: bigint,
+  calldataBlob: `0x${string}`,
+): Promise<string> => {
+  try {
+    const transferData = encodeFunctionData({
+      abi: ERC20_TRANSFER_ABI,
+      functionName: "transfer",
+      args: [stealthAddress, amount],
+    });
+    console.log(`[sendStealthToken] token ${tokenAddress} → stealth ${stealthAddress} | amount: ${amount} | blob: ${(calldataBlob.length - 2) / 2} bytes`);
+
+    const safeOperation = await wallet.createTransaction({
+      transactions: [
+        { to: tokenAddress, data: transferData, value: "0" },
+        { to: stealthAddress, data: calldataBlob, value: "0" },
+      ],
+    });
+    const signedOp = await wallet.signSafeOperation(safeOperation);
+    if (signedOp) {
+      const userOpHash = await wallet.executeTransaction({ executable: signedOp });
+      console.log(`[sendStealthToken] UserOp submitted: ${userOpHash}`);
+      const receipt = await waitForUserOpReceipt(wallet, userOpHash);
+      if (!receipt.success) throw new Error("Stealth token send reverted");
+      const txHash = receipt.receipt.transactionHash;
+      console.log(`[sendStealthToken] ✓ confirmed — tx: ${txHash}`);
+      return txHash;
+    }
+  } catch (e: unknown) {
+    await log("sendStealthToken", e);
+    throw e;
+  }
+  return "";
+};
+
+/**
+ * Private ERC20 send by meta-address — derives the one-time stealth payment and
+ * delivers the token + blob in one UserOp (sendStealthToken). Token sibling of
+ * the metaAddress branch of smartSend; funds come from the main Safe (token
+ * stealth UTXOs aren't drained here — that's the spend phase).
+ */
+export const sendTokenPrivate = async (
+  wallet: Safe4337Pack,
+  tokenAddress: `0x${string}`,
+  metaAddress: `0x${string}`,
+  amount: bigint,
+): Promise<string> => {
+  const payment = await generateStealthPayment(metaAddress);
+  return sendStealthToken(wallet, payment.stealthAddress, tokenAddress, amount, payment.calldataBlob);
 };
 
 /**
@@ -288,6 +420,43 @@ export const spendStealthUTXO = async (
     throw new Error(`Predicted Safe address mismatch: ${predictedAddress} ≠ ${utxo.stealthAddress}`);
   }
 
+  // Token UTXO — the stealth Safe EXECUTES token.transfer (no native value moves;
+  // the token address is the one tagged on the UTXO at discovery). Public spend =
+  // one call; private chained spend = transfer + blob call to the next stealth
+  // address, the same two-call shape as sendStealthToken (detection stays
+  // asset-agnostic, and the destination UTXO gets tagged by the receiver's probe).
+  if (utxo.asset) {
+    const transferData = encodeFunctionData({
+      abi: ERC20_TRANSFER_ABI,
+      functionName: "transfer",
+      args: [recipient, BigInt(amount)],
+    });
+    const transactions = calldataBlob
+      ? [
+          { to: utxo.asset, data: transferData, value: "0" },
+          { to: recipient, data: calldataBlob, value: "0" },
+        ]
+      : [{ to: utxo.asset, data: transferData, value: "0" }];
+    try {
+      console.log(`[spendStealthUTXO] token ${utxo.asset} spend → ${recipient}${calldataBlob ? " (chained private)" : ""}`);
+      const safeOperation = await stealthPack.createTransaction({ transactions });
+      const signedOp = await stealthPack.signSafeOperation(safeOperation);
+      if (signedOp) {
+        const userOpHash = await stealthPack.executeTransaction({ executable: signedOp });
+        console.log(`[spendStealthUTXO] token UserOp submitted: ${userOpHash}`);
+        const receipt = await waitForUserOpReceipt(stealthPack, userOpHash);
+        if (!receipt.success) throw new Error("Stealth token spend reverted");
+        const txHash = receipt.receipt.transactionHash;
+        console.log(`[spendStealthUTXO] ✓ token spend confirmed — tx: ${txHash}`);
+        return txHash;
+      }
+    } catch (e: unknown) {
+      await log("spendStealthUTXO", e);
+      throw e;
+    }
+    return "";
+  }
+
   if (!calldataBlob) {
     return await makeTx(stealthPack, recipient, amount);
   }
@@ -322,10 +491,30 @@ export const spendStealthUTXO = async (
 export const getStealthCoins = async (
   username: string,
 ): Promise<{ utxo: StealthUTXO; balance: bigint }[]> => {
-  const utxos = getStealthUTXOs(username);
+  const utxos = getSpendableUTXOs(username);
   if (utxos.length === 0) return [];
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
-  const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+
+  // Per-asset balances: a stealth UTXO holds exactly one asset (tagged on the
+  // note). Read native ones via getEthBalance and each token's UTXOs via that
+  // token's balanceOf — otherwise token coins read ~0 native and get dropped.
+  const balances = new Array<bigint>(utxos.length).fill(0n);
+  const nativeIdx: number[] = [];
+  const byToken = new Map<`0x${string}`, number[]>();
+  utxos.forEach((u, i) => {
+    if (u.asset) byToken.set(u.asset, [...(byToken.get(u.asset) ?? []), i]);
+    else nativeIdx.push(i);
+  });
+
+  if (nativeIdx.length > 0) {
+    const nb = await getStealthBalances(publicClient, nativeIdx.map((i) => utxos[i].stealthAddress));
+    nativeIdx.forEach((idx, k) => (balances[idx] = nb[k]));
+  }
+  for (const [token, idxs] of byToken) {
+    const tb = await getTokenBalances(publicClient, token, idxs.map((i) => utxos[i].stealthAddress));
+    idxs.forEach((idx, k) => (balances[idx] = tb[k]));
+  }
+
   const coins = utxos.map((utxo, i) => ({ utxo, balance: balances[i] }));
   return coins.filter((c) => c.balance > 0n).sort((a, b) => (a.balance < b.balance ? 1 : -1));
 };
@@ -333,7 +522,7 @@ export const getStealthCoins = async (
 // Total shieldable balance held across the user's stealth UTXOs (the source
 // "coin" total for the privacy-by-default deposit).
 export const getStealthTotal = async (username: string): Promise<bigint> => {
-  const utxos = getStealthUTXOs(username);
+  const utxos = getSpendableUTXOs(username);
   if (utxos.length === 0) return 0n;
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
   const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
@@ -348,7 +537,10 @@ export const getStealthTotal = async (username: string): Promise<bigint> => {
 const shieldStealthUTXO = async (
   utxo: StealthUTXO,
   keys: { spendingPrivateKey: `0x${string}`; viewingPrivateKey: `0x${string}`; mlkemDecapsKey: Uint8Array },
-  shieldTx: { to: string; data: string; value: string },
+  // Native shield = 1 call; ERC20 shield = [approve(proxy), shield] in ONE UserOp.
+  shieldCalls:
+    | { to: string; data: string; value: string }
+    | { to: string; data: string; value: string }[],
 ): Promise<string> => {
   const h = await deriveStealthH(keys.viewingPrivateKey, keys.mlkemDecapsKey, utxo.ephemeralPubkey, utxo.kemCiphertext);
   const saltNonce = BigInt(h).toString();
@@ -376,7 +568,8 @@ const shieldStealthUTXO = async (
   if (predicted.toLowerCase() !== utxo.stealthAddress.toLowerCase()) {
     throw new Error(`Stealth Safe mismatch: ${predicted} ≠ ${utxo.stealthAddress}`);
   }
-  return sendTxViaSafe(stealthPack, shieldTx);
+  const calls = Array.isArray(shieldCalls) ? shieldCalls : [shieldCalls];
+  return sendTxsViaSafe(stealthPack, calls);
 };
 
 export type SmartShieldResult = {
@@ -397,7 +590,8 @@ export type SmartShieldResult = {
 export const smartShield = async (
   totalAmount: bigint,
   username: string,
-  buildShieldTx: (amount: bigint) => Promise<{ to: string; data: string; value: string }>,
+  asset: string | null, // null = native; token address = drain that token's stealth UTXOs
+  buildShieldCalls: (asset: string | null, amount: bigint) => Promise<{ to: string; data: string; value: string }[]>,
 ): Promise<SmartShieldResult> => {
   const cred = await getWalletCredential(username).catch(() => null);
   if (!cred) return { success: false, shieldedAmount: 0n, txHashes: [], error: "Passkey not found on this device." };
@@ -407,9 +601,13 @@ export const smartShield = async (
   }
   const keys = await derivePQKeysFromPRF(prf);
 
-  const utxos = getStealthUTXOs(username);
+  const akey = asset?.toLowerCase() ?? null;
+  const utxos = getSpendableUTXOs(username).filter((u) => (u.asset?.toLowerCase() ?? null) === akey);
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
-  const shieldBalances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+  const addrs = utxos.map((u) => u.stealthAddress);
+  const shieldBalances = asset
+    ? await getTokenBalances(publicClient, asset as `0x${string}`, addrs)
+    : await getStealthBalances(publicClient, addrs);
   const candidates = utxos
     .map((utxo, i) => ({ utxo, balance: shieldBalances[i] }))
     .filter((c) => c.balance > 0n)
@@ -435,8 +633,8 @@ export const smartShield = async (
   let shielded = 0n;
   for (const { utxo, take } of plan) {
     try {
-      const shieldTx = await buildShieldTx(take);
-      const tx = await shieldStealthUTXO(utxo, keys, shieldTx);
+      const calls = await buildShieldCalls(asset, take);
+      const tx = await shieldStealthUTXO(utxo, keys, calls);
       if (!tx) throw new Error("shield returned no tx hash");
       txHashes.push(tx);
       shielded += take;
@@ -460,7 +658,8 @@ export const smartShield = async (
 export const shieldCoins = async (
   selected: StealthUTXO[],
   username: string,
-  buildShieldTx: (amount: bigint) => Promise<{ to: string; data: string; value: string }>,
+  // asset = null → native (1 call); = token address → [approve, shield] (2 calls).
+  buildShieldCalls: (asset: string | null, amount: bigint) => Promise<{ to: string; data: string; value: string }[]>,
 ): Promise<SmartShieldResult> => {
   const cred = await getWalletCredential(username).catch(() => null);
   if (!cred) return { success: false, shieldedAmount: 0n, txHashes: [], error: "Passkey not found on this device." };
@@ -476,10 +675,14 @@ export const shieldCoins = async (
   let shielded = 0n;
   for (const utxo of selected) {
     try {
-      const balance = await publicClient.getBalance({ address: utxo.stealthAddress });
+      const asset = utxo.asset ?? null;
+      // whole coin — native getBalance or this token's balanceOf
+      const balance = asset
+        ? (await getTokenBalances(publicClient, asset, [utxo.stealthAddress]))[0]
+        : await publicClient.getBalance({ address: utxo.stealthAddress });
       if (balance === 0n) continue;
-      const shieldTx = await buildShieldTx(balance); // whole coin
-      const tx = await shieldStealthUTXO(utxo, keys, shieldTx);
+      const calls = await buildShieldCalls(asset, balance);
+      const tx = await shieldStealthUTXO(utxo, keys, calls);
       if (!tx) throw new Error("shield returned no tx hash");
       txHashes.push(tx);
       shielded += balance;
@@ -551,7 +754,7 @@ export const smartSend = async (
   }
   const keys = await derivePQKeysFromPRF(prf);
 
-  const utxos = getStealthUTXOs(username);
+  const utxos = getSpendableUTXOs(username);
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
   const sendBalances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
   const candidates = utxos
@@ -609,6 +812,120 @@ export const smartSend = async (
       sent += amount;
     } catch (e: unknown) {
       console.error("[smartSend] Chunk failed:", e);
+      return { success: false, sentAmount: sent, txHashes };
+    }
+  }
+
+  return { success: true, sentAmount: sent, txHashes };
+};
+
+// ERC20 sibling of smartSend: sends `totalAmount` of `token` to `recipientAddress`
+// (or, if `metaAddress` is set, to a fresh stealth address), drawing first from
+// the main Safe and then from stealth UTXOs tagged with THIS token (largest
+// first). Same plan/blob/single-passkey discipline as smartSend; only the
+// primitives differ — balanceOf reads, asset-filtered candidates, token sends.
+export const smartSendToken = async (
+  wallet: Safe4337Pack,
+  token: `0x${string}`,
+  recipientAddress: `0x${string}`,
+  totalAmount: bigint,
+  username: string,
+  metaAddress: `0x${string}` | null,
+): Promise<SmartSendResult> => {
+  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const safeAddress = (await wallet.protocolKit.getAddress()) as `0x${string}`;
+  const [mainBalance] = await getTokenBalances(publicClient, token, [safeAddress]);
+
+  // One destination for the whole logical send — generated once if private.
+  let destination = recipientAddress;
+  let blob: `0x${string}` | undefined;
+  if (metaAddress) {
+    const payment = await generateStealthPayment(metaAddress);
+    destination = payment.stealthAddress;
+    blob = payment.calldataBlob;
+  }
+
+  // Cheap path — the main Safe alone covers it (no passkey needed).
+  if (mainBalance >= totalAmount) {
+    const tx = blob
+      ? await sendStealthToken(wallet, destination, token, totalAmount, blob)
+      : await sendToken(wallet, token, destination, totalAmount);
+    return tx
+      ? { success: true, sentAmount: totalAmount, txHashes: [tx] }
+      : { success: false, sentAmount: 0n, txHashes: [], error: "Send failed." };
+  }
+
+  console.log(`[smartSendToken] Main ${token} balance (${mainBalance}) short of ${totalAmount} — drawing from stealth UTXOs`);
+
+  const cred = await getWalletCredential(username).catch(() => null);
+  if (!cred) {
+    return { success: false, sentAmount: 0n, txHashes: [], error: "Passkey not found on this device." };
+  }
+  const prf = await loadFromDevice(cred.rawId);
+  if (!prf || prf.length === 0) {
+    return { success: false, sentAmount: 0n, txHashes: [], error: "Could not access your passkey. Try again." };
+  }
+  const keys = await derivePQKeysFromPRF(prf);
+
+  // Only UTXOs holding THIS token are spendable for it — a USDT UTXO can't pay
+  // DAI. The tag narrows the read to the right addresses.
+  const tokenUtxos = getSpendableUTXOs(username).filter((u) => u.asset?.toLowerCase() === token.toLowerCase());
+  const sendBalances = await getTokenBalances(publicClient, token, tokenUtxos.map((u) => u.stealthAddress));
+  const candidates = tokenUtxos
+    .map((utxo, i) => ({ utxo, balance: sendBalances[i] ?? 0n }))
+    .filter((c) => c.balance > 0n)
+    .sort((a, b) => (a.balance < b.balance ? 1 : -1));
+
+  const stealthAvailable = candidates.reduce((sum, c) => sum + c.balance, 0n);
+  if (mainBalance + stealthAvailable < totalAmount) {
+    return { success: false, sentAmount: 0n, txHashes: [], error: "Insufficient balance." };
+  }
+
+  type Source = { type: "main" } | { type: "utxo"; utxo: StealthUTXO };
+  const plan: { source: Source; amount: bigint }[] = [];
+  let remaining = totalAmount;
+  if (mainBalance > 0n) {
+    const take = mainBalance < remaining ? mainBalance : remaining;
+    plan.push({ source: { type: "main" }, amount: take });
+    remaining -= take;
+  }
+  for (const { utxo, balance } of candidates) {
+    if (remaining <= 0n) break;
+    const take = balance < remaining ? balance : remaining;
+    plan.push({ source: { type: "utxo", utxo }, amount: take });
+    remaining -= take;
+  }
+
+  console.log(`[smartSendToken] Plan: ${plan.length} chunk(s) of ${token} → ${destination}`);
+
+  const txHashes: string[] = [];
+  let sent = 0n;
+  for (let i = 0; i < plan.length; i++) {
+    const { source, amount } = plan[i];
+    // The blob rides only on the first chunk — the scanner finds the UTXO from
+    // it and the remaining chunks land on the same stealth address.
+    const chunkBlob = i === 0 ? blob : undefined;
+    try {
+      const tx =
+        source.type === "main"
+          ? chunkBlob
+            ? await sendStealthToken(wallet, destination, token, amount, chunkBlob)
+            : await sendToken(wallet, token, destination, amount)
+          : await spendStealthUTXO(
+              source.utxo,
+              amount.toString(),
+              destination,
+              keys.spendingPrivateKey,
+              keys.viewingPrivateKey,
+              keys.mlkemDecapsKey,
+              chunkBlob,
+            );
+
+      if (!tx) throw new Error("Operation returned no transaction hash");
+      txHashes.push(tx);
+      sent += amount;
+    } catch (e: unknown) {
+      console.error("[smartSendToken] Chunk failed:", e);
       return { success: false, sentAmount: sent, txHashes };
     }
   }

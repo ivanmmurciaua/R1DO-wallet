@@ -15,6 +15,8 @@ import {
   FormControlLabel,
   IconButton,
   Popover,
+  Select,
+  MenuItem,
 } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import VisibilityIcon from "@mui/icons-material/Visibility";
@@ -22,20 +24,29 @@ import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseUnits, createPublicClient } from "viem";
 import type { Safe4337Pack } from "@safe-global/relay-kit";
+import { activeChain } from "@/lib/networks";
+import { sepoliaTransport } from "@/app/constants";
+import { getTokenBalances } from "@/lib/balances";
+import { nativeAsset, activeTokens, assetByAddress, type Asset } from "@/lib/assets";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { ensureZkInDirectory, resolvePoolAddress } from "@/lib/registry-v2";
-import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO, getHideBalance, setHideBalance, DEFAULT_DECIMALS, DEFAULT_SYMBOL } from "@/lib/localstorage";
+import { Settings } from "./Settings";
 import { QrCode } from "./QrCode";
 import { GlitchText } from "./GlitchText";
 import { QrScanner } from "./QrScanner";
-import type { PoolBalances } from "@/lib/pool/railgun";
+import type { PoolBalances, TokenBuckets } from "@/lib/pool/railgun";
 import { protocolName } from "@/lib/pool/protocols";
 import { generateStealthPayment, type StealthUTXO, type StealthPayment } from "@/lib/stealth";
 
 type Coin = { utxo: StealthUTXO; balance: bigint };
+
+// Coin-control key: a shield mints ONE pool asset, so a manual UTXO selection
+// must be single-asset. undefined asset = native ETH; an address = that ERC20.
+const assetKey = (u: StealthUTXO) => u.asset?.toLowerCase() ?? "native";
 
 /* 影 · Private view.
    Locked → checking registration → Enable/Unlock (one passkey tap derives the
@@ -95,8 +106,10 @@ export default function PrivateView({
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [balances, setBalances] = useState<PoolBalances | null>(null);
-  const [decimals, setDecimals] = useState(13);
-  const [symbol, setSymbol] = useState("⧫");
+  const [tokenBals, setTokenBals] = useState<Map<string, TokenBuckets> | null>(null);
+  const [showShielded, setShowShielded] = useState(false); // expand per-token list
+  const [decimals, setDecimals] = useState(DEFAULT_DECIMALS);
+  const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   // Deposit (shield) state. Source coin: stealth total (privacy) or the public
   // Safe balance (public). privacy-by-default → smartShield from stealth UTXOs.
   const isPrivacy = getWalletMeta(username)?.privacy ?? false;
@@ -104,8 +117,23 @@ export default function PrivateView({
   const proto = protocolName();
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositAmt, setDepositAmt] = useState("");
-  const [sourceBalance, setSourceBalance] = useState<bigint | null>(null); // the source "coin" total
+  // Per-asset shieldable source balances (null = loading). Selected asset's
+  // balance is derived below. Native always present; ERC20s only on the public
+  // path for now (privacy ERC20 shield = step 2).
+  const [shieldBalances, setShieldBalances] = useState<Map<string, bigint> | null>(null);
+  const [shieldAsset, setShieldAsset] = useState<Asset>(nativeAsset());
   const [shielding, setShielding] = useState(false);
+  // Selected-asset views. Native stays synced to the live prefs (decimals/symbol
+  // state); ERC20 uses its own token metadata.
+  const keyOf = (a: Asset) => a.address?.toLowerCase() ?? "native";
+  const shDecimals = shieldAsset.kind === "native" ? decimals : shieldAsset.decimals;
+  const shSymbol = shieldAsset.kind === "native" ? symbol : shieldAsset.symbol;
+  const sourceBalance = shieldBalances == null ? null : (shieldBalances.get(keyOf(shieldAsset)) ?? 0n);
+  // Assets with a shieldable balance >0 — drives the selector (native + funded
+  // ERC20s on the public path; just native on privacy until step 2).
+  const fundedAssets: Asset[] = shieldBalances == null
+    ? [shieldAsset]
+    : [nativeAsset(), ...activeTokens()].filter((a) => (shieldBalances.get(keyOf(a)) ?? 0n) > 0n);
   // B advanced — coin-control (privacy only)
   const [coinMode, setCoinMode] = useState<"amount" | "coins">("amount");
   const [coins, setCoins] = useState<Coin[] | null>(null); // null = loading
@@ -119,12 +147,14 @@ export default function PrivateView({
   const [sendResolving, setSendResolving] = useState(false);
   const [sendResolveError, setSendResolveError] = useState("");
   const [sendAmt, setSendAmt] = useState("");
+  const [sendAsset, setSendAsset] = useState<Asset>(nativeAsset()); // which shielded asset to transfer
   const [sendStage, setSendStage] = useState<"idle" | "resolving" | "proving" | "submitting">("idle");
   const [proveProgress, setProveProgress] = useState(0);
   // Unshield (private 0zk → public address) state
   const [unshieldOpen, setUnshieldOpen] = useState(false);
   const [unshieldTo, setUnshieldTo] = useState("");
   const [unshieldAmt, setUnshieldAmt] = useState("");
+  const [unshieldAsset, setUnshieldAsset] = useState<Asset>(nativeAsset()); // which shielded asset to withdraw
   const [unshieldStage, setUnshieldStage] = useState<"idle" | "proving" | "submitting">("idle");
   const [unshieldProgress, setUnshieldProgress] = useState(0);
   // Railgun protocol fees (basis points), read live in bootEngine. The "exact"
@@ -218,6 +248,9 @@ export default function PrivateView({
         mod.onPoolBalances((b) => {
           if (alive) setBalances(b);
         });
+        mod.onPoolTokenBalances((m) => {
+          if (alive) setTokenBals(m);
+        });
         mod.onPoolActivity((a) => {
           if (alive) setPoolActivity(a);
         });
@@ -287,17 +320,32 @@ export default function PrivateView({
     }
   };
 
-  // Surface the source "coin" total: stealth UTXOs (privacy) or the main Safe.
-  const fetchSourceBalance = async () => {
+  // Surface the per-asset shieldable source balances. Privacy: stealth native
+  // total only (token-stealth draining = step 2). Public: the main Safe's native
+  // + each curated ERC20 (only those with a balance make the selector).
+  const fetchShieldBalances = async () => {
     try {
+      const map = new Map<string, bigint>();
       if (isPrivacy) {
-        const { getStealthTotal } = await import("@/lib/deploy");
-        setSourceBalance(await getStealthTotal(username));
+        // Per-asset stealth totals (native + each funded token) so the selector
+        // offers ERC20s too. getStealthCoins already reads balance per asset.
+        const { getStealthCoins } = await import("@/lib/deploy");
+        for (const c of await getStealthCoins(username)) {
+          const k = c.utxo.asset?.toLowerCase() ?? "native";
+          map.set(k, (map.get(k) ?? 0n) + c.balance);
+        }
       } else {
-        setSourceBalance(BigInt((await wallet.protocolKit.getBalance()).toString()));
+        const safe = (await wallet.protocolKit.getAddress()) as `0x${string}`;
+        map.set("native", BigInt((await wallet.protocolKit.getBalance()).toString()));
+        const client = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+        for (const t of activeTokens()) {
+          const [bal] = await getTokenBalances(client, t.address as `0x${string}`, [safe]);
+          if (bal > 0n) map.set(t.address!.toLowerCase(), bal);
+        }
       }
+      setShieldBalances(map);
     } catch (e) {
-      console.warn("[private] source balance fetch failed:", e);
+      console.warn("[private] shield balances fetch failed:", e);
     }
   };
 
@@ -305,11 +353,12 @@ export default function PrivateView({
     setSendOpen(false);
     setUnshieldOpen(false);
     setDepositAmt("");
-    setSourceBalance(null);
+    setShieldAsset(nativeAsset());
+    setShieldBalances(null);
     setCoinMode("amount");
     setSelectedCoins(new Set());
     setDepositOpen(true);
-    fetchSourceBalance();
+    fetchShieldBalances();
   };
 
   // Switch to coin-control: load the user's stealth UTXOs as selectable coins.
@@ -329,8 +378,18 @@ export default function PrivateView({
   const toggleCoin = (addr: string) =>
     setSelectedCoins((prev) => {
       const next = new Set(prev);
-      if (next.has(addr)) next.delete(addr);
-      else next.add(addr);
+      if (next.has(addr)) {
+        next.delete(addr);
+        return next;
+      }
+      // Adding: enforce single-asset — ignore a coin whose asset differs from
+      // what's already selected (its row is also visually disabled).
+      if (prev.size > 0 && coins) {
+        const lockU = coins.find((c) => prev.has(c.utxo.stealthAddress))?.utxo;
+        const addU = coins.find((c) => c.utxo.stealthAddress === addr)?.utxo;
+        if (lockU && addU && assetKey(lockU) !== assetKey(addU)) return prev;
+      }
+      next.add(addr);
       return next;
     });
 
@@ -343,7 +402,8 @@ export default function PrivateView({
       console.log(`[private] shield ${selected.length} selected coin(s) → pool…`);
       const mod = await import("@/lib/pool/railgun");
       const { shieldCoins } = await import("@/lib/deploy");
-      const res = await shieldCoins(selected, username, (a) => mod.populateShieldTx(a));
+      // native (asset=null) → 1 call; ERC20 → [approve(proxy), shield] from the stealth Safe.
+      const res = await shieldCoins(selected, username, (asset, amt) => mod.populateShieldCalls(asset, amt));
       if (!res.success) throw new Error(res.error ?? "shield failed");
       console.log(`[private] ✓ shielded ${res.txHashes.length} coin(s)`);
       setToast({
@@ -362,6 +422,16 @@ export default function PrivateView({
   const selectedTotal =
     coins?.filter((c) => selectedCoins.has(c.utxo.stealthAddress)).reduce((s, c) => s + c.balance, 0n) ?? 0n;
 
+  // The asset currently locking the selection (null = nothing selected → all
+  // selectable). Other-asset coins are disabled until this clears.
+  const lockedUtxo = coins?.find((c) => selectedCoins.has(c.utxo.stealthAddress))?.utxo ?? null;
+  const lockedKey: string | null = lockedUtxo ? assetKey(lockedUtxo) : null;
+  // Symbol/decimals of the selected asset (for total/label); native config when
+  // nothing selected or the token isn't in the registry.
+  const selA = lockedUtxo ? (lockedUtxo.asset ? assetByAddress(lockedUtxo.asset) : nativeAsset()) : null;
+  const selDecimals = selA?.decimals ?? decimals;
+  const selSymbol = selA?.symbol ?? symbol;
+
   const openSend = () => {
     setDepositOpen(false);
     setUnshieldOpen(false);
@@ -372,6 +442,7 @@ export default function PrivateView({
     setSendResolveError("");
     setSendResolving(false);
     setSendAmt("");
+    setSendAsset(nativeAsset());
     setSendStage("idle");
     setSendOpen(true);
   };
@@ -425,12 +496,12 @@ export default function PrivateView({
     }
     let amountWei: bigint;
     try {
-      amountWei = parseUnits(amt, decimals);
+      amountWei = parseUnits(amt, sendDecimals);
     } catch {
       setToast({ msg: "Enter a valid amount", sev: "error" });
       return;
     }
-    if (amountWei > spendable) {
+    if (amountWei > sendSpendable) {
       setToast({ msg: "Amount exceeds your spendable balance", sev: "error" });
       return;
     }
@@ -447,9 +518,10 @@ export default function PrivateView({
       }
       setSendStage("proving");
       setProveProgress(0);
-      console.log(`[private] transfer ${amt} ${symbol} → ${zkAddr.slice(0, 12)}…`);
+      console.log(`[private] transfer ${amt} ${sendSymbol} → ${zkAddr.slice(0, 12)}…`);
       const mod = await import("@/lib/pool/railgun");
-      const tx = await mod.populateTransferTx(zkAddr, amountWei, (p) => setProveProgress(p));
+      const tokenAddress = sendAsset.kind === "native" ? undefined : sendAsset.address;
+      const tx = await mod.populateTransferTx(zkAddr, amountWei, (p) => setProveProgress(p), tokenAddress);
       setSendStage("submitting");
       const deploy = await import("@/lib/deploy");
       let txHash: string;
@@ -496,6 +568,7 @@ export default function PrivateView({
     setSendOpen(false);
     setUnshieldTo("");
     setUnshieldAmt("");
+    setUnshieldAsset(nativeAsset());
     setUnshieldStage("idle");
     setUnshieldStealth(null);
     setUnshieldAnnounce(true);
@@ -541,24 +614,26 @@ export default function PrivateView({
     }
     let typedWei: bigint;
     try {
-      typedWei = parseUnits(amt, decimals);
+      typedWei = parseUnits(amt, unDecimals);
     } catch {
       setToast({ msg: "Enter a valid amount", sev: "error" });
       return;
     }
+    const isToken = unshieldAsset.kind !== "native";
     // "exact" mode grosses-up so the address receives the typed amount; capped at
     // spendable (can't unshield more than you hold → falls back to gross there).
-    const { moves } = computeFee(typedWei, fees.unshieldBps, unshieldExact, spendable);
-    if (moves > spendable) {
+    const { moves } = computeFee(typedWei, fees.unshieldBps, unshieldExact, unSpendable);
+    if (moves > unSpendable) {
       setToast({ msg: "Amount exceeds your spendable balance", sev: "error" });
       return;
     }
     try {
       setUnshieldStage("proving");
       setUnshieldProgress(0);
-      console.log(`[private] unshield ${fmt(moves, decimals)} ${symbol} (net ${amt}) → ${to}`);
+      console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
       const mod = await import("@/lib/pool/railgun");
-      const tx = await mod.populateUnshieldTx(to, moves, (p) => setUnshieldProgress(p));
+      const tokenAddress = isToken ? unshieldAsset.address : undefined;
+      const tx = await mod.populateUnshieldTx(to, moves, (p) => setUnshieldProgress(p), tokenAddress);
       setUnshieldStage("submitting");
       const deploy = await import("@/lib/deploy");
       let txHash: string;
@@ -585,6 +660,9 @@ export default function PrivateView({
           ephemeralPubkey: unshieldStealth.ephemeralPubkey,
           kemCiphertext: unshieldStealth.kemCiphertext,
           blockNumber: 0,
+          // Ghost notes skip the scanner's asset probe, so tag the token here;
+          // else a ghost ERC20 unshield would read as native (0). Native = undefined.
+          ...(isToken ? { asset: unshieldAsset.address as `0x${string}` } : {}),
         };
         if (unshieldAnnounce) {
           try {
@@ -636,9 +714,11 @@ export default function PrivateView({
     !!unshieldStealth &&
     unshieldTo.trim().toLowerCase() === unshieldStealth.stealthAddress.toLowerCase();
 
-  // Deposit (shield). Amount in {symbol}+decimals (→ wei).
+  // Deposit (shield). Amount in the SELECTED asset's symbol+decimals (→ wei).
   //  · privacy → smartShield: drawn from stealth UTXOs (inlinkable), N UserOps.
-  //  · public  → a single shield from the main Safe (linkable, the simple case).
+  //    Native-only for now (private ERC20 shield = step 2).
+  //  · public  → a single shield/UserOp from the main Safe. ERC20 = [approve,
+  //    shield] batched so Railgun's proxy can transferFrom.
   // Fire-and-forget — the watcher moves it ShieldPending → Spendable.
   const doShield = async () => {
     const amt = depositAmt.trim();
@@ -648,11 +728,12 @@ export default function PrivateView({
     }
     let typedWei: bigint;
     try {
-      typedWei = parseUnits(amt, decimals);
+      typedWei = parseUnits(amt, shDecimals);
     } catch {
       setToast({ msg: "Enter a valid amount", sev: "error" });
       return;
     }
+    const isToken = shieldAsset.kind !== "native";
     // "exact" mode grosses-up so the pool receives the typed amount; capped at
     // the source balance (can't deposit more than you hold → falls back to gross).
     const { moves } = computeFee(typedWei, fees.shieldBps, shieldExact, sourceBalance ?? undefined);
@@ -662,18 +743,21 @@ export default function PrivateView({
     }
     setShielding(true);
     try {
-      console.log(`[private] shield ${fmt(moves, decimals)} ${symbol} (net ${amt}) → pool (${isPrivacy ? "private/stealth" : "public"})…`);
+      console.log(`[private] shield ${fmt(moves, shDecimals)} ${shSymbol} (net ${amt}) → pool (${isPrivacy ? "private/stealth" : "public"})…`);
       const mod = await import("@/lib/pool/railgun");
       if (isPrivacy) {
         // smart shield: each stealth UTXO shields its own balance → inlinkable
         const { smartShield } = await import("@/lib/deploy");
-        const res = await smartShield(moves, username, (a) => mod.populateShieldTx(a));
+        const res = await smartShield(moves, username, isToken ? shieldAsset.address! : null, (asset, a) =>
+          mod.populateShieldCalls(asset, a),
+        );
         if (!res.success) throw new Error(res.error ?? "shield failed");
         console.log(`[private] ✓ smart shield: ${res.txHashes.length} tx(s)`);
       } else {
-        const tx = await mod.populateShieldTx(moves);
-        const { sendTxViaSafe } = await import("@/lib/deploy");
-        const txHash = await sendTxViaSafe(wallet, tx);
+        // Public path. Native = 1 call; ERC20 = [approve, shield] in one UserOp.
+        const calls = await mod.populateShieldCalls(isToken ? shieldAsset.address! : null, moves);
+        const { sendTxsViaSafe } = await import("@/lib/deploy");
+        const txHash = await sendTxsViaSafe(wallet, calls);
         console.log(`[private] ✓ shield submitted — tx: ${txHash}`);
       }
       setToast({
@@ -695,6 +779,56 @@ export default function PrivateView({
     (balances?.missingExternal ?? 0n) +
     (balances?.missingInternal ?? 0n) +
     (balances?.shieldPending ?? 0n);
+  const tokPending = (b: TokenBuckets) => b.missingExternal + b.missingInternal + b.shieldPending;
+
+  // Shielded ERC20s for the expandable list under the headline. The headline is
+  // the native (WETH/⧫) spendable; this lists the curated tokens shielded in the
+  // pool (assetByAddress(WETH) is undefined → native naturally excluded). Each
+  // carries its own symbol/decimals.
+  const shieldedTokens = tokenBals == null
+    ? []
+    : [...tokenBals.entries()]
+        .map(([addr, b]) => ({ asset: assetByAddress(addr), buckets: b }))
+        .filter((r) => !!r.asset && r.buckets.spendable > 0n) as { asset: Asset; buckets: TokenBuckets }[];
+
+  // Send wizard — which shielded asset to transfer + its views/cap. Native uses
+  // the WETH spendable; a token uses its own slice of tokenBals. Selectable =
+  // assets with a shielded spendable >0 (native + the shielded-tokens list).
+  const sendDecimals = sendAsset.kind === "native" ? decimals : sendAsset.decimals;
+  const sendSymbol = sendAsset.kind === "native" ? symbol : sendAsset.symbol;
+  const sendSpendable = sendAsset.kind === "native"
+    ? spendable
+    : (tokenBals?.get(keyOf(sendAsset))?.spendable ?? 0n);
+  const sendAssets: Asset[] = [
+    ...(spendable > 0n ? [nativeAsset()] : []),
+    ...shieldedTokens.map((t) => t.asset),
+  ];
+
+  // Unshield wizard — same per-asset views/cap as send. ERC20 unshield is the
+  // PUBLIC sub-step for now → the token options are offered ONLY on a non-privacy
+  // wallet (privacy unshield ERC20 = next sub-step), so privacy stays native-only.
+  const unDecimals = unshieldAsset.kind === "native" ? decimals : unshieldAsset.decimals;
+  const unSymbol = unshieldAsset.kind === "native" ? symbol : unshieldAsset.symbol;
+  const unSpendable = unshieldAsset.kind === "native"
+    ? spendable
+    : (tokenBals?.get(keyOf(unshieldAsset))?.spendable ?? 0n);
+  const unshieldAssets: Asset[] = [
+    ...(spendable > 0n ? [nativeAsset()] : []),
+    ...shieldedTokens.map((t) => t.asset), // tokens now offered in BOTH worlds
+  ];
+
+  // Assets with a pending POI (native + tokens) — drives the "validating" /
+  // finalizing badges for ANY asset, each shown in its own symbol/decimals (we
+  // can't sum mixed-decimals into one number, so it's a per-asset list).
+  const pendingAssets: { asset: Asset; amount: bigint }[] = [
+    ...(pending > 0n ? [{ asset: nativeAsset(), amount: pending }] : []),
+    ...(tokenBals == null
+      ? []
+      : ([...tokenBals.entries()]
+          .map(([addr, b]) => ({ asset: assetByAddress(addr), amount: tokPending(b) }))
+          .filter((r) => !!r.asset && r.amount > 0n) as { asset: Asset; amount: bigint }[])),
+  ];
+  const anyPending = pendingAssets.length > 0;
 
   // Transfer amount helpers (wizard step 2) — exact value stays in wei; the
   // balance slider works as a % of spendable, mirroring the public send.
@@ -702,38 +836,38 @@ export default function PrivateView({
     const t = sendAmt.trim();
     if (!t) return null;
     try {
-      return parseUnits(t, decimals);
+      return parseUnits(t, sendDecimals);
     } catch {
       return null;
     }
   })();
-  const sendOver = sendAmtWei != null && sendAmtWei > spendable;
+  const sendOver = sendAmtWei != null && sendAmtWei > sendSpendable;
   const sendAmtValid = sendAmtWei != null && sendAmtWei > 0n && !sendOver;
   const sendPct =
-    spendable > 0n && sendAmtWei != null
-      ? Math.min(100, Number((sendAmtWei * 10000n) / spendable) / 100)
+    sendSpendable > 0n && sendAmtWei != null
+      ? Math.min(100, Number((sendAmtWei * 10000n) / sendSpendable) / 100)
       : 0;
   const setSendPct = (p: number) => {
-    if (spendable <= 0n) return;
+    if (sendSpendable <= 0n) return;
     const bips = BigInt(Math.round(Math.max(0, Math.min(100, p)) * 100));
-    setSendAmt(formatUnits((spendable * bips) / 10000n, decimals));
+    setSendAmt(formatUnits((sendSpendable * bips) / 10000n, sendDecimals));
   };
   const sendAmtDisplay = sendAmt
     ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 }).format(Number(sendAmt))
     : sendAmt;
 
   // Live fee breakdown for the shield/unshield forms (null when no valid amount).
-  const previewFee = (raw: string, bps: number, exact: boolean, cap?: bigint) => {
+  const previewFee = (raw: string, bps: number, exact: boolean, cap?: bigint, dec: number = decimals) => {
     const n = raw.trim();
     if (!n || Number.isNaN(Number(n)) || Number(n) <= 0) return null;
     try {
-      return computeFee(parseUnits(n, decimals), bps, exact, cap);
+      return computeFee(parseUnits(n, dec), bps, exact, cap);
     } catch {
       return null;
     }
   };
-  const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined);
-  const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, spendable);
+  const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined, shDecimals);
+  const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, unSpendable, unDecimals);
 
   const registered = !!registeredZk;
   const btnLabel = working
@@ -750,6 +884,7 @@ export default function PrivateView({
 
   return (
     <Box sx={{ textAlign: "center", position: "relative" }}>
+      <Settings minimal privacy username={username} />
       {scanning && (
         <QrScanner
           onResult={(text) => {
@@ -864,13 +999,25 @@ export default function PrivateView({
       ) : (
         /* ── UNLOCKED: operational UI ── */
         <>
-          {/* shielded balance (click freed — copy lives on the Receive card now) */}
+          {/* shielded balance — native headline; tap to expand shielded ERC20s */}
           <Typography
             variant="h2"
-            sx={{ fontSize: "2.6rem", color: "text.primary", mt: 1, userSelect: "none" }}
+            onClick={() => shieldedTokens.length > 0 && setShowShielded((s) => !s)}
+            sx={{
+              fontSize: "2.6rem",
+              color: "text.primary",
+              mt: 1,
+              userSelect: "none",
+              cursor: shieldedTokens.length > 0 ? "pointer" : "default",
+            }}
           >
             {hideBalance ? <GlitchText length={7} /> : fmtCompact(spendable, decimals)}{" "}
             <Box component="span" sx={{ color: "primary.main" }}>{symbol}</Box>
+            {shieldedTokens.length > 0 && (
+              <Box component="span" sx={{ fontSize: "1rem", opacity: 0.5, ml: 0.5 }}>
+                {showShielded ? "▴" : "▾"}
+              </Box>
+            )}
           </Typography>
 
           <Box sx={{ display: "inline-flex", alignItems: "center", gap: 0.5, mt: 0.5 }}>
@@ -891,40 +1038,63 @@ export default function PrivateView({
             </IconButton>
           </Box>
 
-          {/* "validating in the background" — only when something is pending POI. */}
-          {pending > 0n && (
-            <Box sx={{ mt: 2.5 }}>
-              <Box
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 1,
-                  px: 1.5,
-                  py: 0.5,
-                  border: "1px solid",
-                  borderColor: "divider",
-                  borderRadius: "2px",
-                }}
-              >
+          {/* expandable per-token shielded balances (curated ERC20s in the pool) */}
+          {showShielded && shieldedTokens.length > 0 && (
+            <Stack spacing={0.5} sx={{ mt: 1.25, mx: "auto", maxWidth: 280 }}>
+              {shieldedTokens.map(({ asset, buckets }) => (
                 <Box
+                  key={asset.address}
+                  sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: "1px solid", borderColor: "divider", borderRadius: "2px", px: 1.25, py: 0.5 }}
+                >
+                  <Typography variant="body2" sx={{ fontSize: "0.72rem", opacity: 0.8, letterSpacing: "0.04em" }}>
+                    {asset.symbol}
+                  </Typography>
+                  <Typography variant="body2" sx={{ fontSize: "0.72rem", fontWeight: 700 }}>
+                    {hideBalance ? <GlitchText length={5} /> : fmt(buckets.spendable, asset.decimals)}
+                  </Typography>
+                </Box>
+              ))}
+            </Stack>
+          )}
+
+          {/* "validating in the background" — one badge per asset with a pending
+              POI (native or shielded token), each in its own symbol/decimals. */}
+          {anyPending && (
+            <Stack spacing={0.75} sx={{ mt: 2.5, alignItems: "center" }}>
+              {pendingAssets.map(({ asset, amount }) => (
+                <Box
+                  key={asset.address ?? "native"}
                   sx={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: "50%",
-                    bgcolor: "primary.main",
-                    animation: "r1doPulse 1.6s ease-in-out infinite",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 1,
+                    px: 1.5,
+                    py: 0.5,
+                    border: "1px solid",
+                    borderColor: "divider",
+                    borderRadius: "2px",
                   }}
-                />
-                <Typography variant="body2" sx={{ fontSize: "0.68rem", letterSpacing: "0.1em" }}>
-                  {hideBalance ? <GlitchText length={4} /> : fmtCompact(pending, decimals)} {symbol} validating
-                </Typography>
-              </Box>
-            </Box>
+                >
+                  <Box
+                    sx={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      bgcolor: "primary.main",
+                      animation: "r1doPulse 1.6s ease-in-out infinite",
+                    }}
+                  />
+                  <Typography variant="body2" sx={{ fontSize: "0.68rem", letterSpacing: "0.1em" }}>
+                    {hideBalance ? <GlitchText length={4} /> : fmtCompact(amount, asset.decimals)} {asset.symbol} validating
+                  </Typography>
+                </Box>
+              ))}
+            </Stack>
           )}
 
           {/* finalizing: SEPARATE badge — shows "stay on this screen" and switches
               to "generating proof… %" while a proof is actively generating. */}
-          {(poolActivity.finalizing || pending > 0n) && (
+          {(poolActivity.finalizing || anyPending) && (
             <Box
               sx={{
                 display: "flex",
@@ -1016,17 +1186,24 @@ export default function PrivateView({
                       <Stack spacing={0.75} sx={{ mb: 1.25, maxHeight: 220, overflowY: "auto" }}>
                         {coins.map((c) => {
                           const sel = selectedCoins.has(c.utxo.stealthAddress);
+                          // Single-asset lock: a different-asset coin is disabled
+                          // while another asset is selected.
+                          const disabled = lockedKey !== null && assetKey(c.utxo) !== lockedKey && !sel;
+                          const ca = c.utxo.asset ? assetByAddress(c.utxo.asset) : nativeAsset();
+                          const cDec = ca?.decimals ?? decimals;
+                          const cSym = ca?.symbol ?? symbol;
                           return (
                             <Paper
                               key={c.utxo.stealthAddress}
                               elevation={0}
-                              onClick={() => !shielding && toggleCoin(c.utxo.stealthAddress)}
+                              onClick={() => !shielding && !disabled && toggleCoin(c.utxo.stealthAddress)}
                               sx={{
                                 p: 1,
                                 display: "flex",
                                 alignItems: "center",
                                 justifyContent: "space-between",
-                                cursor: "pointer",
+                                cursor: disabled ? "not-allowed" : "pointer",
+                                opacity: disabled ? 0.4 : 1,
                                 border: "1px solid",
                                 borderColor: sel ? "primary.main" : "divider",
                                 bgcolor: sel ? "rgba(91,141,184,0.08)" : "transparent",
@@ -1056,7 +1233,7 @@ export default function PrivateView({
                                 </Typography>
                               </Box>
                               <Typography variant="body2" sx={{ fontSize: "0.68rem", fontWeight: 700 }}>
-                                {fmt(c.balance, decimals)} {symbol}
+                                {fmt(c.balance, cDec)} {cSym}
                               </Typography>
                             </Paper>
                           );
@@ -1076,22 +1253,44 @@ export default function PrivateView({
                         ? "shielding…"
                         : selectedCoins.size === 0
                           ? "Select coins to shield"
-                          : `Shield ${selectedCoins.size} coin${selectedCoins.size > 1 ? "s" : ""} · ${fmt(selectedTotal, decimals)} ${symbol}`}
+                          : `Shield ${selectedCoins.size} coin${selectedCoins.size > 1 ? "s" : ""} · ${fmt(selectedTotal, selDecimals)} ${selSymbol}`}
                     </Button>
                   </>
                 ) : (
                   /* ── by amount (seamless) ── */
                   <>
-                    {/* source coin: stealth total (privacy) or public balance */}
+                    {/* source coin: stealth total (privacy) or public balance —
+                        with an asset selector when more than one is shieldable */}
                     <Paper
                       elevation={0}
                       sx={{ p: 1, mb: 1.25, display: "flex", alignItems: "center", justifyContent: "space-between", border: "1px solid", borderColor: "primary.main" }}
                     >
-                      <Typography variant="body2" sx={{ fontSize: "0.66rem", opacity: 0.8 }}>
-                        {isPrivacy ? "Private balance" : "Public balance"}
-                      </Typography>
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                        <Typography variant="body2" sx={{ fontSize: "0.66rem", opacity: 0.8 }}>
+                          {isPrivacy ? "Private balance" : "Public balance"}
+                        </Typography>
+                        {fundedAssets.length > 1 && (
+                          <Select
+                            size="small"
+                            variant="standard"
+                            value={keyOf(shieldAsset)}
+                            disabled={shielding}
+                            onChange={(e) => {
+                              const a = fundedAssets.find((x) => keyOf(x) === e.target.value);
+                              if (a) { setShieldAsset(a); setDepositAmt(""); }
+                            }}
+                            sx={{ fontSize: "0.66rem", "& .MuiSelect-select": { py: 0 } }}
+                          >
+                            {fundedAssets.map((a) => (
+                              <MenuItem key={keyOf(a)} value={keyOf(a)} sx={{ fontSize: "0.7rem" }}>
+                                {a.kind === "native" ? symbol : a.symbol}
+                              </MenuItem>
+                            ))}
+                          </Select>
+                        )}
+                      </Box>
                       <Typography variant="body2" sx={{ fontSize: "0.72rem", fontWeight: 700 }}>
-                        {sourceBalance == null ? "…" : `${fmt(sourceBalance, decimals)} ${symbol}`}
+                        {sourceBalance == null ? "…" : `${fmt(sourceBalance, shDecimals)} ${shSymbol}`}
                       </Typography>
                     </Paper>
 
@@ -1107,7 +1306,7 @@ export default function PrivateView({
                       size="small"
                       type="number"
                       placeholder="0"
-                      label={`Amount (${symbol})`}
+                      label={`Amount (${shSymbol})`}
                       value={depositAmt}
                       onChange={(e) => setDepositAmt(e.target.value)}
                       disabled={shielding}
@@ -1118,7 +1317,7 @@ export default function PrivateView({
                             color="primary"
                             size="small"
                             disabled={shielding || sourceBalance == null}
-                            onClick={() => sourceBalance != null && setDepositAmt(formatUnits(sourceBalance, decimals))}
+                            onClick={() => sourceBalance != null && setDepositAmt(formatUnits(sourceBalance, shDecimals))}
                             sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
                           >
                             MAX
@@ -1144,8 +1343,8 @@ export default function PrivateView({
                     <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: 1.25, lineHeight: 1.5 }}>
                       {shieldPreview ? (
                         <>
-                          {proto} fee {fees.shieldBps / 100}% · moves {fmt(shieldPreview.moves, decimals)} {symbol} →
-                          pool gets {fmt(shieldPreview.receive, decimals)} {symbol}
+                          {proto} fee {fees.shieldBps / 100}% · moves {fmt(shieldPreview.moves, shDecimals)} {shSymbol} →
+                          pool gets {fmt(shieldPreview.receive, shDecimals)} {shSymbol}
                           {shieldExact && shieldPreview.forcedGross ? " · capped to your balance (fee not covered)" : ""}
                         </>
                       ) : (
@@ -1264,12 +1463,31 @@ export default function PrivateView({
                     <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.7, mb: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       To {sendDisplay}
                     </Typography>
+                    {sendAssets.length > 1 && (
+                      <Select
+                        size="small"
+                        fullWidth
+                        value={keyOf(sendAsset)}
+                        disabled={sendBusy}
+                        onChange={(e) => {
+                          const a = sendAssets.find((x) => keyOf(x) === e.target.value);
+                          if (a) { setSendAsset(a); setSendAmt(""); }
+                        }}
+                        sx={{ mb: 1, fontSize: "0.8rem" }}
+                      >
+                        {sendAssets.map((a) => (
+                          <MenuItem key={keyOf(a)} value={keyOf(a)} sx={{ fontSize: "0.8rem" }}>
+                            {a.kind === "native" ? symbol : a.symbol}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    )}
                     <TextField
                       fullWidth
                       size="small"
                       type="number"
                       placeholder="0"
-                      label={`Amount (${symbol})`}
+                      label={`Amount (${sendSymbol})`}
                       value={sendAmt}
                       onChange={(e) => setSendAmt(e.target.value)}
                       sx={{ mb: 0.5 }}
@@ -1278,7 +1496,7 @@ export default function PrivateView({
                       <Slider
                         value={sendPct}
                         onChange={(_, v) => setSendPct(v as number)}
-                        disabled={spendable <= 0n}
+                        disabled={sendSpendable <= 0n}
                         marks={[0, 25, 50, 75, 100].map((v) => ({ value: v }))}
                         step={1}
                         min={0}
@@ -1293,7 +1511,7 @@ export default function PrivateView({
                             variant="text"
                             size="small"
                             onClick={() => setSendPct(p)}
-                            disabled={spendable <= 0n}
+                            disabled={sendSpendable <= 0n}
                             sx={{ minWidth: 0, px: 1, fontSize: "0.7rem", flex: 1 }}
                           >
                             {p === 100 ? "MAX" : `${p}%`}
@@ -1302,7 +1520,7 @@ export default function PrivateView({
                       </Stack>
                     </Box>
                     <Typography variant="body2" sx={{ fontSize: "0.58rem", color: sendOver ? "error.main" : "text.secondary", opacity: sendOver ? 1 : 0.6, mt: 0.75, mb: 1.25, lineHeight: 1.5 }}>
-                      Spendable: {fmt(spendable, decimals)} {symbol}. First send downloads ~50MB (one-time).
+                      Spendable: {fmt(sendSpendable, sendDecimals)} {sendSymbol}. First send downloads ~50MB (one-time).
                     </Typography>
                     <Button
                       variant="contained"
@@ -1326,7 +1544,7 @@ export default function PrivateView({
                     <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 1.25, mb: 1.25 }}>
                       {[
                         ["To", sendDisplay],
-                        ["Amount", `${sendAmtDisplay} ${symbol}`],
+                        ["Amount", `${sendAmtDisplay} ${sendSymbol}`],
                         ["Type", `Private · ${proto}`],
                         ["Fee", "Free · gas sponsored"],
                       ].map(([label, value], idx, arr) => (
@@ -1458,12 +1676,32 @@ export default function PrivateView({
                   </Box>
                 )}
 
+                {unshieldAssets.length > 1 && (
+                  <Select
+                    size="small"
+                    fullWidth
+                    value={keyOf(unshieldAsset)}
+                    disabled={unshieldBusy}
+                    onChange={(e) => {
+                      const a = unshieldAssets.find((x) => keyOf(x) === e.target.value);
+                      if (a) { setUnshieldAsset(a); setUnshieldAmt(""); }
+                    }}
+                    sx={{ mb: 1, fontSize: "0.8rem" }}
+                  >
+                    {unshieldAssets.map((a) => (
+                      <MenuItem key={keyOf(a)} value={keyOf(a)} sx={{ fontSize: "0.8rem" }}>
+                        {a.kind === "native" ? symbol : a.symbol}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                )}
+
                 <TextField
                   fullWidth
                   size="small"
                   type="number"
                   placeholder="0"
-                  label={`Amount (${symbol})`}
+                  label={`Amount (${unSymbol})`}
                   value={unshieldAmt}
                   onChange={(e) => setUnshieldAmt(e.target.value)}
                   disabled={unshieldBusy}
@@ -1474,7 +1712,7 @@ export default function PrivateView({
                         color="primary"
                         size="small"
                         disabled={unshieldBusy}
-                        onClick={() => setUnshieldAmt(formatUnits(spendable, decimals))}
+                        onClick={() => setUnshieldAmt(formatUnits(unSpendable, unDecimals))}
                         sx={{ minWidth: 0, px: 1, fontSize: "0.7rem" }}
                       >
                         MAX
@@ -1500,8 +1738,8 @@ export default function PrivateView({
                 <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: 1.25, lineHeight: 1.5 }}>
                   {unshieldPreview ? (
                     <>
-                      {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, decimals)} {symbol} →
-                      you receive {fmt(unshieldPreview.receive, decimals)} {symbol}
+                      {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, unDecimals)} {unSymbol} →
+                      you receive {fmt(unshieldPreview.receive, unDecimals)} {unSymbol}
                       {unshieldExact && unshieldPreview.forcedGross ? " · capped to spendable (fee not covered)" : ""}
                       . Funds land on confirmation; the POI finalizes in the background.
                     </>

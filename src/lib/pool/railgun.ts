@@ -22,27 +22,39 @@ import {
   ArtifactStore,
   createRailgunWallet,
   refreshBalances,
+  rescanFullUTXOMerkletreesAndWallets,
   setOnBalanceUpdateCallback,
   refreshReceivePOIsForWallet,
   generatePOIsForWallet,
   getChainTxidsStillPendingSpentPOIs,
   setOnWalletPOIProofProgressCallback,
   populateShieldBaseToken,
+  populateShield,
   gasEstimateForUnprovenTransfer,
   generateTransferProof,
   populateProvedTransfer,
   gasEstimateForUnprovenUnshieldBaseToken,
   generateUnshieldBaseTokenProof,
   populateProvedUnshieldBaseToken,
+  gasEstimateForUnprovenUnshield,
+  generateUnshieldProof,
+  populateProvedUnshield,
 } from "@railgun-community/wallet";
 import * as RailgunSDK from "@railgun-community/wallet";
-import { NetworkName, NETWORK_CONFIG, TXIDVersion, EVMGasType } from "@railgun-community/shared-models";
+import {
+  NetworkName,
+  NETWORK_CONFIG,
+  TXIDVersion,
+  EVMGasType,
+} from "@railgun-community/shared-models";
 import LevelDB from "level-js";
 import localforage from "localforage";
 import * as snarkjs from "snarkjs";
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
-import { Mnemonic, JsonRpcProvider } from "ethers";
+import { JsonRpcProvider } from "ethers";
+import { poolMnemonicFromPRF } from "./seed";
+import { encodeFunctionData } from "viem";
 import { RPC_URLS } from "@/app/constants";
 import { activeNetwork, type NetworkId } from "@/lib/networks";
 
@@ -57,11 +69,16 @@ const RAILGUN_NETWORK: Partial<Record<NetworkId, NetworkName>> = {
 export const POOL_NETWORK = (() => {
   const id = activeNetwork().id;
   const name = RAILGUN_NETWORK[id];
-  if (!name) throw new Error(`[pool] RAILGUN has no deployment for network "${id}"`);
+  if (!name)
+    throw new Error(`[pool] RAILGUN has no deployment for network "${id}"`);
   return name;
 })();
 const TXID = TXIDVersion.V2_PoseidonMerkle;
-const { chain: CHAIN, baseToken } = NETWORK_CONFIG[POOL_NETWORK];
+const {
+  chain: CHAIN,
+  baseToken,
+  proxyContract: POOL_PROXY,
+} = NETWORK_CONFIG[POOL_NETWORK];
 const WETH = baseToken.wrappedAddress;
 // Primary RPC (PublicNode) for the light ethers reads (block number, feeData);
 // Railgun's heavy batched scans get the full failover list via loadProvider.
@@ -71,13 +88,14 @@ const POI_NODES = ["https://ppoi.fdi.network"];
 
 // syncRailgunTransactionsV2 is exported by the SDK but missing from its .d.ts
 // (it syncs the txid merkletree from the subsquid — needed for POI of outputs).
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const syncRailgunTransactionsV2: (n: NetworkName) => Promise<unknown> = (RailgunSDK as any)
-  .syncRailgunTransactionsV2;
+const syncRailgunTransactionsV2: (n: NetworkName) => Promise<unknown> =
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (RailgunSDK as any).syncRailgunTransactionsV2;
 
 // Shared read-only provider (block number, feeData). ethers v6.
 let _provider: JsonRpcProvider | null = null;
-const provider = (): JsonRpcProvider => (_provider ??= new JsonRpcProvider(RPC));
+const provider = (): JsonRpcProvider =>
+  (_provider ??= new JsonRpcProvider(RPC));
 
 // EIP-1559 (Type2) gas details from a gasEstimate — mirrors the spike.
 async function gasDetails(gasEstimate: bigint) {
@@ -92,10 +110,12 @@ async function gasDetails(gasEstimate: bigint) {
 const dummyGas = () => gasDetails(0n);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const withTimeout = <T,>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
   Promise.race([
     p,
-    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timeout ${label} (${ms}ms)`)), ms)),
+    new Promise<T>((_, rej) =>
+      setTimeout(() => rej(new Error(`timeout ${label} (${ms}ms)`)), ms),
+    ),
   ]);
 
 let engineBooted = false;
@@ -122,7 +142,12 @@ async function poiHealthy(): Promise<string | null> {
       const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "ppoi_health", params: {}, id: 1 }),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "ppoi_health",
+          params: {},
+          id: 1,
+        }),
       });
       const j = await r.json();
       if (j.result === "OK") return url;
@@ -153,7 +178,9 @@ export async function bootEngine(): Promise<void> {
     if (!live) {
       // HARD GATE: no live POI node → Railgun is unusable. Abort the boot so
       // the UI stays red and blocks unlock/register/operate.
-      console.error("[pool] ✗ no PPOI node responded — Railgun unavailable (aborting boot)");
+      console.error(
+        "[pool] ✗ no PPOI node responded — Railgun unavailable (aborting boot)",
+      );
       throw new Error("POI network unreachable");
     }
     console.log(`[pool] ✓ PPOI live: ${live}`);
@@ -178,12 +205,19 @@ export async function bootEngine(): Promise<void> {
     getProver().setSnarkJSGroth16(snarkjs.groth16 as any);
     console.log("[pool] ✓ Groth16 prover (snarkjs) injected");
 
-    console.log(`[pool] loading Sepolia provider (chainId ${CHAIN.id}) — ${RPC_URLS.length} RPCs w/ failover…`);
+    console.log(
+      `[pool] loading Sepolia provider (chainId ${CHAIN.id}) — ${RPC_URLS.length} RPCs w/ failover…`,
+    );
     const { feesSerialized } = await loadProvider(
       {
         chainId: CHAIN.id,
-        // PublicNode primary (priority 1, heavier weight); the rest are failover.
-        providers: RPC_URLS.map((url, i) => ({ provider: url, priority: i + 1, weight: i === 0 ? 2 : 1 })),
+        // Index 0 (priority 1, heavier weight);
+        // the public RPCs follow as failover, in order.
+        providers: RPC_URLS.map((url, i) => ({
+          provider: url,
+          priority: i + 1,
+          weight: i === 0 ? 2 : 1,
+        })),
       },
       POOL_NETWORK,
       10_000,
@@ -194,10 +228,14 @@ export async function bootEngine(): Promise<void> {
     const unshieldBps = Number(feesSerialized.unshieldFeeV2);
     if (Number.isFinite(shieldBps)) poolFees.shieldBps = shieldBps;
     if (Number.isFinite(unshieldBps)) poolFees.unshieldBps = unshieldBps;
-    console.log(`[pool] ✓ provider loaded — fees: shield ${poolFees.shieldBps}bps, unshield ${poolFees.unshieldBps}bps`);
+    console.log(
+      `[pool] ✓ provider loaded — fees: shield ${poolFees.shieldBps}bps, unshield ${poolFees.unshieldBps}bps`,
+    );
 
     engineBooted = true;
-    console.log(`[pool] ✓ Railgun engine up (${Math.round(performance.now() - t0)}ms)`);
+    console.log(
+      `[pool] ✓ Railgun engine up (${Math.round(performance.now() - t0)}ms)`,
+    );
   })();
 
   try {
@@ -257,22 +295,35 @@ export async function createPoolWallet(
     return poolWallet;
   }
   if (poolWallet && poolWallet.username !== username) {
-    console.log("[pool] account switch detected — resetting previous 0zk state");
+    console.log(
+      "[pool] account switch detected — resetting previous 0zk state",
+    );
     await resetPool();
   }
   if (!engineBooted) throw new Error("engine not booted");
 
   console.log("[pool] deriving 0zk from PRF branches (HKDF-SHA256)…");
-  const entropy = hkdf(sha256, prf, undefined, "r1do/pool/railgun/seed/v1", 16);
   const encKey = hkdf(sha256, prf, undefined, "r1do/pool/railgun/enc/v1", 32);
-  const shieldKey = hkdf(sha256, prf, undefined, "r1do/pool/railgun/shield/v1", 32);
-  const relayKey = hkdf(sha256, prf, undefined, "r1do/pool/railgun/relay/v1", 32);
-  const mnemonic = Mnemonic.fromEntropy("0x" + bytesToHex(entropy)).phrase;
+  const shieldKey = hkdf(
+    sha256,
+    prf,
+    undefined,
+    "r1do/pool/railgun/shield/v1",
+    32,
+  );
+  const relayKey = hkdf(
+    sha256,
+    prf,
+    undefined,
+    "r1do/pool/railgun/relay/v1",
+    32,
+  );
+  // Same derivation the "Show seed" backup uses (single source of truth in seed.ts).
+  const mnemonic = poolMnemonicFromPRF(prf);
   const encryptionKey = bytesToHex(encKey);
   shieldPrivateKey = "0x" + bytesToHex(shieldKey);
   walletEncryptionKey = encryptionKey;
   relayOwnerKey = ("0x" + bytesToHex(relayKey)) as `0x${string}`;
-  entropy.fill(0);
   encKey.fill(0);
   shieldKey.fill(0);
   relayKey.fill(0);
@@ -331,6 +382,81 @@ export async function populateShieldTx(
   };
 }
 
+// Minimal ERC20 approve — the only extra write an ERC20 shield needs (the proxy
+// pulls the tokens with transferFrom).
+const ERC20_APPROVE_ABI = [
+  {
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    name: "approve",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+export type ShieldCall = { to: string; data: string; value: string };
+
+/* ── shield (asset-agnostic) ──────────────────────────────────────────────
+   Build the on-chain shield as a list of calls the caller submits in ONE Safe
+   UserOp (the caller never touches the SDK; it just batches what it's given):
+     · native (tokenAddress null) → the existing base-token shield, a single
+       call (the ETH `value` rides its own field, no approve needed).
+     · ERC20 → TWO calls: approve(proxy, amount) so Railgun's proxy can
+       transferFrom, then the shield itself (value 0). Batched, so there's no
+       standing allowance and no extra passkey tap.
+   Recipient is always this user's own 0zk. */
+export async function populateShieldCalls(
+  tokenAddress: string | null,
+  amount: bigint,
+): Promise<ShieldCall[]> {
+  if (!poolWallet) throw new Error("no 0zk wallet — unlock first");
+  if (!shieldPrivateKey) throw new Error("shield key not derived");
+
+  if (!tokenAddress) {
+    // Native base-token path — reuse the single-call builder above.
+    return [await populateShieldTx(amount)];
+  }
+
+  const { transaction } = await populateShield(
+    TXID,
+    POOL_NETWORK,
+    shieldPrivateKey,
+    [{ tokenAddress, amount, recipientAddress: poolWallet.railgunAddress }],
+    [], // no NFTs
+    undefined,
+  );
+
+  // The proxy is what runs transferFrom on a direct shield — approve it for
+  // exactly `amount`. Warn (don't fail) if the SDK ever targets something else,
+  // so a future relay-adapt routing surfaces instead of silently under-approving.
+  if (
+    transaction.to &&
+    (transaction.to as string).toLowerCase() !== POOL_PROXY.toLowerCase()
+  ) {
+    console.warn(
+      `[pool] shield target ${transaction.to} ≠ proxy ${POOL_PROXY} — approving proxy anyway`,
+    );
+  }
+  const approveData = encodeFunctionData({
+    abi: ERC20_APPROVE_ABI,
+    functionName: "approve",
+    args: [POOL_PROXY as `0x${string}`, amount],
+  });
+
+  return [
+    { to: tokenAddress, data: approveData, value: "0" },
+    {
+      to: transaction.to as string,
+      data: transaction.data as string,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      value: BigInt((transaction as any).value ?? 0n).toString(),
+    },
+  ];
+}
+
 /* ── transfer (STEP 3 — private 0zk → 0zk) ────────────────────────────────
    Has a ZK proof: gasEstimate → generateTransferProof (Groth16 ~9s, with a
    progress callback) → populateProvedTransfer → {to,data,value}. The proven tx
@@ -342,10 +468,13 @@ export async function populateTransferTx(
   toZkAddress: string,
   amount: bigint,
   onProgress?: (pct: number) => void,
+  tokenAddress: string = WETH, // default native (WETH); pass an ERC20 to move that token
 ): Promise<{ to: string; data: string; value: string }> {
   if (!poolWallet) throw new Error("no 0zk wallet — unlock first");
   if (!walletEncryptionKey) throw new Error("encryption key not derived");
-  const recipients = [{ tokenAddress: WETH, amount, recipientAddress: toZkAddress }];
+  // 0zk→0zk transfer is the generic ERC20 path (NOT base-token), pool-internal,
+  // so no approve and no unwrap — just parameterize which token moves.
+  const recipients = [{ tokenAddress, amount, recipientAddress: toZkAddress }];
 
   console.log("[pool] transfer gas estimate…");
   const { gasEstimate } = await gasEstimateForUnprovenTransfer(
@@ -361,7 +490,9 @@ export async function populateTransferTx(
     true, // sendWithPublicWallet (self-relay)
   );
 
-  console.log("[pool] generating transfer proof (Groth16; 1st time downloads ~50MB artifacts)…");
+  console.log(
+    "[pool] generating transfer proof (Groth16; 1st time downloads ~50MB artifacts)…",
+  );
   await generateTransferProof(
     TXID,
     POOL_NETWORK,
@@ -412,9 +543,66 @@ export async function populateUnshieldTx(
   toAddress: string,
   amount: bigint,
   onProgress?: (pct: number) => void,
+  tokenAddress?: string, // undefined/WETH = native (base-token, unwrap→ETH); an ERC20 = generic unshield
 ): Promise<{ to: string; data: string; value: string }> {
   if (!poolWallet) throw new Error("no 0zk wallet — unlock first");
   if (!walletEncryptionKey) throw new Error("encryption key not derived");
+
+  // ERC20 unshield: the generic (NON base-token) path. The proxy already holds
+  // the tokens (NO approve) and sends `tokenAddress` straight to the public 0x —
+  // no unwrap. The 0.25% fee goes to Railgun's treasury as a separate transfer.
+  if (tokenAddress && tokenAddress.toLowerCase() !== WETH.toLowerCase()) {
+    const erc20AmountRecipients = [
+      { tokenAddress, amount, recipientAddress: toAddress },
+    ];
+    console.log("[pool] unshield (ERC20) gas estimate…");
+    const { gasEstimate } = await gasEstimateForUnprovenUnshield(
+      TXID,
+      POOL_NETWORK,
+      poolWallet.id,
+      walletEncryptionKey,
+      erc20AmountRecipients,
+      [], // nft
+      await dummyGas(),
+      undefined, // feeTokenDetails
+      true, // sendWithPublicWallet (self-relay)
+    );
+    console.log(
+      "[pool] generating unshield proof (ERC20; 1st time downloads ~50MB artifacts)…",
+    );
+    await generateUnshieldProof(
+      TXID,
+      POOL_NETWORK,
+      poolWallet.id,
+      walletEncryptionKey,
+      erc20AmountRecipients,
+      [], // nft
+      undefined, // broadcasterFeeERC20AmountRecipient
+      true, // sendWithPublicWallet
+      undefined, // overallBatchMinGasPrice
+      (p: number) => onProgress?.(Math.round(p)),
+    );
+    console.log("[pool] ✓ unshield proof generated (ERC20)");
+    const { transaction } = await populateProvedUnshield(
+      TXID,
+      POOL_NETWORK,
+      poolWallet.id,
+      erc20AmountRecipients,
+      [], // nft
+      undefined, // broadcasterFeeERC20AmountRecipient
+      true, // sendWithPublicWallet
+      undefined, // overallBatchMinGasPrice
+      await gasDetails(gasEstimate),
+    );
+    return {
+      to: transaction.to as string,
+      data: transaction.data as string,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      value: BigInt((transaction as any).value ?? 0n).toString(),
+    };
+  }
+
+  // Native base-token path (unwrap WETH→ETH) — unchanged.
   const wrappedERC20Amount = { tokenAddress: WETH, amount };
 
   console.log("[pool] unshield gas estimate…");
@@ -430,7 +618,9 @@ export async function populateUnshieldTx(
     true, // sendWithPublicWallet (self-relay)
   );
 
-  console.log("[pool] generating unshield proof (Groth16; 1st time downloads ~50MB artifacts)…");
+  console.log(
+    "[pool] generating unshield proof (Groth16; 1st time downloads ~50MB artifacts)…",
+  );
   await generateUnshieldBaseTokenProof(
     TXID,
     POOL_NETWORK,
@@ -493,6 +683,33 @@ export function onPoolBalances(cb: (b: PoolBalances) => void): void {
   cb({ ...balances });
 }
 
+// Per-token shielded balances — the full picture (the native `balances` above is
+// just the WETH slice of this, kept for the WETH-centric send/unshield flows).
+// Keyed by lowercased token address. The balance callback fires once PER BUCKET
+// carrying that bucket's full token list, so each event resets that one bucket
+// across all known tokens, then applies the list.
+export type TokenBuckets = {
+  spendable: bigint;
+  missingExternal: bigint;
+  missingInternal: bigint;
+  shieldPending: bigint;
+};
+const tokenBalances = new Map<string, TokenBuckets>();
+let onTokenBalances: ((m: Map<string, TokenBuckets>) => void) | null = null;
+
+/** Snapshot of every shielded token's balances (by lowercased token address). */
+export function getPoolTokenBalances(): Map<string, TokenBuckets> {
+  return new Map(tokenBalances);
+}
+
+/** Subscribe to per-token balance updates (fires immediately with the current). */
+export function onPoolTokenBalances(
+  cb: (m: Map<string, TokenBuckets>) => void,
+): void {
+  onTokenBalances = cb;
+  cb(new Map(tokenBalances));
+}
+
 /* POI activity — so the UI can clearly tell the user "there's a pending POI
    being finalized" (transfer's change/output need a spent-POI WE generate). */
 export type PoolActivity = {
@@ -500,7 +717,11 @@ export type PoolActivity = {
   generatingProof: boolean; // actively proving right now
   proofProgress: number; // 0..100
 };
-const activity: PoolActivity = { finalizing: false, generatingProof: false, proofProgress: 0 };
+const activity: PoolActivity = {
+  finalizing: false,
+  generatingProof: false,
+  proofProgress: 0,
+};
 let onActivity: ((a: PoolActivity) => void) | null = null;
 export function onPoolActivity(cb: (a: PoolActivity) => void): void {
   onActivity = cb;
@@ -516,15 +737,50 @@ function wireCallbacks() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setOnBalanceUpdateCallback((e: any) => {
     if (!poolWallet || e.railgunWalletID !== poolWallet.id) return;
+    // Which TokenBuckets field this bucket maps to (ignore ShieldBlocked /
+    // ProofSubmitted / Spent — not part of the spendable/pending picture).
+    const field: keyof TokenBuckets | undefined = (
+      {
+        Spendable: "spendable",
+        MissingExternalPOI: "missingExternal",
+        MissingInternalPOI: "missingInternal",
+        ShieldPending: "shieldPending",
+      } as Record<string, keyof TokenBuckets>
+    )[e.balanceBucket];
+    if (!field) return;
+
+    // The event carries the FULL token list for this one bucket → zero the field
+    // across known tokens first, then apply, so a token that left this bucket
+    // drops to 0 (not stale).
+    for (const v of tokenBalances.values()) v[field] = 0n;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const w = e.erc20Amounts.find((a: any) => a.tokenAddress.toLowerCase() === WETH.toLowerCase());
-    const amt = w ? BigInt(w.amount) : 0n;
-    if (e.balanceBucket === "Spendable") balances.spendable = amt;
-    else if (e.balanceBucket === "MissingExternalPOI") balances.missingExternal = amt;
-    else if (e.balanceBucket === "MissingInternalPOI") balances.missingInternal = amt;
-    else if (e.balanceBucket === "ShieldPending") balances.shieldPending = amt;
-    console.log(`[pool] balance: ${e.balanceBucket} = ${amt}`);
+    for (const a of e.erc20Amounts as any[]) {
+      const k = (a.tokenAddress as string).toLowerCase();
+      const cur = tokenBalances.get(k) ?? {
+        spendable: 0n,
+        missingExternal: 0n,
+        missingInternal: 0n,
+        shieldPending: 0n,
+      };
+      cur[field] = BigInt(a.amount);
+      tokenBalances.set(k, cur);
+    }
+
+    // Keep the WETH-centric `balances` in sync for the existing native flows.
+    const weth = tokenBalances.get(WETH.toLowerCase());
+    balances.spendable = weth?.spendable ?? 0n;
+    balances.missingExternal = weth?.missingExternal ?? 0n;
+    balances.missingInternal = weth?.missingInternal ?? 0n;
+    balances.shieldPending = weth?.shieldPending ?? 0n;
+
+    const summary =
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (e.erc20Amounts as any[])
+        .map((a) => `${a.tokenAddress}=${a.amount}`)
+        .join(", ") || "(none)";
+    console.log(`[pool] balance: ${e.balanceBucket} — ${summary}`);
     onBalances?.({ ...balances });
+    onTokenBalances?.(new Map(tokenBalances));
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -539,8 +795,25 @@ function wireCallbacks() {
     activity.generatingProof = !done && (e.totalCount ?? 0) > 0 && pct > 0;
     activity.finalizing = activity.generatingProof;
     activity.proofProgress = pct;
-    console.log(`[watcher] POI proof ${e.status} ${pct}% (${e.index + 1}/${e.totalCount})`);
+    console.log(
+      `[watcher] POI proof ${e.status} ${pct}% (${e.index + 1}/${e.totalCount})`,
+    );
     notifyActivity();
+  });
+}
+
+// The engine auto-refreshes POIs during its own block scan (decryptBalances →
+// refreshPOIsForTXIDVersion) in a detached promise. On testnet a spent/unshield
+// POI whose data the aggregator can't serve rejects there as an "Uncaught (in
+// promise)" — harmless (funds stay spendable) but noisy. Swallow that specific
+// POI-refresh rejection silently so it doesn't spam the console.
+if (typeof window !== "undefined") {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  window.addEventListener("unhandledrejection", (ev: any) => {
+    const msg = ev?.reason?.message ?? String(ev?.reason ?? "");
+    if (/refresh POIs|generate POIs|SentCommitments|unshield POI/i.test(msg)) {
+      ev.preventDefault(); // it's a known testnet POI-refresh failure → ignore
+    }
   });
 }
 
@@ -561,27 +834,52 @@ async function scanBalances(): Promise<void> {
   await refreshBalances(CHAIN, [poolWallet.id]); // fires the balance callback
 }
 
+// generatePOIsForWallet pushes spent-POIs forward, but on testnet a POI whose
+// data the aggregator can't serve just keeps failing. Only run it when the
+// pending set actually CHANGES (a genuinely new spend) so we don't re-run a
+// permanently-stuck set every tick. Funds stay spendable regardless; the engine
+// also auto-refreshes POIs during its own scan.
+let lastGeneratedPOIKey = "";
+let lastSeenPOIKey = " "; // sentinel ≠ "" so the first tick always logs the state
+
 async function watcherTick(): Promise<void> {
   if (!poolWallet) return;
-  await withTimeout(syncRailgunTransactionsV2(POOL_NETWORK), 60_000, "syncTxid").catch((e) =>
-    console.warn("[watcher] syncTxid skipped:", e?.message ?? e),
+  await withTimeout(
+    syncRailgunTransactionsV2(POOL_NETWORK),
+    60_000,
+    "syncTxid",
+  ).catch(() => {});
+  await refreshReceivePOIsForWallet(TXID, POOL_NETWORK, poolWallet.id).catch(
+    () => {},
   );
-  await refreshReceivePOIsForWallet(TXID, POOL_NETWORK, poolWallet.id).catch(() => {});
-  const pending = await getChainTxidsStillPendingSpentPOIs(TXID, POOL_NETWORK, poolWallet.id).catch(
-    () => [] as string[],
-  );
-  // Push real spent-POIs forward. The proof runs ASYNC: InProgress events arrive
-  // over the next ticks and the progress callback drives the "finalizing" banner.
-  // For a false-positive txid (nothing to generate) this just returns
-  // AllProofsCompleted/totalCount 0 — a cheap no-op that never lights the banner.
-  // (We intentionally do NOT derive the banner from this list — it returns
-  // phantom txids that never clear.)
-  if (pending.length > 0) {
-    const short = `[${pending.map((t) => t.slice(0, 10) + "…").join(", ")}]`;
-    console.log(`[watcher] ${pending.length} pending spent-POI txid(s) → generate ${short}`);
-    await withTimeout(generatePOIsForWallet(POOL_NETWORK, poolWallet.id), 180_000, "generatePOIs").catch(
-      (e) => console.warn("[watcher] generate:", e?.message ?? e),
-    );
+  const pending = await getChainTxidsStillPendingSpentPOIs(
+    TXID,
+    POOL_NETWORK,
+    poolWallet.id,
+  ).catch(() => [] as string[]);
+  const key = [...pending].sort().join(",");
+  // Visibility — the forest, not the per-txid error trees. Logged ONLY when the
+  // pending set changes (no spam). Receive/shield-side pending shows in the
+  // "[pool] balance: MissingExternal/Internal/ShieldPending" lines.
+  if (key !== lastSeenPOIKey) {
+    lastSeenPOIKey = key;
+    if (pending.length === 0)
+      console.log("[watcher] spent-POIs pending: 0 — all clear ✓");
+    else
+      console.log(
+        `[watcher] spent-POIs pending: ${pending.length} [${pending.map((t) => t.slice(0, 10) + "…").join(", ")}] (each retried independently; a stuck one never blocks the rest)`,
+      );
+  }
+  if (key && key !== lastGeneratedPOIKey) {
+    // New pending set → try once (a stuck set is not retried every tick).
+    lastGeneratedPOIKey = key;
+    await withTimeout(
+      generatePOIsForWallet(POOL_NETWORK, poolWallet.id),
+      180_000,
+      "generatePOIs",
+    ).catch(() => {});
+  } else if (!key) {
+    lastGeneratedPOIKey = "";
   }
   await scanBalances();
 }
@@ -598,6 +896,10 @@ export function startWatcher(): void {
   }
   watcherActive = true;
   console.log("[watcher] POI+balance watcher active (every 20s)");
+  // Paint balances IMMEDIATELY (warm engine reads its cached scan state) so a
+  // funded user never sees a 0 while the first tick's syncTxid/POI work runs.
+  // Enqueued on the engine lock first → resolves before the first watcherTick.
+  withEngineLock(scanBalances).catch((e) => console.warn("[watcher] initial balance paint:", e));
   (async () => {
     while (watcherActive && poolWallet) {
       try {
@@ -617,6 +919,31 @@ export function stopWatcher(): void {
   console.log("[watcher] stopped");
 }
 
+/** "Nuclear" re-sync for the ACTIVE 0zk only: wipe and rebuild this wallet's
+    UTXO merkletree + re-decrypt all its notes from chain. Fixes a wallet whose
+    local scan has gaps (e.g. an RPC that dropped historical eth_getLogs left
+    commitments undecrypted → spent-POIs stuck). Keeps the 0zk record (and its
+    original creationBlock → full history is re-covered), auth, and stealthUtxos
+    untouched — only the re-derivable engine cache is rebuilt. Heavy: minutes. */
+export async function resyncPool(): Promise<void> {
+  if (!poolWallet) throw new Error("no 0zk wallet — unlock first");
+  const id = poolWallet.id;
+  const wasWatching = watcherActive;
+  stopWatcher();
+  console.log(
+    `[pool] re-sync: full UTXO rescan for active 0zk ${id.slice(0, 8)}…`,
+  );
+  try {
+    // Serialize against any in-flight tick so we never collide on the merkletree.
+    await withEngineLock(() =>
+      rescanFullUTXOMerkletreesAndWallets(CHAIN, [id]),
+    );
+    console.log("[pool] ✓ re-sync complete");
+  } finally {
+    if (wasWatching) startWatcher();
+  }
+}
+
 /** Clear ALL account-scoped pool state. Call on logout / account switch so a
     new account never inherits the previous 0zk, balances or watcher. The
     engine itself stays up (it's account-agnostic and holds wallets by id). */
@@ -631,7 +958,9 @@ export async function resetPool(): Promise<void> {
   balances.missingExternal = 0n;
   balances.missingInternal = 0n;
   balances.shieldPending = 0n;
+  tokenBalances.clear();
   onBalances = null;
+  onTokenBalances = null;
   activity.finalizing = false;
   activity.generatingProof = false;
   activity.proofProgress = 0;
