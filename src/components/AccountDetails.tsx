@@ -73,13 +73,12 @@ export default function AccountDetails({ username, wallet, address }: props) {
       const raws = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
       const balances = raws.map((raw) => parseFloat(parseFloat(formatUnits(raw, decimals)).toFixed(4)));
 
-      // Tombstone any native address that reads 0 — it drops out of future reads
-      // (the multicall above shrinks over time). Confirmed 0 only: a thrown read
-      // never reaches here. TEMP backlog sweep: tombstone even without a prior
-      // receivedAt (cleans up addresses spent before tombstoning existed), except
-      // a Courier receive still awaiting funds (localOnly + never funded = pending).
+      // Tombstone a native address that was funded (receivedAt) and now reads 0:
+      // it's been spent, so it drops out of future reads. Confirmed 0 only: a
+      // thrown read never reaches here. Never funded → leave it (a Courier receive
+      // awaiting funds reads 0 too, but that's "pending", not "spent").
       utxos.forEach((u, i) => {
-        if (raws[i] === 0n && !(u.localOnly && !u.receivedAt)) applyStealthCleanup(username, u.stealthAddress);
+        if (raws[i] === 0n && u.receivedAt) applyStealthCleanup(username, u.stealthAddress);
       });
 
       if (!mounted) return;
