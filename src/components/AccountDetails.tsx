@@ -146,7 +146,7 @@ export default function AccountDetails({ username, wallet, address }: props) {
           )}
         </div>
       </div>
-      <Settings privacy={privacy} />
+      <Settings privacy={privacy} username={username} />
     </div>
   ) : (
     <CircularProgress size={50} sx={{ alignItems: "center", mb: 2, mt: 3 }} />

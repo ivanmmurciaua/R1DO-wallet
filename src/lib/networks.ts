@@ -35,11 +35,22 @@ export const NETWORKS: readonly Network[] = [
   {
     id: "sepolia",
     chain: sepolia,
+    // Curated from scripts/rpc-bench.sh (2026-06-23). ONE list feeds BOTH the
+    // light world (getBalance/eth_call + the stealth scanner's BATCHED
+    // getTransaction fan-out) AND Railgun's engine (archive eth_getLogs + ethers
+    // batching). So every entry must serve: (a) archive getLogs cleanly, and
+    // (b) JSON-RPC batches of ≥17 (both viem and ethers batch by default — a node
+    // that rejects batches 500s every batched POST and poisons the fallback).
+    // Verified all four below pass both. EXCLUDED: drpc (free tier caps batches
+    // at 3 → 500s the scanner/engine batches, the flood we hit), publicnode (403
+    // archive), 1rpc (50-block getLogs cap), nodies (250-block cap), pocket
+    // (empty getLogs), zan (CU-metered), owlracle (origin-locked), omniatech
+    // (down). Index 0 is primary; tenderly last as it 429s under heavy volume.
     rpcUrls: [
-      "https://ethereum-sepolia-rpc.publicnode.com",
-      "https://eth-sepolia-testnet.api.pocket.network",
       "https://0xrpc.io/sep",
       "https://rpc.sepolia.ethpandaops.io",
+      "https://sepolia.rpc.sentio.xyz",
+      "https://sepolia.gateway.tenderly.co",
     ],
     bundlerSlug: "sepolia",
   },
@@ -68,7 +79,6 @@ export function networkName(): string {
   return activeNetwork().chain.name;
 }
 
-/** RPC failover list for the active network (mutable copy). */
 export function activeRpcUrls(): string[] {
   return [...activeNetwork().rpcUrls];
 }

@@ -34,6 +34,7 @@ import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { ensureZkInDirectory, resolvePoolAddress } from "@/lib/registry-v2";
 import { getDecimals, getSymbol, getCachedPoolZk, setCachedPoolZk, getWalletMeta, getMetaAddress, addStealthUTXO, getHideBalance, setHideBalance, DEFAULT_DECIMALS, DEFAULT_SYMBOL } from "@/lib/localstorage";
+import { Settings } from "./Settings";
 import { QrCode } from "./QrCode";
 import { GlitchText } from "./GlitchText";
 import { QrScanner } from "./QrScanner";
@@ -42,6 +43,10 @@ import { protocolName } from "@/lib/pool/protocols";
 import { generateStealthPayment, type StealthUTXO, type StealthPayment } from "@/lib/stealth";
 
 type Coin = { utxo: StealthUTXO; balance: bigint };
+
+// Coin-control key: a shield mints ONE pool asset, so a manual UTXO selection
+// must be single-asset. undefined asset = native ETH; an address = that ERC20.
+const assetKey = (u: StealthUTXO) => u.asset?.toLowerCase() ?? "native";
 
 /* 影 · Private view.
    Locked → checking registration → Enable/Unlock (one passkey tap derives the
@@ -322,8 +327,13 @@ export default function PrivateView({
     try {
       const map = new Map<string, bigint>();
       if (isPrivacy) {
-        const { getStealthTotal } = await import("@/lib/deploy");
-        map.set("native", await getStealthTotal(username));
+        // Per-asset stealth totals (native + each funded token) so the selector
+        // offers ERC20s too. getStealthCoins already reads balance per asset.
+        const { getStealthCoins } = await import("@/lib/deploy");
+        for (const c of await getStealthCoins(username)) {
+          const k = c.utxo.asset?.toLowerCase() ?? "native";
+          map.set(k, (map.get(k) ?? 0n) + c.balance);
+        }
       } else {
         const safe = (await wallet.protocolKit.getAddress()) as `0x${string}`;
         map.set("native", BigInt((await wallet.protocolKit.getBalance()).toString()));
@@ -368,8 +378,18 @@ export default function PrivateView({
   const toggleCoin = (addr: string) =>
     setSelectedCoins((prev) => {
       const next = new Set(prev);
-      if (next.has(addr)) next.delete(addr);
-      else next.add(addr);
+      if (next.has(addr)) {
+        next.delete(addr);
+        return next;
+      }
+      // Adding: enforce single-asset — ignore a coin whose asset differs from
+      // what's already selected (its row is also visually disabled).
+      if (prev.size > 0 && coins) {
+        const lockU = coins.find((c) => prev.has(c.utxo.stealthAddress))?.utxo;
+        const addU = coins.find((c) => c.utxo.stealthAddress === addr)?.utxo;
+        if (lockU && addU && assetKey(lockU) !== assetKey(addU)) return prev;
+      }
+      next.add(addr);
       return next;
     });
 
@@ -382,7 +402,8 @@ export default function PrivateView({
       console.log(`[private] shield ${selected.length} selected coin(s) → pool…`);
       const mod = await import("@/lib/pool/railgun");
       const { shieldCoins } = await import("@/lib/deploy");
-      const res = await shieldCoins(selected, username, (a) => mod.populateShieldTx(a));
+      // native (asset=null) → 1 call; ERC20 → [approve(proxy), shield] from the stealth Safe.
+      const res = await shieldCoins(selected, username, (asset, amt) => mod.populateShieldCalls(asset, amt));
       if (!res.success) throw new Error(res.error ?? "shield failed");
       console.log(`[private] ✓ shielded ${res.txHashes.length} coin(s)`);
       setToast({
@@ -400,6 +421,16 @@ export default function PrivateView({
 
   const selectedTotal =
     coins?.filter((c) => selectedCoins.has(c.utxo.stealthAddress)).reduce((s, c) => s + c.balance, 0n) ?? 0n;
+
+  // The asset currently locking the selection (null = nothing selected → all
+  // selectable). Other-asset coins are disabled until this clears.
+  const lockedUtxo = coins?.find((c) => selectedCoins.has(c.utxo.stealthAddress))?.utxo ?? null;
+  const lockedKey: string | null = lockedUtxo ? assetKey(lockedUtxo) : null;
+  // Symbol/decimals of the selected asset (for total/label); native config when
+  // nothing selected or the token isn't in the registry.
+  const selA = lockedUtxo ? (lockedUtxo.asset ? assetByAddress(lockedUtxo.asset) : nativeAsset()) : null;
+  const selDecimals = selA?.decimals ?? decimals;
+  const selSymbol = selA?.symbol ?? symbol;
 
   const openSend = () => {
     setDepositOpen(false);
@@ -705,11 +736,6 @@ export default function PrivateView({
       return;
     }
     const isToken = shieldAsset.kind !== "native";
-    if (isToken && isPrivacy) {
-      // Private ERC20 shield (drain stealth token UTXOs) is step 2.
-      setToast({ msg: `Private ${shSymbol} shield is coming soon`, sev: "info" });
-      return;
-    }
     // "exact" mode grosses-up so the pool receives the typed amount; capped at
     // the source balance (can't deposit more than you hold → falls back to gross).
     const { moves } = computeFee(typedWei, fees.shieldBps, shieldExact, sourceBalance ?? undefined);
@@ -724,7 +750,9 @@ export default function PrivateView({
       if (isPrivacy) {
         // smart shield: each stealth UTXO shields its own balance → inlinkable
         const { smartShield } = await import("@/lib/deploy");
-        const res = await smartShield(moves, username, (a) => mod.populateShieldTx(a));
+        const res = await smartShield(moves, username, isToken ? shieldAsset.address! : null, (asset, a) =>
+          mod.populateShieldCalls(asset, a),
+        );
         if (!res.success) throw new Error(res.error ?? "shield failed");
         console.log(`[private] ✓ smart shield: ${res.txHashes.length} tx(s)`);
       } else {
@@ -858,6 +886,7 @@ export default function PrivateView({
 
   return (
     <Box sx={{ textAlign: "center", position: "relative" }}>
+      <Settings minimal privacy username={username} />
       {scanning && (
         <QrScanner
           onResult={(text) => {
@@ -1159,17 +1188,24 @@ export default function PrivateView({
                       <Stack spacing={0.75} sx={{ mb: 1.25, maxHeight: 220, overflowY: "auto" }}>
                         {coins.map((c) => {
                           const sel = selectedCoins.has(c.utxo.stealthAddress);
+                          // Single-asset lock: a different-asset coin is disabled
+                          // while another asset is selected.
+                          const disabled = lockedKey !== null && assetKey(c.utxo) !== lockedKey && !sel;
+                          const ca = c.utxo.asset ? assetByAddress(c.utxo.asset) : nativeAsset();
+                          const cDec = ca?.decimals ?? decimals;
+                          const cSym = ca?.symbol ?? symbol;
                           return (
                             <Paper
                               key={c.utxo.stealthAddress}
                               elevation={0}
-                              onClick={() => !shielding && toggleCoin(c.utxo.stealthAddress)}
+                              onClick={() => !shielding && !disabled && toggleCoin(c.utxo.stealthAddress)}
                               sx={{
                                 p: 1,
                                 display: "flex",
                                 alignItems: "center",
                                 justifyContent: "space-between",
-                                cursor: "pointer",
+                                cursor: disabled ? "not-allowed" : "pointer",
+                                opacity: disabled ? 0.4 : 1,
                                 border: "1px solid",
                                 borderColor: sel ? "primary.main" : "divider",
                                 bgcolor: sel ? "rgba(91,141,184,0.08)" : "transparent",
@@ -1199,7 +1235,7 @@ export default function PrivateView({
                                 </Typography>
                               </Box>
                               <Typography variant="body2" sx={{ fontSize: "0.68rem", fontWeight: 700 }}>
-                                {fmt(c.balance, decimals)} {symbol}
+                                {fmt(c.balance, cDec)} {cSym}
                               </Typography>
                             </Paper>
                           );
@@ -1219,7 +1255,7 @@ export default function PrivateView({
                         ? "shielding…"
                         : selectedCoins.size === 0
                           ? "Select coins to shield"
-                          : `Shield ${selectedCoins.size} coin${selectedCoins.size > 1 ? "s" : ""} · ${fmt(selectedTotal, decimals)} ${symbol}`}
+                          : `Shield ${selectedCoins.size} coin${selectedCoins.size > 1 ? "s" : ""} · ${fmt(selectedTotal, selDecimals)} ${selSymbol}`}
                     </Button>
                   </>
                 ) : (

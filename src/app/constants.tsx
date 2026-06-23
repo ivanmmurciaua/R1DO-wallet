@@ -7,11 +7,11 @@ export const LOCAL_LAST_USER = "r1do/wallet/v1/lastUser";
 // Chain config is derived from the active network (see lib/networks.ts) — the
 // single source of truth. These re-exports keep the existing wide imports
 // working unchanged while the actual values live in one extensible registry.
-// Failover order: PublicNode first (default), then community fallbacks. Used by
-// every read client and passed to Railgun's loadProvider so a single RPC blip
-// doesn't stall balances/scans (matters once many testers hit it at once).
+// Failover order (see activeRpcUrls / the network registry): public RPCs only.
+// Used by every read client and passed to Railgun's loadProvider so a single RPC
+// blip doesn't stall balances/scans (matters once many testers hit it at once).
 export const RPC_URLS = activeRpcUrls();
-// Primary RPC (default). PublicNode handles Railgun's big batched scans well.
+// Primary RPC (index 0 of the public list).
 export const RPC_URL = RPC_URLS[0];
 // Shared viem transport with automatic failover (tries RPC_URLS in order).
 // Name kept for back-compat; it follows the active chain, not Sepolia per se.

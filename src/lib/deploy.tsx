@@ -494,7 +494,27 @@ export const getStealthCoins = async (
   const utxos = getSpendableUTXOs(username);
   if (utxos.length === 0) return [];
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
-  const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+
+  // Per-asset balances: a stealth UTXO holds exactly one asset (tagged on the
+  // note). Read native ones via getEthBalance and each token's UTXOs via that
+  // token's balanceOf — otherwise token coins read ~0 native and get dropped.
+  const balances = new Array<bigint>(utxos.length).fill(0n);
+  const nativeIdx: number[] = [];
+  const byToken = new Map<`0x${string}`, number[]>();
+  utxos.forEach((u, i) => {
+    if (u.asset) byToken.set(u.asset, [...(byToken.get(u.asset) ?? []), i]);
+    else nativeIdx.push(i);
+  });
+
+  if (nativeIdx.length > 0) {
+    const nb = await getStealthBalances(publicClient, nativeIdx.map((i) => utxos[i].stealthAddress));
+    nativeIdx.forEach((idx, k) => (balances[idx] = nb[k]));
+  }
+  for (const [token, idxs] of byToken) {
+    const tb = await getTokenBalances(publicClient, token, idxs.map((i) => utxos[i].stealthAddress));
+    idxs.forEach((idx, k) => (balances[idx] = tb[k]));
+  }
+
   const coins = utxos.map((utxo, i) => ({ utxo, balance: balances[i] }));
   return coins.filter((c) => c.balance > 0n).sort((a, b) => (a.balance < b.balance ? 1 : -1));
 };
@@ -517,7 +537,10 @@ export const getStealthTotal = async (username: string): Promise<bigint> => {
 const shieldStealthUTXO = async (
   utxo: StealthUTXO,
   keys: { spendingPrivateKey: `0x${string}`; viewingPrivateKey: `0x${string}`; mlkemDecapsKey: Uint8Array },
-  shieldTx: { to: string; data: string; value: string },
+  // Native shield = 1 call; ERC20 shield = [approve(proxy), shield] in ONE UserOp.
+  shieldCalls:
+    | { to: string; data: string; value: string }
+    | { to: string; data: string; value: string }[],
 ): Promise<string> => {
   const h = await deriveStealthH(keys.viewingPrivateKey, keys.mlkemDecapsKey, utxo.ephemeralPubkey, utxo.kemCiphertext);
   const saltNonce = BigInt(h).toString();
@@ -545,7 +568,8 @@ const shieldStealthUTXO = async (
   if (predicted.toLowerCase() !== utxo.stealthAddress.toLowerCase()) {
     throw new Error(`Stealth Safe mismatch: ${predicted} ≠ ${utxo.stealthAddress}`);
   }
-  return sendTxViaSafe(stealthPack, shieldTx);
+  const calls = Array.isArray(shieldCalls) ? shieldCalls : [shieldCalls];
+  return sendTxsViaSafe(stealthPack, calls);
 };
 
 export type SmartShieldResult = {
@@ -566,7 +590,8 @@ export type SmartShieldResult = {
 export const smartShield = async (
   totalAmount: bigint,
   username: string,
-  buildShieldTx: (amount: bigint) => Promise<{ to: string; data: string; value: string }>,
+  asset: string | null, // null = native; token address = drain that token's stealth UTXOs
+  buildShieldCalls: (asset: string | null, amount: bigint) => Promise<{ to: string; data: string; value: string }[]>,
 ): Promise<SmartShieldResult> => {
   const cred = await getWalletCredential(username).catch(() => null);
   if (!cred) return { success: false, shieldedAmount: 0n, txHashes: [], error: "Passkey not found on this device." };
@@ -576,9 +601,13 @@ export const smartShield = async (
   }
   const keys = await derivePQKeysFromPRF(prf);
 
-  const utxos = getSpendableUTXOs(username);
+  const akey = asset?.toLowerCase() ?? null;
+  const utxos = getSpendableUTXOs(username).filter((u) => (u.asset?.toLowerCase() ?? null) === akey);
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
-  const shieldBalances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
+  const addrs = utxos.map((u) => u.stealthAddress);
+  const shieldBalances = asset
+    ? await getTokenBalances(publicClient, asset as `0x${string}`, addrs)
+    : await getStealthBalances(publicClient, addrs);
   const candidates = utxos
     .map((utxo, i) => ({ utxo, balance: shieldBalances[i] }))
     .filter((c) => c.balance > 0n)
@@ -604,8 +633,8 @@ export const smartShield = async (
   let shielded = 0n;
   for (const { utxo, take } of plan) {
     try {
-      const shieldTx = await buildShieldTx(take);
-      const tx = await shieldStealthUTXO(utxo, keys, shieldTx);
+      const calls = await buildShieldCalls(asset, take);
+      const tx = await shieldStealthUTXO(utxo, keys, calls);
       if (!tx) throw new Error("shield returned no tx hash");
       txHashes.push(tx);
       shielded += take;
@@ -629,7 +658,8 @@ export const smartShield = async (
 export const shieldCoins = async (
   selected: StealthUTXO[],
   username: string,
-  buildShieldTx: (amount: bigint) => Promise<{ to: string; data: string; value: string }>,
+  // asset = null → native (1 call); = token address → [approve, shield] (2 calls).
+  buildShieldCalls: (asset: string | null, amount: bigint) => Promise<{ to: string; data: string; value: string }[]>,
 ): Promise<SmartShieldResult> => {
   const cred = await getWalletCredential(username).catch(() => null);
   if (!cred) return { success: false, shieldedAmount: 0n, txHashes: [], error: "Passkey not found on this device." };
@@ -645,10 +675,14 @@ export const shieldCoins = async (
   let shielded = 0n;
   for (const utxo of selected) {
     try {
-      const balance = await publicClient.getBalance({ address: utxo.stealthAddress });
+      const asset = utxo.asset ?? null;
+      // whole coin — native getBalance or this token's balanceOf
+      const balance = asset
+        ? (await getTokenBalances(publicClient, asset, [utxo.stealthAddress]))[0]
+        : await publicClient.getBalance({ address: utxo.stealthAddress });
       if (balance === 0n) continue;
-      const shieldTx = await buildShieldTx(balance); // whole coin
-      const tx = await shieldStealthUTXO(utxo, keys, shieldTx);
+      const calls = await buildShieldCalls(asset, balance);
+      const tx = await shieldStealthUTXO(utxo, keys, calls);
       if (!tx) throw new Error("shield returned no tx hash");
       txHashes.push(tx);
       shielded += balance;

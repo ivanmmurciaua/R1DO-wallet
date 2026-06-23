@@ -29,12 +29,19 @@ export function QrScanner({ onResult, onClose }: Props) {
 
     const tick = () => {
       const video = videoRef.current;
-      if (!cancelled && video && video.readyState === video.HAVE_ENOUGH_DATA && ctx) {
+      if (
+        !cancelled &&
+        video &&
+        video.readyState === video.HAVE_ENOUGH_DATA &&
+        ctx
+      ) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+        const code = jsQR(img.data, img.width, img.height, {
+          inversionAttempts: "dontInvert",
+        });
         if (code?.data) {
           onResult(code.data);
           return; // stop the loop — parent unmounts us on result
@@ -93,12 +100,29 @@ export function QrScanner({ onResult, onClose }: Props) {
         p: 2,
       }}
     >
-      <Typography sx={{ color: "#fff", mb: 2, fontSize: "0.8rem", letterSpacing: "0.08em", textTransform: "uppercase", opacity: 0.85 }}>
+      <Typography
+        sx={{
+          color: "#fff",
+          mb: 2,
+          fontSize: "0.8rem",
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          opacity: 0.85,
+        }}
+      >
         Scan a QR address
       </Typography>
 
       {error ? (
-        <Typography sx={{ color: "#fff", maxWidth: 300, textAlign: "center", fontSize: "0.8rem", lineHeight: 1.6 }}>
+        <Typography
+          sx={{
+            color: "#fff",
+            maxWidth: 300,
+            textAlign: "center",
+            fontSize: "0.8rem",
+            lineHeight: 1.6,
+          }}
+        >
           {error}
         </Typography>
       ) : (
@@ -113,18 +137,47 @@ export function QrScanner({ onResult, onClose }: Props) {
             bgcolor: "#000",
           }}
         >
-          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-          <video ref={videoRef} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <video
+            ref={videoRef}
+            muted
+            playsInline
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
           {!ready && (
-            <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Box
+              sx={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
               <CircularProgress size={28} sx={{ color: "#fff" }} />
             </Box>
           )}
-          <Box sx={{ position: "absolute", inset: "14%", border: "2px solid rgba(255,255,255,0.7)", borderRadius: 1, pointerEvents: "none" }} />
+          <Box
+            sx={{
+              position: "absolute",
+              inset: "14%",
+              border: "2px solid rgba(255,255,255,0.7)",
+              borderRadius: 1,
+              pointerEvents: "none",
+            }}
+          />
         </Box>
       )}
 
-      <Button onClick={onClose} variant="outlined" sx={{ mt: 3, color: "#fff", borderColor: "rgba(255,255,255,0.4)", "&:hover": { borderColor: "#fff" } }}>
+      <Button
+        onClick={onClose}
+        variant="outlined"
+        sx={{
+          mt: 3,
+          color: "#fff",
+          borderColor: "rgba(255,255,255,0.4)",
+          "&:hover": { borderColor: "#fff" },
+        }}
+      >
         Cancel
       </Button>
     </Box>
