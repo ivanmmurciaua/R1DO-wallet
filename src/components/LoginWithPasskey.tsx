@@ -21,6 +21,7 @@ import {
   deleteWalletCredential,
 } from "@/lib/credstore";
 import { WalletMeta } from "@/types";
+import { Settings } from "@/components/Settings";
 
 type props = {
   createOrLoad: (username: string, external: boolean, privacy?: boolean) => object;
@@ -71,7 +72,9 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
 
   const open = Boolean(anchorEl);
 
-  return wallets.length === 0 && !loading && !isRestoring ? (
+  return (
+    <>
+    {wallets.length === 0 && !loading && !isRestoring ? (
     <div>
       <Stack
         spacing={2}
@@ -334,5 +337,9 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
         )}
       </Stack>
     </div>
+    )}
+    {/* Network selector — login-screen scaffolding for multichain (gear is fixed-position) */}
+    <Settings networkOnly />
+    </>
   );
 }

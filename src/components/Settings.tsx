@@ -68,10 +68,15 @@ export function Settings({
   privacy = false,
   username,
   minimal = false,
+  networkOnly = false,
 }: {
   privacy?: boolean;
   username?: string;
   minimal?: boolean;
+  // Login-screen variant: shows ONLY the network selector, unlocked. Scaffolding
+  // for multichain — picking does nothing functional yet (single network), it
+  // just plants the switcher's home. Mutually exclusive with `minimal`.
+  networkOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [seedWorking, setSeedWorking] = useState(false);
@@ -215,7 +220,7 @@ export function Settings({
               [SETTINGS]
             </p>
 
-            {!minimal && (
+            {!minimal && !networkOnly && (
             <div>
               <p style={{ fontSize: "0.8rem", marginBottom: "10px" }}>
                 Native unit display
@@ -241,17 +246,15 @@ export function Settings({
             </div>
             )}
 
-            {!minimal && (
+            {networkOnly && (
             <div>
-              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px" }}>
                 Network
-                <LockOutlinedIcon sx={{ fontSize: "0.8rem", opacity: 0.5 }} />
               </p>
               <TextField
                 select
                 size="small"
                 value={network}
-                disabled
                 onChange={(e) => setNetwork(e.target.value)}
                 sx={{ ...inputSx, width: "100%" }}
               >
@@ -262,7 +265,7 @@ export function Settings({
             </div>
             )}
 
-            {!minimal && privacy && (
+            {!minimal && !networkOnly && privacy && (
             <div>
               <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
                 Spent addresses
@@ -454,7 +457,7 @@ export function Settings({
             </div>
             )}
 
-            {!minimal && (
+            {!minimal && !networkOnly && (
             <div>
               <p style={{ fontSize: "0.8rem" }}>
                 Feel free to contact me if you have any question or feedback:
