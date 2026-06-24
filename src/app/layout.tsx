@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Shippori_Mincho } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import { ThemeRegistry } from "@/components/ThemeRegistry";
 import "./globals.css";
 
@@ -82,6 +83,10 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} ${mincho.variable}`}
       >
         <ThemeRegistry>{children}</ThemeRegistry>
+        {/* Vercel Web Analytics — privacy-friendly (no cookies, no PII), served
+            same-origin from /_vercel/insights. Skipped on the frozen IPFS export
+            (no Vercel backend there). */}
+        {!pwaEnabled ? null : <Analytics />}
       </body>
     </html>
   );
