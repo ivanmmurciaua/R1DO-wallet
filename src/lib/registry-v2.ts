@@ -292,21 +292,20 @@ export async function ensureZkInDirectory(
   const { fp, encKey } = await deriveDirectoryKeys(username);
   try {
     const current = await readOwnEntry(fp, encKey);
-    if (current?.zkAddress === zkAddress) return "already";
+    // Opt-in model: NEVER create the directory entry here. Becoming findable is
+    // a deliberate action (makeFindable). Entering the private world must not be
+    // a backdoor auto-publish — so if there's no entry yet, skip. We only UPDATE
+    // an existing entry to add the 0zk rail (the user IS already findable then).
+    if (!current) return "skipped";
+    if (current.zkAddress === zkAddress) return "already";
 
-    let rawId = current?.rawId;
-    if (!rawId) {
-      const { getWalletCredential } = await import("@/lib/credstore");
-      rawId = (await getWalletCredential(username).catch(() => null))?.rawId;
-    }
-    if (!rawId) throw new Error("no rawId to (re)build the directory entry");
+    // We're updating an EXISTING entry, so rawId/safeAddress come straight from
+    // it. Only add the 0zk rail (and keep the stealth meta, falling back to the
+    // local cache if the entry was published without one — e.g. a public wallet).
+    const rawId = current.rawId;
+    const safeAddress = current.safeAddress;
 
-    const safeAddress = (current?.safeAddress ??
-      ((await wallet.protocolKit.getAddress()) as `0x${string}`)) as `0x${string}`;
-
-    // Preserve the stealth rail even if there's no current entry yet: fall back
-    // to the locally-cached meta-address (a privacy user would otherwise lose it).
-    let metaAddress = current?.metaAddress ?? null;
+    let metaAddress = current.metaAddress ?? null;
     if (!metaAddress) {
       const { getMetaAddress } = await import("@/lib/localstorage");
       metaAddress = getMetaAddress(username);

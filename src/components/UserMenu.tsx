@@ -280,9 +280,27 @@ const handleBackToMenu = (message: string = "") => {
   }, [wallet, fetchTransactions]);
 
   const fetchStealthBalances = useCallback(async () => {
-    const utxos = getSpendableUTXOs(username);
+    let utxos = getSpendableUTXOs(username);
     if (utxos.length === 0) return;
     const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+
+    // Discover the asset of still-untagged pre-minted notes (off-chain Courier
+    // receives). An ERC20 sent to one would otherwise read as native 0 forever:
+    // no tag → no receivedAt → never listed. On-chain finds are tagged in the
+    // scan and Ghost notes at creation, but Courier notes are minted blank — so
+    // probe curated tokens over them here (the periodic detection path) and tag
+    // the hit; the native/token split + received-stamp below then treat it right.
+    const untagged = utxos.filter((u) => u.localOnly && !u.asset);
+    if (untagged.length > 0) {
+      const addrs = untagged.map((u) => u.stealthAddress);
+      for (const t of activeTokens()) {
+        const bals = await getTokenBalances(pub, t.address as `0x${string}`, addrs);
+        bals.forEach((b, i) => {
+          if (b > 0n) patchStealthUTXO(username, addrs[i], { asset: t.address as `0x${string}` });
+        });
+      }
+      utxos = getSpendableUTXOs(username); // re-read with the fresh asset tags
+    }
 
     type Row = { utxo: StealthUTXO; raw: bigint; amount: number; symbol?: string };
     const rows: Row[] = [];

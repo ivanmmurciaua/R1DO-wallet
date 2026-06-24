@@ -2,7 +2,7 @@ import {
   BUNDLER_URL,
   ENTRYPOINT_ADDRESS,
   PAYMASTER_URL,
-  RPC_URL,
+  OPS_RPC_URL,
   SAFE_MODULES_ADDRESS,
   SAFE_MODULES_VERSION,
   SAFE_SW_VERSION,
@@ -32,7 +32,10 @@ export const safeClientFromOwner = async (
   const ownerAddress = privateKeyToAccount(ownerPrivateKey).address;
 
   return Safe4337Pack.init({
-    provider: RPC_URL,
+    // Operations RPC ≠ scanner's primary, so a heavy scan can't 429 the reads
+    // the relay-kit needs to build/deploy (Pimlico is bundler-only and can't
+    // serve eth_getCode/eth_call/eth_getBalance — verified -32601).
+    provider: OPS_RPC_URL,
     signer: ownerPrivateKey,
     bundlerUrl: BUNDLER_URL,
     safeModulesVersion: SAFE_MODULES_VERSION,

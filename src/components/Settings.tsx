@@ -69,6 +69,10 @@ export function Settings({
   username,
   minimal = false,
   networkOnly = false,
+  findable = false,
+  publishing = false,
+  scanning = false,
+  onMakeFindable,
 }: {
   privacy?: boolean;
   username?: string;
@@ -77,6 +81,15 @@ export function Settings({
   // for multichain — picking does nothing functional yet (single network), it
   // just plants the switcher's home. Mutually exclusive with `minimal`.
   networkOnly?: boolean;
+  // Findability (pay-by-username directory). The "Make me findable" action is
+  // surfaced here too — the permanent home for it — but ONLY while the wallet
+  // is NOT yet published (`!findable`). Same opt-in as the home-screen nudge.
+  findable?: boolean;
+  publishing?: boolean;
+  // UTXO scan in progress → the publish stays blocked until it finishes (they'd
+  // otherwise fight for the same rate-limited RPCs).
+  scanning?: boolean;
+  onMakeFindable?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [seedWorking, setSeedWorking] = useState(false);
@@ -176,7 +189,9 @@ export function Settings({
         size="small"
         sx={{
           position: "fixed",
-          bottom: 16,
+          // Sit just above the fixed bottom action bar (UserMenu, ~57px tall)
+          // instead of overlapping it. Respects the safe-area inset the bar uses.
+          bottom: "calc(72px + env(safe-area-inset-bottom))",
           right: 16,
           zIndex: 999,
           opacity: 0.5,
@@ -262,6 +277,41 @@ export function Settings({
                   <MenuItem key={n.id} value={n.id}>{n.chain.name}</MenuItem>
                 ))}
               </TextField>
+            </div>
+            )}
+
+            {!minimal && !networkOnly && onMakeFindable && !findable && (
+            <div>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+                Findability
+                <InfoDot>
+                  Publish an encrypted directory entry so others can pay you by
+                  username. Optional and one-time; until then you can still
+                  receive by sharing your address.
+                </InfoDot>
+              </p>
+              <button
+                onClick={onMakeFindable}
+                disabled={publishing || scanning}
+                style={{
+                  background: "transparent",
+                  border: "1px solid currentColor",
+                  color: "inherit",
+                  fontFamily: "var(--font-geist-mono), monospace",
+                  fontSize: "0.75rem",
+                  letterSpacing: "0.08em",
+                  padding: "6px 12px",
+                  cursor: publishing || scanning ? "default" : "pointer",
+                  opacity: publishing || scanning ? 0.5 : 1,
+                  width: "100%",
+                }}
+              >
+                {scanning
+                  ? "[FINISHING SCAN…]"
+                  : publishing
+                    ? "[MAKING YOU FINDABLE…]"
+                    : "[MAKE ME FINDABLE]"}
+              </button>
             </div>
             )}
 

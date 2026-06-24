@@ -9,26 +9,19 @@ import {
   CircularProgress,
 } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
-import DeleteIcon from "@mui/icons-material/Delete";
 import { useEffect, useRef, useState } from "react";
-import {
-  getWalletMetas,
-  removeWalletMeta,
-} from "@/lib/localstorage";
+import { getWalletMetas } from "@/lib/localstorage";
 import { migrateLocalStorageToV1 } from "@/lib/localstorage-migrate"; // TEMP: remove in a future iteration
-import {
-  listWalletCredentials,
-  deleteWalletCredential,
-} from "@/lib/credstore";
+import { listWalletCredentials } from "@/lib/credstore";
+import { LOCAL_LAST_USER } from "@/app/constants";
 import { WalletMeta } from "@/types";
 import { Settings } from "@/components/Settings";
 
 type props = {
   createOrLoad: (username: string, external: boolean, privacy?: boolean) => object;
-  isRestoring?: boolean;
 };
 
-export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: props) {
+export default function LoginWithPasskey({ createOrLoad }: props) {
   const hasAutoLoaded = useRef(false);
   const [wallets, setWallets] = useState<WalletMeta[]>([]);
   const [loading, setLoading] = useState(true);
@@ -47,19 +40,22 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
     hasAutoLoaded.current = true;
     migrateLocalStorageToV1(); // TEMP one-shot: pre-namespace keys → r1do/wallet/v1
     (async () => {
-      // Wallet list = shared credential store (R1DOToolsDB — any passkey of
-      // the suite is a derivable wallet) merged with the local metadata.
+      // Wallet list = local metadata FIRST (so wallets[0] is THIS device's
+      // primary wallet — "the first in the localStorage array"), then any
+      // suite-wide credential from the shared store (R1DOToolsDB) not already
+      // present. The Welcome-back card always unlocks wallets[0], even if more
+      // exist; the rest are reachable via "use a different wallet".
       const byName = new Map<string, WalletMeta>();
+      for (const m of getWalletMetas()) {
+        byName.set(m.username.toLowerCase(), m);
+      }
       try {
         for (const c of await listWalletCredentials()) {
-          byName.set(c.username.toLowerCase(), { username: c.username });
+          const key = c.username.toLowerCase();
+          if (!byName.has(key)) byName.set(key, { username: c.username });
         }
       } catch (e) {
         console.warn("[login] credential store unavailable:", e);
-      }
-      for (const m of getWalletMetas()) {
-        const key = m.username.toLowerCase();
-        byName.set(key, { ...byName.get(key), ...m });
       }
       setWallets([...byName.values()]);
       setLoading(false);
@@ -72,9 +68,20 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
 
   const open = Boolean(anchorEl);
 
+  // Welcome-back target = the LAST wallet you logged in with (LOCAL_LAST_USER),
+  // so a refresh offers the one you were actually using — not just whichever
+  // happens to be first in the list. Falls back to wallets[0] if there's no
+  // last-user record or it's no longer known on this device.
+  const lastUser =
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(LOCAL_LAST_USER)?.toLowerCase()
+      : null;
+  const primaryWallet =
+    wallets.find((w) => w.username.toLowerCase() === lastUser) ?? wallets[0];
+
   return (
     <>
-    {wallets.length === 0 && !loading && !isRestoring ? (
+    {wallets.length === 0 && !loading ? (
     <div>
       <Stack
         spacing={2}
@@ -229,113 +236,86 @@ export default function LoginWithPasskey({ createOrLoad, isRestoring = false }: 
     </div>
   ) : (
     <div>
-      <Stack>
-        {/*loading || wallets.length < 2 ? (*/}
-        {loading || isRestoring ? (
-          <div style={{ textAlign: "center" }}>
-            <Typography
-              marginBottom={1}
-              marginTop={1}
-              variant="h4"
-              sx={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 2,
-              }}
-            >
-              Loading wallets...
-            </Typography>
-            <CircularProgress size={50} sx={{ mb: 2, mt: 3 }} />
-          </div>
-        ) : (
-          <Stack>
-            <Typography
-              textAlign={"center"}
-              marginBottom={3}
-              marginTop={8}
-              variant="h4"
-            >
-              Select a wallet
-            </Typography>
-            <Box
-              sx={{
-                borderRadius: 2,
-                p: 2,
-                maxWidth: "100%",
-              }}
-            >
-              {wallets.map((wallet: WalletMeta, index: number) => (
-                <div
-                  key={index}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    marginBottom: "7px",
-                    gap: "8px",
-                  }}
-                >
-                  <div
-                    style={{
-                      border: "1px solid",
-                      borderColor: "divider",
-                      flex: 1,
-                    }}
-                  >
-                    <Typography
-                      variant="body1"
-                      sx={{
-                        p: 1,
-                        textAlign: "center",
-                        cursor: "pointer",
-                        "&:hover": { backgroundColor: "action.hover" },
-                        borderRadius: 1,
-                        "&:not(:last-child)": { mb: 1 },
-                      }}
-                      onClick={() =>
-                        createOrLoad(wallet.username.toLowerCase(), false)
-                      }
-                    >
-                      {wallet.username.toUpperCase()}
-                    </Typography>
-                  </div>
-                  <IconButton
-                    size="small"
-                    sx={{
-                      color: "error.main",
-                      "&:hover": { color: "error.dark" },
-                      minWidth: "40px",
-                      height: "40px",
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      // Forget on this device: metadata + caches + the shared
-                      // credential record (the passkey itself survives on the
-                      // authenticator; a resident-key login re-learns it).
-                      removeWalletMeta(wallet.username);
-                      deleteWalletCredential(wallet.username).catch((err) =>
-                        console.warn("[login] credential delete failed:", err),
-                      );
-                      const updatedWallets = wallets.filter(
-                        (_, i) => i !== index,
-                      );
-                      setWallets(updatedWallets);
-                    }}
-                  >
-                    <DeleteIcon fontSize="small" />
-                  </IconButton>
-                </div>
-              ))}
-            </Box>
-            <Typography textAlign={"center"} marginBottom={1} marginTop={8}>
-              Or
-            </Typography>
-            <Button variant="contained" onClick={() => setWallets([])}>
-              Create / Load new wallet
-            </Button>
-          </Stack>
-        )}
-      </Stack>
+      {loading ? (
+        <div style={{ textAlign: "center" }}>
+          <Typography
+            marginBottom={1}
+            marginTop={1}
+            variant="h4"
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 2,
+            }}
+          >
+            Loading wallets...
+          </Typography>
+          <CircularProgress size={50} sx={{ mb: 2, mt: 3 }} />
+        </div>
+      ) : (
+        <Stack
+          spacing={2}
+          direction="column"
+          sx={{ width: "100%", maxWidth: 480, mx: "auto", px: 2 }}
+        >
+          <Typography textAlign={"center"} marginTop={8} variant="h4">
+            R1DO Wallet
+          </Typography>
+          <Typography
+            textAlign={"center"}
+            sx={{
+              opacity: 0.6,
+              letterSpacing: "0.2em",
+              textTransform: "uppercase",
+              fontSize: "0.72rem",
+            }}
+          >
+            welcome back
+          </Typography>
+
+          {/* The device's primary wallet (wallets[0]). Unlocking is ONE
+              deliberate passkey tap — no silent auto-restore. */}
+          <Box
+            sx={{
+              border: "1px solid currentColor",
+              borderRadius: "2px",
+              p: "14px",
+              mt: 1,
+              textAlign: "center",
+              fontFamily: "var(--font-geist-mono), monospace",
+              letterSpacing: "0.08em",
+              opacity: 0.85,
+            }}
+          >
+            {primaryWallet.username.toUpperCase()}
+          </Box>
+
+          <Button
+            onClick={() => createOrLoad(primaryWallet.username.toLowerCase(), false)}
+            variant="contained"
+            color="info"
+          >
+            Unlock
+          </Button>
+
+          <Typography
+            onClick={() => setWallets([])}
+            sx={{
+              cursor: "pointer",
+              textAlign: "center",
+              opacity: 0.55,
+              fontFamily: "var(--font-geist-mono), monospace",
+              fontSize: "0.78rem",
+              letterSpacing: "0.04em",
+              mt: 1,
+              "&:hover": { opacity: 0.85 },
+            }}
+          >
+            Use a different wallet
+          </Typography>
+        </Stack>
+      )}
     </div>
     )}
     {/* Network selector — login-screen scaffolding for multichain (gear is fixed-position) */}
