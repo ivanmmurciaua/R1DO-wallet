@@ -13,6 +13,11 @@ export const LOCAL_LAST_USER = "r1do/wallet/v1/lastUser";
 export const RPC_URLS = activeRpcUrls();
 // Primary RPC (index 0 of the public list).
 export const RPC_URL = RPC_URLS[0];
+// RPC for Safe/4337 operations (deploy, send, Make-findable). DELIBERATELY a
+// different node than the scanner's primary (RPC_URLS[0]) so a heavy stealth
+// scan and a wallet operation never fight over the same rate-limited endpoint.
+// Falls back to the primary if the registry has a single RPC.
+export const OPS_RPC_URL = RPC_URLS[1] ?? RPC_URLS[0];
 // Shared viem transport with automatic failover (tries RPC_URLS in order).
 // Name kept for back-compat; it follows the active chain, not Sepolia per se.
 export const sepoliaTransport = () => fallback(RPC_URLS.map((u) => http(u)));

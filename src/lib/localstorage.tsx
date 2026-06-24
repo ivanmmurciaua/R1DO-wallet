@@ -102,6 +102,7 @@ interface Account {
   zk?: string;                 // cached 0zk (public, deterministic) — instant "Unlock"
   metaAddress?: `0x${string}`; // Δ1 stealth meta-address (public, off-chain shareable)
   directory?: string;          // directory contract address this user is published to
+  findableNudgeDismissed?: boolean; // user dismissed the "make me findable" banner
 }
 
 const readAccount = (username: string): Account => {
@@ -139,8 +140,23 @@ export const getMetaAddress = (username: string): `0x${string}` | null =>
 export const getDirectoryMark = (username: string): string | null =>
   readAccount(username).directory ?? null;
 
-export const setDirectoryMark = (username: string, directoryAddress: string): void =>
-  patchAccount(username, { directory: directoryAddress });
+export const setDirectoryMark = (username: string, directoryAddress: string): void => {
+  // Becoming findable makes the "nudge dismissed" flag moot — drop the property
+  // entirely (not just set false) so the account object stays clean.
+  const acct = readAccount(username);
+  delete acct.findableNudgeDismissed;
+  acct.directory = directoryAddress;
+  localStorage.setItem(acctKey(username), JSON.stringify(acct));
+};
+
+// Persisted dismissal of the "make me findable" nudge, so it doesn't nag on
+// every reload. Safe to dismiss: the action is always available from Settings.
+// Cleared automatically once findable (see setDirectoryMark).
+export const getFindableNudgeDismissed = (username: string): boolean =>
+  readAccount(username).findableNudgeDismissed ?? false;
+
+export const setFindableNudgeDismissed = (username: string): void =>
+  patchAccount(username, { findableNudgeDismissed: true });
 
 // ── Stealth scan state — cursor (localStorage) + UTXO store (IndexedDB) ───────
 //

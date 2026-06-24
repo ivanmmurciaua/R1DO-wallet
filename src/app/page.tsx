@@ -37,6 +37,7 @@ import {
   getMetaAddress,
   getDirectoryMark,
   setDirectoryMark,
+  getCachedPoolZk,
   hydrateStealthStore,
 } from "@/lib/localstorage";
 import { beginScan, endScan } from "@/lib/scanState";
@@ -53,7 +54,6 @@ export default function Home() {
   const [userWallet, setWallet] = useState<Safe4337Pack | null>(null);
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
-  const [isRestoring, setIsRestoring] = useState(false);
   // const [recovery, setRecovery] = useState(false);
 
   // Stealth UTXO store hydrated (idb → in-memory cache) for the logged-in user.
@@ -139,36 +139,11 @@ export default function Home() {
     return () => { active = false; };
   }, [username, deployed]);
 
-  // F5 with an active session: LOCAL_LAST_USER remembers who was logged in
-  // and we re-enter through the normal login path. The address derives from
-  // the PRF (biometric gesture), so the restore costs one passkey tap —
-  // nothing is silent, but nothing needs retyping either.
-  const restoreAttempted = useRef(false);
-  useEffect(() => {
-    if (restoreAttempted.current || deployed) return;
-    restoreAttempted.current = true;
-    const lastUser = localStorage.getItem(LOCAL_LAST_USER);
-    if (!lastUser) return;
-    (async () => {
-      // Only restore if the credential is still known — never fall through
-      // to passkey creation from a refresh.
-      const cred = await getWalletCredential(lastUser).catch(() => null);
-      if (!cred) {
-        localStorage.removeItem(LOCAL_LAST_USER);
-        return;
-      }
-      setIsRestoring(true);
-      try {
-        await createOrLoad(lastUser, false);
-      } catch (e) {
-        console.warn("[restore] session restore cancelled/failed:", e);
-        closePopup();
-      } finally {
-        setIsRestoring(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // No silent session restore on F5. The login screen shows a "Welcome back"
+  // card for this device's primary wallet (LoginWithPasskey) and the user taps
+  // Unlock — so the passkey gesture is always DELIBERATE, never auto-fired
+  // mid-load (which felt like the prompt "jumped" at you). LOCAL_LAST_USER is
+  // still written on login but no longer triggers an automatic re-entry.
 
   // v2: the wallet derives from the PRF-derived owner key — no coordinates,
   // no on-chain reads needed to reconstruct the Safe.
@@ -208,7 +183,10 @@ export default function Home() {
       const safeAddress = (await wallet.protocolKit.getAddress()) as `0x${string}`;
       const blob = sealDirectoryEntry(
         encKey,
-        encodeDirectoryPayload({ rawId, safeAddress, metaAddress }),
+        // Include the 0zk rail if it's already been derived (user entered the
+        // private world before making findable) — so a private user who opts in
+        // gets the shielded pay-by-nick rail in the same entry.
+        encodeDirectoryPayload({ rawId, safeAddress, metaAddress, zkAddress: getCachedPoolZk(username) }),
       );
       encKey.fill(0);
       const tx = await setDirectoryEntry(wallet, fp, blob);
@@ -227,7 +205,7 @@ export default function Home() {
     privacyHint?: boolean,
   ) {
     const ownerKey = deriveOwnerKey(prf);
-    const wallet = await handleWalletInit(ownerKey);
+    await handleWalletInit(ownerKey);
 
     // Respect the privacy choice made at registration: stored flag, then a
     // hint from the directory entry. Wallets unknown to this device (e.g. a
@@ -245,17 +223,31 @@ export default function Home() {
     if (privacy) {
       runStealthScan(username, prf);
     }
-
-    // Lazy publish for wallets whose "registration" happened elsewhere (a
-    // tools passkey logging in here, or a user registered before the
-    // directory was deployed). Background, one Argon2id at most per user.
-    (async () => {
-      const metaAddress = privacy
-        ? getMetaAddress(username) ?? (await derivePQKeysFromPRF(prf)).pqMetaAddress
-        : getMetaAddress(username);
-      await ensureDirectoryEntry(wallet, username, rawId, metaAddress);
-    })().catch((e) => console.warn("[directory] lazy publish failed:", e));
+    // NOTE: NO automatic directory publish here. Becoming findable is a
+    // deliberate opt-in (makeFindable), so logging in never spends sponsored
+    // gas on its own — the only sponsored on-chain action is the user's
+    // explicit "Make me findable" tap.
   }
+
+  // Deliberate opt-in: publish the encrypted directory entry so others can pay
+  // this wallet by username. It's the ONLY sponsored on-chain action of a fresh
+  // wallet (it also deploys the counterfactual Safe), kept OFF the registration
+  // path so a never-funded wallet never costs the paymaster anything — which is
+  // what makes sponsored registration safe on a real-gas chain. Returns true
+  // once findable.
+  const makeFindable = useCallback(async (): Promise<boolean> => {
+    if (!userWallet || !username || !directoryEnabled()) return false;
+    if (getDirectoryMark(username) === DIRECTORY_ADDRESS) return true;
+    const cred = await getWalletCredential(username).catch(() => null);
+    if (!cred) return false;
+    await ensureDirectoryEntry(
+      userWallet,
+      username,
+      cred.rawId,
+      getMetaAddress(username),
+    );
+    return getDirectoryMark(username) === DIRECTORY_ADDRESS;
+  }, [userWallet, username]);
 
   async function registerNewUser(
     username: string,
@@ -264,13 +256,11 @@ export default function Home() {
     privacy?: boolean,
   ) {
     const ownerKey = deriveOwnerKey(prf);
-    const wallet = await handleWalletInit(ownerKey);
+    await handleWalletInit(ownerKey);
 
-    let metaAddress: `0x${string}` | null = null;
     if (privacy) {
       const keys = await derivePQKeysFromPRF(prf);
-      metaAddress = keys.pqMetaAddress;
-      saveMetaAddress(username, metaAddress);
+      saveMetaAddress(username, keys.pqMetaAddress);
       console.log("[registerNewUser] ✓ Meta-address cached for off-chain sharing");
     }
 
@@ -279,17 +269,16 @@ export default function Home() {
       console.warn("[credstore] mirror failed (non-fatal):", e),
     );
 
-    // Optional: publish the encrypted directory entry (pay-by-username).
-    // Login NEVER depends on this — resident passkey + PRF are enough.
-    if (directoryEnabled()) {
-      openPopup("Publishing your encrypted directory entry…");
-      await ensureDirectoryEntry(wallet, username, rawId, metaAddress);
-    }
-
+    // Registration is now 100% counterfactual — ZERO on-chain, ZERO sponsored
+    // gas. Publishing to the directory (becoming findable for pay-by-username)
+    // is a separate opt-in the user triggers later (makeFindable), so spamming
+    // registrations costs the paymaster nothing — safe on a real-gas chain.
     setDeployed(true);
     closePopup();
     if (privacy) {
-      runStealthScan(username, prf);
+      // fresh=true → scan from "now" (no wasteful 3-day sweep that 429s the RPC
+      // and blocks the Make-findable publish right after registering).
+      runStealthScan(username, prf, true);
     }
   }
 
@@ -371,7 +360,14 @@ export default function Home() {
     }
   }
 
-  async function runStealthScan(username: string, prfOutput: Uint8Array) {
+  // `fresh` = brand-new registration. Such a wallet CANNOT have stealth history
+  // (its meta-address didn't exist yet, nobody could pay it), so we start the
+  // cursor at the current block instead of sweeping ~3 days back — that sweep
+  // finds 0 UTXOs every time yet hammers the public RPCs (429), starving the
+  // Make-findable publish that runs right after. Future payments are still
+  // caught: every later scan goes from the cursor forward, and you only become
+  // payable AFTER registering.
+  async function runStealthScan(username: string, prfOutput: Uint8Array, fresh = false) {
     beginScan();
     try {
       await hydrateStealthStore(username); // ensure the cache is loaded before read/merge
@@ -383,13 +379,15 @@ export default function Home() {
       const lastBlock = getLastScannedBlock(username);
       const existing  = getStealthUTXOs(username);
 
-      // If no previous scan, go back ~3 days
+      // No previous scan: a fresh wallet starts at "now" (nothing to find); a
+      // normal first scan (e.g. recovered on a new device) looks back ~3 days.
       const fromBlock = lastBlock ?? (await (async () => {
         const { createPublicClient, http, fallback } = await import("viem");
         const { activeChain } = await import("@/lib/networks");
         const { RPC_URLS } = await import("@/app/constants");
         const c = createPublicClient({ chain: activeChain(), transport: fallback(RPC_URLS.map((u) => http(u))) });
         const latest = await c.getBlockNumber();
+        if (fresh) return latest;
         return latest > STEALTH_SCAN_DEFAULT_BLOCKS ? latest - STEALTH_SCAN_DEFAULT_BLOCKS : 0n;
       })());
 
@@ -559,10 +557,11 @@ export default function Home() {
               username={username}
               wallet={userWallet}
               address={address}
+              makeFindable={makeFindable}
             />
           )
         ) : (
-          <LoginWithPasskey createOrLoad={createOrLoad} isRestoring={isRestoring} />
+          <LoginWithPasskey createOrLoad={createOrLoad} />
         )}
         {showPopup && popupMessage && <Popup popupMessage={popupMessage} />}
       </main>
