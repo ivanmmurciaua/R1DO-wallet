@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Shippori_Mincho } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
 import { ThemeRegistry } from "@/components/ThemeRegistry";
+// Andamiaje del banner beta listo pero oculto — descomentar import + uso abajo.
+// import { BetaBanner } from "@/components/BetaBanner";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -82,6 +84,10 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${mincho.variable}`}
       >
+        {/* Beta disclaimer banner — andamiaje listo (BetaBanner + clase
+            .onLogin en page.module.css) pero OCULTO por ahora. Descomentar para
+            activarlo. */}
+        {/* <BetaBanner /> */}
         <ThemeRegistry>{children}</ThemeRegistry>
         {/* Vercel Web Analytics — privacy-friendly (no cookies, no PII), served
             same-origin from /_vercel/insights. Skipped on the frozen IPFS export

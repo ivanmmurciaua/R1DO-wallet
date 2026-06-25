@@ -26,7 +26,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
   const [wallets, setWallets] = useState<WalletMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState("");
-  const [external, setExternal] = useState(false);
+  const [external, setExternal] = useState(true);
   // New wallets are private by default
   const [privacy, setPrivacy] = useState(true);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
@@ -188,8 +188,8 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
                 opacity: 0.7,
               }}
             >
-              <option value="local">On your device</option>
               <option value="external">External Provider</option>
+              <option value="local">On your device</option>
             </select>
           </FormControl>
         </Box>
@@ -222,7 +222,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             const ext = external;
             const priv = privacy;
             setUsername("");
-            setExternal(false);
+            setExternal(true);
             setPrivacy(true);
             createOrLoad(user.toLowerCase(), ext, priv);
           }}
