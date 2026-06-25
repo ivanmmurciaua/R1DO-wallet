@@ -441,7 +441,7 @@ export default function Home() {
   const inWallet = !!(userWallet && username && address && deployed);
 
   return (
-    <div className={`${styles.page}${inWallet ? ` ${styles.inWallet}` : ""}`}>
+    <div className={`${styles.page} ${inWallet ? styles.inWallet : styles.onLogin}`}>
       {/* Threshold: cross into the private world (shadow) or back to the
           public one (light). Only visible inside the wallet — the private
           world belongs to your account. (This step only changes the look;

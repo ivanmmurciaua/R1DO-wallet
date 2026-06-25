@@ -25,6 +25,13 @@
   padding-top: 76px;
 }
 
+/* On the login screen the fixed beta banner sits at the very top. Reserve its
+   height here so the title/card never tuck under it (the signed-in views are
+   already cleared by .inWallet). */
+.onLogin {
+  padding-top: 84px;
+}
+
 /* ── PC: centered floating card ─────────────────────────────── */
 @media (min-width: 768px) {
   .page {
@@ -37,6 +44,12 @@
      so the extra top inset isn't needed — keep it vertically centred. */
   .inWallet {
     padding-top: 40px;
+  }
+
+  /* Keep the centred login card clear of the fixed beta banner on short
+     viewports (where centring would otherwise tuck it under the banner). */
+  .onLogin {
+    padding-top: 84px;
   }
 
   .main {
