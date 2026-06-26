@@ -29,6 +29,10 @@ export type Network = {
   rpcUrls: readonly string[];
   /** URL-path slug used by infra providers (Pimlico bundler/paymaster). */
   bundlerSlug: string;
+  /** Apply the operator-fee gas floor (fee = max(0.1%, gas)) on this chain.
+      OFF on testnets — Sepolia's gas is unrepresentative and dwarfs the 0.1%,
+      breaking testing; ON for production chains. Defaults to true when omitted. */
+  gasFloor?: boolean;
 };
 
 export const NETWORKS: readonly Network[] = [
@@ -53,6 +57,9 @@ export const NETWORKS: readonly Network[] = [
       "https://sepolia.gateway.tenderly.co",
     ],
     bundlerSlug: "sepolia",
+    // Sepolia gas is testnet-inflated and unrepresentative → normally no gas floor.
+    // TEMPORARILY true to TEST the gas-floor path on Sepolia — revert to false.
+    gasFloor: true,
   },
 ] as const;
 
@@ -81,6 +88,11 @@ export function networkName(): string {
 
 export function activeRpcUrls(): string[] {
   return [...activeNetwork().rpcUrls];
+}
+
+/** Whether to apply the operator-fee gas floor on the active chain (default true). */
+export function gasFloorEnabled(): boolean {
+  return activeNetwork().gasFloor ?? true;
 }
 
 /** Explorer tx URL for a hash, or null if the active chain has no explorer. */

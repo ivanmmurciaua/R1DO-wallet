@@ -308,6 +308,26 @@ export const saveStealthScan = (
   writeCursor(username, { block: lastBlock.toString(), count: utxos.length });
 };
 
+// Durable variant for the WINDOWED scan: AWAITS the idb UTXO commit BEFORE
+// advancing the cursor, so the cursor can never outrun the persisted UTXOs. If
+// the user leaves mid-scan, the cursor sits at the last window whose UTXOs are
+// safely in idb → no UTXO is ever skipped on resume. (saveStealthScan's write is
+// fire-and-forget — fine for a single end-of-scan save, NOT for per-window.)
+export const saveStealthScanDurable = async (
+  username: string,
+  utxos: StealthUTXO[],
+  lastBlock: bigint,
+): Promise<void> => {
+  const { count } = readCursor(username);
+  if (utxos.length !== count) {
+    const k = ukey(username);
+    utxoCache.set(k, utxos);
+    hookFlush();
+    await utxoDB().setItem(k, utxos); // await the idb commit BEFORE the cursor
+  }
+  writeCursor(username, { block: lastBlock.toString(), count: utxos.length });
+};
+
 // Append one stealth UTXO WITHOUT advancing the scan cursor — used by ghost-mode
 // unshield and off-chain Courier import, whose payments carry no on-chain blob,
 // so the local note is the only way to re-derive the spending key on this device.

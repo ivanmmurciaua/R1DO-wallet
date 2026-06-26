@@ -30,7 +30,7 @@ import { activeChain, activeChainId, networkName, explorerTxUrl } from "@/lib/ne
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { activeTokens, assetByAddress, formatAsset, type Asset } from "@/lib/assets";
 import { getLastBlock } from "@/lib/client";
-import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealthCleanup, getWalletMeta, saveStealthScan, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealthCleanup, getWalletMeta, saveStealthScanDurable, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
@@ -387,18 +387,22 @@ const handleBackToMenu = (message: string = "") => {
       const lastBlock = getLastScannedBlock(username);
       const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
       const fromBlock = lastBlock ?? (await pub.getBlockNumber() - 21600n);
-      const { utxos: newUtxos, latestBlock } = await scanStealthPayments(
+      // Windowed scan: each window persists to idb and only THEN advances the
+      // cursor → resumable, never skips a UTXO (see saveStealthScanDurable).
+      let merged = [...getStealthUTXOs(username)];
+      await scanStealthPayments(
         keys.spendingPrivateKey,
         keys.viewingPrivateKey,
         keys.mlkemDecapsKey,
         fromBlock,
+        async (windowUtxos, windowEnd) => {
+          merged = [
+            ...merged,
+            ...windowUtxos.filter((u) => !merged.some((e) => e.stealthAddress === u.stealthAddress)),
+          ];
+          await saveStealthScanDurable(username, merged, windowEnd);
+        },
       );
-      const existing = getStealthUTXOs(username);
-      const merged = [
-        ...existing,
-        ...newUtxos.filter(u => !existing.some(e => e.stealthAddress === u.stealthAddress)),
-      ];
-      saveStealthScan(username, merged, latestBlock);
       await fetchStealthBalances();
     } catch (e) {
       console.error("[refreshPrivate] error:", e);

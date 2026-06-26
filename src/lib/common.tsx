@@ -1,5 +1,5 @@
-// Client-side error logger. (Antes hacía POST a /api/log-error, pero la app se
-// exporta estática para IPFS — sin servidor — así que logueamos en consola.)
+// Client-side error logger. (It used to POST to /api/log-error, but the app is
+// exported statically for IPFS — no server — so we log to the console instead.)
 export const log = async (context: string, e: unknown) => {
   console.error(`[R1DO]${context ? " [" + context + "]" : ""}:`, e);
 };

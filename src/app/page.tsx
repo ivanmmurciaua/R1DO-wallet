@@ -31,7 +31,7 @@ import {
   setWalletMeta,
   getWalletMeta,
   getStealthUTXOs,
-  saveStealthScan,
+  saveStealthScanDurable,
   getLastScannedBlock,
   saveMetaAddress,
   getMetaAddress,
@@ -393,21 +393,25 @@ export default function Home() {
 
       console.log(`[stealthScan] From block: ${fromBlock} | existing UTXOs: ${existing.length}`);
 
-      const { utxos: newUtxos, latestBlock } = await scanStealthPayments(
+      // Windowed scan: each 1000-block window persists its UTXOs to idb and only
+      // THEN advances the cursor (saveStealthScanDurable awaits the idb commit).
+      // So leaving mid-scan resumes from the last persisted window — never re-scans
+      // what's already saved, never skips a UTXO. `merged` grows per window.
+      let merged = [...existing];
+      const { latestBlock } = await scanStealthPayments(
         keys.spendingPrivateKey,
         keys.viewingPrivateKey,
         keys.mlkemDecapsKey,
         fromBlock,
+        async (windowUtxos, windowEnd) => {
+          merged = [
+            ...merged,
+            ...windowUtxos.filter((u) => !merged.some((e) => e.stealthAddress === u.stealthAddress)),
+          ];
+          await saveStealthScanDurable(username, merged, windowEnd);
+        },
       );
-
-      // Merge — deduplicate by stealthAddress
-      const merged = [
-        ...existing,
-        ...newUtxos.filter(u => !existing.some(e => e.stealthAddress === u.stealthAddress)),
-      ];
-
-      saveStealthScan(username, merged, latestBlock);
-      console.log(`[stealthScan] ✓ Total UTXOs cached: ${merged.length}`);
+      console.log(`[stealthScan] ✓ Total UTXOs cached: ${merged.length} (up to block ${latestBlock})`);
     } catch (e) {
       console.warn("[stealthScan] Scan failed (non-fatal):", e);
     } finally {

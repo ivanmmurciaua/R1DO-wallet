@@ -5,7 +5,8 @@ import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import ArrowBackIcon from "@mui/icons-material/ArrowBackIosNew";
 import { QrScanner } from "./QrScanner";
 import { Safe4337Pack } from "@safe-global/relay-kit";
-import { smartSend, smartSendToken, getStealthTotal } from "@/lib/deploy";
+import { smartSend, smartSendToken, getStealthTotal, quoteSendFee } from "@/lib/deploy";
+import { computeFee } from "@/lib/fees";
 import { readDirectory } from "@/lib/registry-v2";
 import { getTokenBalances } from "@/lib/balances";
 import { getSpendableUTXOs, getWalletMeta } from "@/lib/localstorage";
@@ -55,6 +56,12 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  // Fee estimate for the Review (reads the real gas): the actual fee charged is
+  // max(0.1%, gas). `estimatedFee` null until it returns (we fall back to the
+  // plain 0.1% margin meanwhile). `gasSponsored` = the 0.1% covers the gas →
+  // show the "Gas: Sponsored" row.
+  const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null);
+  const [gasSponsored, setGasSponsored] = useState<boolean | null>(null);
 
   // Selected asset (native ⧫ or a curated ERC20). Drives symbol/decimals and the
   // send path. Default = native.
@@ -161,6 +168,45 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
   const availDisplay =
     availableWei != null ? fmtDisplay(Number(formatUnits(availableWei, decimals)), 4) : "…";
   const amountDisplay = amount ? fmtDisplay(Number(amount), 8) : amount;
+  const fmtAmt = (wei: bigint) => fmtDisplay(Number(formatUnits(wei, decimals)), 8);
+
+  // Fee shown in the Review: the plain 0.1% margin (exact, synchronous) until the
+  // real-gas estimate returns, then max(0.1%, gas). The breakdown ALWAYS shows —
+  // something is always charged (the 0.1% or the gas).
+  const marginWei = amtWei != null && amtWei > 0n ? computeFee({ op: "send", asset, amount: amtWei, gasWei: 0n }).fee : 0n;
+  const feeWei = estimatedFee ?? marginWei;
+  const netWei = amtWei != null ? amtWei - feeWei : null;
+  // The fee (gas, on small sends) eats the whole amount → nothing reaches the
+  // recipient. Block it: you can't send less than it costs to move.
+  const feeTooBig = netWei != null && netWei <= 0n;
+  // While the real-gas estimate is in flight the fee shown is the provisional
+  // 0.1% margin — block Send so the user never confirms on a not-yet-final fee.
+  const estimatingFee = estimatedFee === null;
+
+  // At the Review step, estimate the real fee (reads the gas via a no-submit
+  // build): fee = max(0.1%, gas), and whether the 0.1% covers the gas.
+  useEffect(() => {
+    if (step !== 3 || !resolved || amtWei == null || amtWei <= 0n) return;
+    let alive = true;
+    setEstimatedFee(null);
+    setGasSponsored(null);
+    (async () => {
+      const q = await quoteSendFee(
+        wallet,
+        asset.address ? (asset.address as `0x${string}`) : null,
+        amtWei,
+        (resolved.address ?? zeroAddress) as `0x${string}`,
+        resolved.metaAddress,
+      );
+      if (alive) {
+        setEstimatedFee(q.fee);
+        setGasSponsored(q.coversGas);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [step, resolved, amtWei, asset, wallet]);
 
   // Slider as a % of the available balance (derived from the typed amount).
   const pct =
@@ -526,8 +572,6 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
         {step === 3 && resolved && (
           <>
             <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 2, p: 2 }}>
-              <ReviewRow label="To" value={resolved.display} />
-              <ReviewRow label="Amount" value={`${amountDisplay} ${symbol}`} />
               <ReviewRow
                 label="Type"
                 value={
@@ -539,18 +583,38 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
                   </Box>
                 }
               />
-              <ReviewRow label="Fee" value="Free · gas sponsored" last />
+              <ReviewRow label="To" value={resolved.display} />
+              <ReviewRow label="You send" value={`${amountDisplay} ${symbol}`} />
+              <ReviewRow label="Service fee" value={`${fmtAmt(feeWei)} ${symbol}`} />
+              {gasSponsored === true && <ReviewRow label="Gas" value="Sponsored" />}
+              <ReviewRow
+                label="Recipient receives"
+                value={feeTooBig ? "—" : netWei != null ? `${fmtAmt(netWei)} ${symbol}` : "…"}
+                last
+              />
             </Box>
+
+            {feeTooBig && (
+              <Typography variant="caption" sx={{ color: "error.main", display: "block", mt: 1, letterSpacing: "0.03em" }}>
+                Amount too small — the network fee ({fmtAmt(feeWei)} {symbol}) exceeds it. Send more.
+              </Typography>
+            )}
 
             <Button
               variant="outlined"
               color="primary"
               startIcon={<SendIcon />}
               onClick={handleConfirm}
-              disabled={isLoading}
+              disabled={isLoading || feeTooBig || estimatingFee}
               sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 2 }}
             >
-              {isLoading ? "Sending…" : "Confirm & Send"}
+              {isLoading
+                ? "Sending…"
+                : estimatingFee
+                  ? "Estimating fee…"
+                  : feeTooBig
+                    ? "Amount too small"
+                    : "Confirm & Send"}
             </Button>
             <Button
               variant="text"

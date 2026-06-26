@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Box, Button, Stack, Typography } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
-import { spendStealthUTXO } from "@/lib/deploy";
+import { spendStealthUTXO, buildSendFeeCalls } from "@/lib/deploy";
 import { loadFromDevice } from "@/lib/passkeys";
 import { readDirectory } from "@/lib/registry-v2";
 import { getDecimals, getSymbol } from "@/lib/localstorage";
@@ -131,17 +131,28 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
       }
 
       const keys = await derivePQKeysFromPRF(prf);
+
+      // Skim the operator fee from THIS spend (same asset as the UTXO) and batch
+      // it as a stealth payment to r1do-wallet inside the same UserOp. Recipient
+      // gets `totalAmount − fee`; the UTXO Safe covers both. fail-open if the fee
+      // is unresolvable or the amount is smaller than it.
+      const feeRes = await buildSendFeeCalls((utxo.asset ?? null) as `0x${string}` | null, totalAmount);
+      const charge = feeRes && totalAmount > feeRes.amount ? feeRes : null;
+      const extraCalls = charge?.calls;
+      const toRecipient = charge ? totalAmount - charge.amount : totalAmount;
+
       const tx = await spendStealthUTXO(
         utxo,
-        totalAmount.toString(),
+        toRecipient.toString(),
         recipientAddress,
         keys.spendingPrivateKey,
         keys.viewingPrivateKey,
         keys.mlkemDecapsKey,
         calldataBlob,
+        extraCalls,
       );
 
-      if (tx) handleCancel(`Sent ${amount} ${symbol} from your stealth balance to ${recipient}`);
+      if (tx) handleCancel(`Sent ${formatUnits(toRecipient, decimals)} ${symbol} from your stealth balance to ${recipient}`);
       else handleCancel("Spend failed. Try again.");
     } catch (error) {
       console.error("Spend stealth UTXO error:", error);
@@ -207,6 +218,12 @@ export const SpendStealthUTXO: React.FC<SpendStealthUTXOProps> = ({ utxo, balanc
             onFocus={(e) => (e.target.style.opacity = "1")}
             onBlur={(e) => (e.target.style.opacity = "0.7")}
           />
+          <Typography
+            variant="caption"
+            sx={{ color: "text.secondary", display: "block", mt: 0.8, letterSpacing: "0.03em", opacity: 0.85 }}
+          >
+            Service fee: 0.1%
+          </Typography>
         </Box>
 
         {/* Spend button */}
