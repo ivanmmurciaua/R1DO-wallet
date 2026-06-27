@@ -123,6 +123,10 @@ export default function PrivateView({
   const [shieldBalances, setShieldBalances] = useState<Map<string, bigint> | null>(null);
   const [shieldAsset, setShieldAsset] = useState<Asset>(nativeAsset());
   const [shielding, setShielding] = useState(false);
+  // Operator-fee quote for the PUBLIC shield (no submit). Privacy multi-chunk fee
+  // is a later phase, so this only runs in public mode.
+  const [shieldQuote, setShieldQuote] = useState<{ fee: bigint; coversGas: boolean; feeTooBig: boolean } | null>(null);
+  const [shieldQuoting, setShieldQuoting] = useState(false);
   // Selected-asset views. Native stays synced to the live prefs (decimals/symbol
   // state); ERC20 uses its own token metadata.
   const keyOf = (a: Asset) => a.address?.toLowerCase() ?? "native";
@@ -529,9 +533,9 @@ export default function PrivateView({
         // inlinkable: relay from a fresh ephemeral Safe (personal broadcaster)
         const relayKey = mod.getRelayKey();
         if (!relayKey) throw new Error("relay key not available");
-        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx);
+        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `transfer (${sendSymbol}, privacy)`);
       } else {
-        txHash = await deploy.sendTxViaSafe(wallet, tx);
+        txHash = await deploy.sendTxViaSafe(wallet, tx, `transfer (${sendSymbol}, public)`);
       }
       console.log(`[private] ✓ transfer submitted — tx: ${txHash}`);
       setToast({
@@ -641,9 +645,9 @@ export default function PrivateView({
         // inlinkable submitter: relay from a fresh ephemeral Safe
         const relayKey = mod.getRelayKey();
         if (!relayKey) throw new Error("relay key not available");
-        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx);
+        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `unshield (${unSymbol}, privacy)`);
       } else {
-        txHash = await deploy.sendTxViaSafe(wallet, tx);
+        txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
       }
       console.log(`[private] ✓ unshield submitted — tx: ${txHash}`);
 
@@ -754,11 +758,29 @@ export default function PrivateView({
         if (!res.success) throw new Error(res.error ?? "shield failed");
         console.log(`[private] ✓ smart shield: ${res.txHashes.length} tx(s)`);
       } else {
-        // Public path. Native = 1 call; ERC20 = [approve, shield] in one UserOp.
-        const calls = await mod.populateShieldCalls(isToken ? shieldAsset.address! : null, moves);
-        const { sendTxsViaSafe } = await import("@/lib/deploy");
-        const txHash = await sendTxsViaSafe(wallet, calls);
-        console.log(`[private] ✓ shield submitted — tx: ${txHash}`);
+        // Public path WITH operator fee skim (shield amount − fee; fee → r1do in
+        // the SAME UserOp). Native = 1 call; ERC20 = [approve, shield]. Fail-open
+        // to a plain shield if r1do is unresolvable or the amount can't cover it.
+        const deploy = await import("@/lib/deploy");
+        const res = await deploy.shieldPublicWithFee(
+          wallet,
+          shieldAsset,
+          isToken ? (shieldAsset.address as `0x${string}`) : null,
+          moves,
+          (a, amt) => mod.populateShieldCalls(a, amt),
+        );
+        if (res.ok) {
+          console.log(`[private] ✓ shield submitted (fee ${res.fee}) — tx: ${res.txHash}`);
+        } else if (res.reason === "no-recipient") {
+          // can't collect the fee → plain shield, no fee (never break the deposit)
+          const calls = await mod.populateShieldCalls(isToken ? shieldAsset.address! : null, moves);
+          const txHash = await deploy.sendTxsViaSafe(wallet, calls, `shield (${isToken ? "ERC20" : "native"}, public)`);
+          console.log(`[private] ✓ shield submitted (no fee) — tx: ${txHash}`);
+        } else {
+          // too-small: the fee would eat the deposit → block, never shield for free
+          setToast({ msg: "Amount too small — it doesn't cover the network fee. Deposit more.", sev: "error" });
+          return;
+        }
       }
       setToast({
         msg: "Shielded — validating, your balance updates shortly",
@@ -868,6 +890,34 @@ export default function PrivateView({
   };
   const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined, shDecimals);
   const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, unSpendable, unDecimals);
+
+  // Estimate the operator fee for the PUBLIC shield (deployed main Safe → no tap)
+  // so the dialog shows the breakdown and the button blocks "amount too small".
+  const shieldMoves = !isPrivacy ? (shieldPreview?.moves ?? 0n) : 0n;
+  useEffect(() => {
+    if (!depositOpen || isPrivacy || shieldMoves <= 0n) {
+      setShieldQuote(null);
+      return;
+    }
+    let alive = true;
+    setShieldQuoting(true);
+    (async () => {
+      try {
+        const mod = await import("@/lib/pool/railgun");
+        const deploy = await import("@/lib/deploy");
+        const token = shieldAsset.kind !== "native" ? (shieldAsset.address as `0x${string}`) : null;
+        const q = await deploy.quoteShieldFee(wallet, shieldAsset, token, shieldMoves, (a, amt) => mod.populateShieldCalls(a, amt));
+        if (alive) setShieldQuote(q);
+      } catch {
+        if (alive) setShieldQuote(null);
+      } finally {
+        if (alive) setShieldQuoting(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [depositOpen, isPrivacy, shieldAsset, shieldMoves, wallet]);
 
   const registered = !!registeredZk;
   const btnLabel = working
@@ -1352,15 +1402,46 @@ export default function PrivateView({
                       )}
                     </Typography>
 
+                    {/* Operator fee (public shield only) — separate from the protocol fee above. */}
+                    {!isPrivacy && shieldMoves > 0n && (
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          fontSize: "0.58rem",
+                          mb: 1.25,
+                          lineHeight: 1.5,
+                          color: shieldQuote?.feeTooBig ? "error.main" : "text.secondary",
+                          opacity: shieldQuote?.feeTooBig ? 1 : 0.55,
+                        }}
+                      >
+                        {shieldQuoting || shieldQuote == null ? (
+                          "estimating network fee…"
+                        ) : shieldQuote.feeTooBig ? (
+                          <>Amount too small — service fee ({fmt(shieldQuote.fee, shDecimals)} {shSymbol}) exceeds it.</>
+                        ) : (
+                          <>
+                            service fee {fmt(shieldQuote.fee, shDecimals)} {shSymbol}
+                            {shieldQuote.coversGas ? " · gas sponsored" : ""}
+                          </>
+                        )}
+                      </Typography>
+                    )}
+
                     <Button
                       variant="contained"
                       color="primary"
                       fullWidth
                       onClick={doShield}
-                      disabled={shielding}
+                      disabled={shielding || (!isPrivacy && (shieldQuoting || !!shieldQuote?.feeTooBig))}
                       startIcon={shielding ? <CircularProgress size={14} /> : undefined}
                     >
-                      {shielding ? "shielding…" : "Confirm shield"}
+                      {shielding
+                        ? "shielding…"
+                        : !isPrivacy && shieldQuoting
+                          ? "estimating fee…"
+                          : !isPrivacy && shieldQuote?.feeTooBig
+                            ? "Amount too small"
+                            : "Confirm shield"}
                     </Button>
                   </>
                 )}

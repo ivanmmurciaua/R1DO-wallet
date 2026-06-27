@@ -98,12 +98,21 @@ const provider = (): JsonRpcProvider =>
   (_provider ??= new JsonRpcProvider(RPC));
 
 // EIP-1559 (Type2) gas details from a gasEstimate — mirrors the spike.
-async function gasDetails(gasEstimate: bigint) {
+async function gasDetails(gasEstimate: bigint, label = "pool op") {
   const fd = await provider().getFeeData();
+  const maxFeePerGas = fd.maxFeePerGas ?? 2_000_000_000n;
+  if (gasEstimate > 0n) {
+    // MEASURE: SDK gas of the Railgun tx ITSELF (the inner transact call; the
+    // real sponsored cost adds the Safe/4337 wrapper, logged at relay time).
+    const costWei = gasEstimate * maxFeePerGas;
+    console.log(
+      `[pool gas] ${label}: gasEstimate=${gasEstimate} × maxFeePerGas=${maxFeePerGas} = costWei=${costWei} (~${Number(costWei) / 1e18} ETH)`,
+    );
+  }
   return {
     evmGasType: EVMGasType.Type2 as const,
     gasEstimate,
-    maxFeePerGas: fd.maxFeePerGas ?? 2_000_000_000n,
+    maxFeePerGas,
     maxPriorityFeePerGas: fd.maxPriorityFeePerGas ?? 1_000_000_000n,
   };
 }
@@ -520,7 +529,7 @@ export async function populateTransferTx(
     undefined,
     true,
     undefined,
-    await gasDetails(gasEstimate),
+    await gasDetails(gasEstimate, `transfer (${tokenAddress.toLowerCase() === WETH.toLowerCase() ? "native" : "ERC20"})`),
   );
   return {
     to: transaction.to as string,
@@ -592,7 +601,7 @@ export async function populateUnshieldTx(
       undefined, // broadcasterFeeERC20AmountRecipient
       true, // sendWithPublicWallet
       undefined, // overallBatchMinGasPrice
-      await gasDetails(gasEstimate),
+      await gasDetails(gasEstimate, "unshield (ERC20)"),
     );
     return {
       to: transaction.to as string,
@@ -644,7 +653,7 @@ export async function populateUnshieldTx(
     undefined, // broadcasterFeeERC20AmountRecipient
     true, // sendWithPublicWallet
     undefined, // overallBatchMinGasPrice
-    await gasDetails(gasEstimate),
+    await gasDetails(gasEstimate, "unshield (native)"),
   );
   return {
     to: transaction.to as string,

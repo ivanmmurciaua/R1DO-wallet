@@ -5,7 +5,7 @@ import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import ArrowBackIcon from "@mui/icons-material/ArrowBackIosNew";
 import { QrScanner } from "./QrScanner";
 import { Safe4337Pack } from "@safe-global/relay-kit";
-import { smartSend, smartSendToken, getStealthTotal, quoteSendFee } from "@/lib/deploy";
+import { smartSend, smartSendToken, getStealthTotal, quoteSendFee, prepareDraw, type PreparedDraw } from "@/lib/deploy";
 import { computeFee } from "@/lib/fees";
 import { readDirectory } from "@/lib/registry-v2";
 import { getTokenBalances } from "@/lib/balances";
@@ -63,6 +63,19 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null);
   const [gasSponsored, setGasSponsored] = useState<boolean | null>(null);
 
+  // Main-Safe-only balance PER asset (separate from the combined available):
+  // drives the draw decision. A private wallet keeps its funds in stealth UTXOs,
+  // so a send beyond the main balance must be SOURCED from them (a draw) — which
+  // needs the passkey to estimate, so a draw's Review is prepared on Review click.
+  const [mainBalances, setMainBalances] = useState<Map<string, bigint>>(new Map());
+  // A draw prepared at the Review (one passkey tap): the SUMMED-gas fee + the
+  // object handed straight to smartSend. Null = cheap path (no draw / no tap).
+  const [preparedDraw, setPreparedDraw] = useState<
+    { prepared: PreparedDraw; fee: bigint; coversGas: boolean; feeTooBig: boolean } | null
+  >(null);
+  const [preparing, setPreparing] = useState(false);
+  const [prepareError, setPrepareError] = useState("");
+
   // Selected asset (native ⧫ or a curated ERC20). Drives symbol/decimals and the
   // send path. Default = native.
   const [asset, setAsset] = useState<Asset>(() => nativeAsset());
@@ -86,6 +99,9 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
 
         const map = new Map<string, bigint>();
         map.set("native", mainWei + stealthWei);
+        // Main-Safe-only balances (draw decision): native here, tokens below (idx 0).
+        const mainOnly = new Map<string, bigint>();
+        mainOnly.set("native", mainWei);
 
         // Per token, read over the main Safe + the stealth addresses TAGGED with
         // that token (so private holdings are detected and shown), and sum. The
@@ -101,9 +117,13 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
             ];
             const bals = await getTokenBalances(client, tokenAddr, addrs);
             map.set(tokenAddr.toLowerCase(), bals.reduce((s, b) => s + b, 0n));
+            mainOnly.set(tokenAddr.toLowerCase(), bals[0] ?? 0n); // addrs[0] = main Safe
           }),
         );
-        if (alive) setAssetBalances(map);
+        if (alive) {
+          setAssetBalances(map);
+          setMainBalances(mainOnly);
+        }
       } catch (e) {
         console.warn("[SendEth] could not load asset balances:", e);
       }
@@ -170,23 +190,49 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
   const amountDisplay = amount ? fmtDisplay(Number(amount), 8) : amount;
   const fmtAmt = (wei: bigint) => fmtDisplay(Number(formatUnits(wei, decimals)), 8);
 
-  // Fee shown in the Review: the plain 0.1% margin (exact, synchronous) until the
-  // real-gas estimate returns, then max(0.1%, gas). The breakdown ALWAYS shows —
-  // something is always charged (the 0.1% or the gas).
+  // A draw is needed when the main Safe alone can't cover the send — only for a
+  // private wallet (its funds live in stealth UTXOs), native or token alike. A
+  // draw's fee can't be estimated without the passkey, so its Review is PREPARED
+  // on the Review click. null main balance (not loaded) → treat as no draw; the
+  // execution path is the safety net (it re-plans and charges correctly anyway).
+  const mainAssetWei = mainBalances.get(keyOf(asset)) ?? null;
+  const needsDraw =
+    privacy &&
+    amtWei != null &&
+    amtWei > 0n &&
+    mainAssetWei != null &&
+    amtWei > mainAssetWei;
+
+  // Prepared-draw inputs change (amount/asset/recipient) → the prepared plan is
+  // stale; drop it so the user re-taps for a fresh estimate.
+  useEffect(() => {
+    setPreparedDraw(null);
+    setPrepareError("");
+  }, [amtWei, asset, resolved]);
+
+  // Fee shown in the Review. For a DRAW it's the prepared SUMMED-gas fee. For the
+  // cheap path it's the plain 0.1% margin (exact, synchronous) until the real-gas
+  // estimate returns, then max(0.1%, gas). The breakdown ALWAYS shows — something
+  // is always charged (the 0.1% or the gas).
   const marginWei = amtWei != null && amtWei > 0n ? computeFee({ op: "send", asset, amount: amtWei, gasWei: 0n }).fee : 0n;
-  const feeWei = estimatedFee ?? marginWei;
+  const isDraw = preparedDraw != null;
+  const feeWei = isDraw ? preparedDraw.fee : (estimatedFee ?? marginWei);
   const netWei = amtWei != null ? amtWei - feeWei : null;
   // The fee (gas, on small sends) eats the whole amount → nothing reaches the
-  // recipient. Block it: you can't send less than it costs to move.
-  const feeTooBig = netWei != null && netWei <= 0n;
-  // While the real-gas estimate is in flight the fee shown is the provisional
-  // 0.1% margin — block Send so the user never confirms on a not-yet-final fee.
-  const estimatingFee = estimatedFee === null;
+  // recipient. Block it: you can't send less than it costs to move. For a draw the
+  // decision is the TOTAL vs the SUMMED-gas fee (computed off-chain in prepareDraw).
+  const feeTooBig = isDraw ? preparedDraw.feeTooBig : (netWei != null && netWei <= 0n);
+  // While the cheap-path real-gas estimate is in flight the fee shown is the
+  // provisional 0.1% margin — block Send so the user never confirms on a not-yet-
+  // final fee. A prepared draw is already final (no in-flight estimate).
+  const estimatingFee = isDraw ? false : (estimatedFee === null);
+  const gasSponsoredShown = isDraw ? preparedDraw.coversGas : gasSponsored;
 
-  // At the Review step, estimate the real fee (reads the gas via a no-submit
-  // build): fee = max(0.1%, gas), and whether the 0.1% covers the gas.
+  // Cheap path only: at the Review, estimate the real fee (reads the gas via a
+  // no-submit build): fee = max(0.1%, gas), and whether the 0.1% covers the gas.
+  // A draw skips this — its fee is prepared (with the passkey) on the Review click.
   useEffect(() => {
-    if (step !== 3 || !resolved || amtWei == null || amtWei <= 0n) return;
+    if (step !== 3 || !resolved || amtWei == null || amtWei <= 0n || needsDraw) return;
     let alive = true;
     setEstimatedFee(null);
     setGasSponsored(null);
@@ -206,7 +252,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
     return () => {
       alive = false;
     };
-  }, [step, resolved, amtWei, asset, wallet]);
+  }, [step, resolved, amtWei, asset, wallet, needsDraw]);
 
   // Slider as a % of the available balance (derived from the typed amount).
   const pct =
@@ -263,6 +309,40 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
     }
   };
 
+  // Step 2 → 3. Cheap path goes straight to the Review (the gas estimate runs in
+  // the effect). A draw is prepared here with ONE passkey tap so the Review shows
+  // the real SUMMED-gas fee (and blocks "Amount too small") instead of guessing.
+  const handleReviewClick = async () => {
+    if (!resolved || amtWei == null) return;
+    if (!needsDraw) {
+      setStep(3);
+      return;
+    }
+    setPreparing(true);
+    setPrepareError("");
+    try {
+      const res = await prepareDraw(
+        wallet,
+        (resolved.address ?? zeroAddress) as `0x${string}`,
+        amtWei,
+        username,
+        resolved.metaAddress,
+        asset.address ? (asset.address as `0x${string}`) : undefined,
+      );
+      if (!res.ok) {
+        setPrepareError(res.error);
+        return;
+      }
+      setPreparedDraw({ prepared: res.prepared, fee: res.fee, coversGas: res.coversGas, feeTooBig: res.feeTooBig });
+      setStep(3);
+    } catch (e) {
+      console.error("[SendEth] prepareDraw failed:", e);
+      setPrepareError("Could not prepare the send. Try again.");
+    } finally {
+      setPreparing(false);
+    }
+  };
+
   const handleConfirm = async () => {
     if (!resolved || amtWei == null) return;
     if (availableWei != null && amtWei > availableWei) {
@@ -282,6 +362,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
           amtWei,
           username,
           resolved.metaAddress,
+          preparedDraw?.prepared, // prepared draw → no second passkey tap
         );
         const priv = resolved.isPrivate ? " privately" : "";
         if (result.success) {
@@ -301,6 +382,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
         amtWei,
         username,
         resolved.metaAddress,
+        preparedDraw?.prepared, // prepared draw → no second passkey tap
       );
       const priv = resolved.isPrivate ? " privately" : "";
       if (result.success) {
@@ -547,14 +629,19 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
               </Stack>
             </Box>
 
+            {prepareError && (
+              <Typography variant="caption" sx={{ color: "error.main", display: "block", mt: 0.5, letterSpacing: "0.03em" }}>
+                {prepareError}
+              </Typography>
+            )}
             <Button
               variant="outlined"
               color="primary"
-              onClick={() => setStep(3)}
-              disabled={!amountValid}
+              onClick={handleReviewClick}
+              disabled={!amountValid || preparing}
               sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 2 }}
             >
-              {overBalance ? "Exceeds balance" : "Review"}
+              {overBalance ? "Exceeds balance" : preparing ? "Preparing…" : "Review"}
             </Button>
             <Button
               variant="text"
@@ -586,7 +673,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
               <ReviewRow label="To" value={resolved.display} />
               <ReviewRow label="You send" value={`${amountDisplay} ${symbol}`} />
               <ReviewRow label="Service fee" value={`${fmtAmt(feeWei)} ${symbol}`} />
-              {gasSponsored === true && <ReviewRow label="Gas" value="Sponsored" />}
+              {gasSponsoredShown === true && <ReviewRow label="Gas" value="Sponsored" />}
               <ReviewRow
                 label="Recipient receives"
                 value={feeTooBig ? "—" : netWei != null ? `${fmtAmt(netWei)} ${symbol}` : "…"}
