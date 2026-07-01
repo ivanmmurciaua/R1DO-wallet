@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Shippori_Mincho } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
 import { ThemeRegistry } from "@/components/ThemeRegistry";
-// Andamiaje del banner beta listo pero oculto — descomentar import + uso abajo.
+// Beta banner scaffolding ready but hidden — uncomment import + usage below.
 // import { BetaBanner } from "@/components/BetaBanner";
 import "./globals.css";
 
@@ -34,10 +34,15 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // El PWA (manifest + service worker + iconos) se desactiva en el build de
-  // IPFS: un SW sobre un subdomain gateway cachearía contenido ya inmutable
-  // por CID y podría servir versiones viejas. Se mantiene en el build normal.
-  const pwaEnabled = process.env.NEXT_PUBLIC_IPFS_BUILD !== "1";
+  // The PWA (manifest + service worker + icons) AND Vercel Analytics are
+  // ROOT-deploy-only features. Disabled on the IPFS export (frozen, no Vercel
+  // backend) AND whenever the wallet is served under a /wallet subpath — the SW
+  // would cache stale proxied content and the analytics/manifest/sw absolute paths
+  // resolve under the wrong root. Only a standalone root deploy (basePath "") keeps
+  // them. Since the wallet now always lives under /wallet, this is off.
+  const pwaEnabled =
+    process.env.NEXT_PUBLIC_IPFS_BUILD !== "1" &&
+    (process.env.NEXT_PUBLIC_BASE_PATH ?? "") === "";
 
   return (
     <html lang="en">
@@ -84,9 +89,8 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${mincho.variable}`}
       >
-        {/* Beta disclaimer banner — andamiaje listo (BetaBanner + clase
-            .onLogin en page.module.css) pero OCULTO por ahora. Descomentar para
-            activarlo. */}
+        {/* Beta disclaimer banner — scaffolding ready (BetaBanner + the .onLogin
+            class in page.module.css) but HIDDEN for now. Uncomment to enable. */}
         {/* <BetaBanner /> */}
         <ThemeRegistry>{children}</ThemeRegistry>
         {/* Vercel Web Analytics — privacy-friendly (no cookies, no PII), served
