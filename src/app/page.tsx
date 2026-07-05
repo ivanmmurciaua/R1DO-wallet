@@ -11,7 +11,6 @@ import {
   derivePQKeysFromPRF,
   deriveOwnerKey,
   scanStealthPayments,
-  STEALTH_SCAN_DEFAULT_BLOCKS,
 } from "@/lib/stealth";
 import {
   readDirectory,
@@ -23,7 +22,7 @@ import {
 } from "@/lib/registry-v2";
 import { saveWalletCredential, getWalletCredential } from "@/lib/credstore";
 import { Address } from "viem";
-import { Safe4337Pack } from "@safe-global/relay-kit";
+import type { SafeWallet } from "@/lib/aa-client";
 import { PasskeyResponseType } from "@/types";
 import AccountDetails from "@/components/AccountDetails";
 import { log } from "@/lib/common";
@@ -40,8 +39,9 @@ import {
   getCachedPoolZk,
   hydrateStealthStore,
 } from "@/lib/localstorage";
-import { beginScan, endScan } from "@/lib/scanState";
+import { beginScan, endScan, setScanProgress } from "@/lib/scanState";
 import { LOCAL_LAST_USER, DIRECTORY_ADDRESS } from "@/app/constants";
+import { poolSupported } from "@/lib/networks";
 import Popup from "@/components/Popup";
 import { useThemeMode } from "@/components/ThemeRegistry";
 import PrivateView from "@/components/PrivateView";
@@ -51,7 +51,7 @@ export default function Home() {
   const [username, setUsername] = useState("");
   const [deployed, setDeployed] = useState(false);
   const [address, setAddress] = useState<Address | null>(null);
-  const [userWallet, setWallet] = useState<Safe4337Pack | null>(null);
+  const [userWallet, setWallet] = useState<SafeWallet | null>(null);
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
   // const [recovery, setRecovery] = useState(false);
@@ -62,6 +62,21 @@ export default function Home() {
 
   // PWA install prompt state
   const [showInstall, setShowInstall] = useState(false);
+  // Shadow (Railgun) world is per-network: unsupported chains (e.g. Arbitrum) have
+  // no pool, and pool/railgun.ts THROWS at boot on them. So we gate the toggle and
+  // show a transient message instead of letting the user cross into a broken world.
+  const shadowAvailable = poolSupported();
+  const [shadowMsg, setShadowMsg] = useState<string | null>(null);
+  const handleShadowToggle = useCallback(() => {
+    // Leaving the shadow (already private) is always allowed; only ENTERING an
+    // unsupported network's shadow is blocked.
+    if (isPrivate || shadowAvailable) {
+      toggleView();
+      return;
+    }
+    setShadowMsg("The shadow (private) world isn't available on this network yet.");
+    setTimeout(() => setShadowMsg(null), 3200);
+  }, [isPrivate, shadowAvailable, toggleView]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deferredPrompt = useRef<any>(null);
 
@@ -149,7 +164,7 @@ export default function Home() {
   // no on-chain reads needed to reconstruct the Safe.
   async function handleWalletInit(
     ownerKey: `0x${string}`,
-  ): Promise<Safe4337Pack> {
+  ): Promise<SafeWallet> {
     const wallet = await safeClientFromOwner(ownerKey);
     setWallet(wallet);
 
@@ -166,7 +181,7 @@ export default function Home() {
   // address). Idempotent and non-fatal: login/registration never depend on
   // it. If the entry already exists on-chain it only records the mark.
   async function ensureDirectoryEntry(
-    wallet: Safe4337Pack,
+    wallet: SafeWallet,
     username: string,
     rawId: string,
     metaAddress: `0x${string}` | null,
@@ -276,9 +291,9 @@ export default function Home() {
     setDeployed(true);
     closePopup();
     if (privacy) {
-      // fresh=true → scan from "now" (no wasteful 3-day sweep that 429s the RPC
-      // and blocks the Make-findable publish right after registering).
-      runStealthScan(username, prf, true);
+      // No cursor yet → runStealthScan starts at "now" (no wasteful sweep that
+      // 429s the RPC and blocks the Make-findable publish right after registering).
+      runStealthScan(username, prf);
     }
   }
 
@@ -367,7 +382,7 @@ export default function Home() {
   // Make-findable publish that runs right after. Future payments are still
   // caught: every later scan goes from the cursor forward, and you only become
   // payable AFTER registering.
-  async function runStealthScan(username: string, prfOutput: Uint8Array, fresh = false) {
+  async function runStealthScan(username: string, prfOutput: Uint8Array) {
     beginScan();
     try {
       await hydrateStealthStore(username); // ensure the cache is loaded before read/merge
@@ -379,16 +394,18 @@ export default function Home() {
       const lastBlock = getLastScannedBlock(username);
       const existing  = getStealthUTXOs(username);
 
-      // No previous scan: a fresh wallet starts at "now" (nothing to find); a
-      // normal first scan (e.g. recovered on a new device) looks back ~3 days.
+      // No cursor for THIS chain (first touch, or it was cleared): start at "now".
+      // First login on a chain scans a single window — nothing to find yet. Catching
+      // payments that landed on this chain BEFORE this first login is a deliberate
+      // opt-in deep-scan (future), NOT the default: keeps login instant and never
+      // floods the RPC with a backlog (which is what block-fixed lookback did, worst
+      // on fast chains). With a cursor it resumes normally (cursor → latest).
       const fromBlock = lastBlock ?? (await (async () => {
         const { createPublicClient, http, fallback } = await import("viem");
         const { activeChain } = await import("@/lib/networks");
         const { RPC_URLS } = await import("@/app/constants");
         const c = createPublicClient({ chain: activeChain(), transport: fallback(RPC_URLS.map((u) => http(u))) });
-        const latest = await c.getBlockNumber();
-        if (fresh) return latest;
-        return latest > STEALTH_SCAN_DEFAULT_BLOCKS ? latest - STEALTH_SCAN_DEFAULT_BLOCKS : 0n;
+        return c.getBlockNumber();
       })());
 
       console.log(`[stealthScan] From block: ${fromBlock} | existing UTXOs: ${existing.length}`);
@@ -410,6 +427,7 @@ export default function Home() {
           ];
           await saveStealthScanDurable(username, merged, windowEnd);
         },
+        setScanProgress, // feed the determinate progress bar (done/total windows)
       );
       console.log(`[stealthScan] ✓ Total UTXOs cached: ${merged.length} (up to block ${latestBlock})`);
     } catch (e) {
@@ -452,9 +470,16 @@ export default function Home() {
           Railgun is not started yet.) */}
       {deployed && address && (
         <button
-          onClick={toggleView}
-          title={isPrivate ? "Back to the light (public)" : "Enter the shadow (private)"}
+          onClick={handleShadowToggle}
+          title={
+            isPrivate
+              ? "Back to the light (public)"
+              : shadowAvailable
+                ? "Enter the shadow (private)"
+                : "Shadow (private) world isn't available on this network yet"
+          }
           aria-label={isPrivate ? "Exit private mode" : "Enter private mode"}
+          aria-disabled={!isPrivate && !shadowAvailable}
           style={{
             position: "fixed",
             top: 16,
@@ -469,12 +494,12 @@ export default function Home() {
             padding: 8,
             lineHeight: 0,
             borderRadius: isPrivate ? 2 : 10,
-            cursor: "pointer",
-            opacity: 0.65,
+            cursor: !isPrivate && !shadowAvailable ? "not-allowed" : "pointer",
+            opacity: !isPrivate && !shadowAvailable ? 0.3 : 0.65,
             transition: "opacity 0.15s, border-radius 0.3s",
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.65")}
+          onMouseEnter={(e) => (e.currentTarget.style.opacity = !isPrivate && !shadowAvailable ? "0.45" : "1")}
+          onMouseLeave={(e) => (e.currentTarget.style.opacity = !isPrivate && !shadowAvailable ? "0.3" : "0.65")}
         >
           {isPrivate ? (
             // sun → back to the light
@@ -489,6 +514,31 @@ export default function Home() {
             </svg>
           )}
         </button>
+      )}
+
+      {/* Transient notice when the shadow toggle is blocked on an unsupported network. */}
+      {shadowMsg && (
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            top: 56,
+            right: 16,
+            zIndex: 1000,
+            maxWidth: 260,
+            background: "rgba(0,0,0,0.82)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.18)",
+            borderRadius: 8,
+            padding: "8px 12px",
+            fontSize: "0.72rem",
+            lineHeight: 1.4,
+            letterSpacing: "0.02em",
+            boxShadow: "0 4px 14px rgba(0,0,0,0.3)",
+          }}
+        >
+          {shadowMsg}
+        </div>
       )}
 
       {deployed && address && (

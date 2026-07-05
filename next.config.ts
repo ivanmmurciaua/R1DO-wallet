@@ -37,6 +37,15 @@ const CSP = [
     "https://rpc.sepolia.ethpandaops.io",
     "https://sepolia.rpc.sentio.xyz",
     "https://sepolia.gateway.tenderly.co",
+    // Arbitrum One public RPCs (networks.ts, curated via rpc-bench.sh). Needed even
+    // while Sepolia is the active chain: the pay-by-name directory is PINNED to
+    // Arbitrum, so directory reads (directoryClient) hit these regardless of the
+    // active network.
+    "https://arb1.lava.build",
+    "https://arb-one.api.pocket.network",
+    "https://arbitrum-one.rpc.sentio.xyz",
+    "https://arb1.arbitrum.io",
+    "https://arbitrum.gateway.tenderly.co",
     // Etherscan v2 API — public-world transaction history (light side)
     "https://api.etherscan.io",
     // Chainlink ETH/USD on Ethereum mainnet (lib/oracle.ts) — price is a GLOBAL

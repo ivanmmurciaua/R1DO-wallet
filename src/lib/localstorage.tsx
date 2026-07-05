@@ -34,11 +34,7 @@ const acctKey       = (u: string) => `${NS}/acct/${u.toLowerCase()}`;
 // so each chain gets its own keys — no cross-chain mixing when the network
 // switcher lands. Reads/writes always target the ACTIVE chain (read internally,
 // not threaded through call sites, so every sync render reader stays untouched).
-// The pre-chain keys (no chainId segment) are kept as LEGACY for one-way
-// migration: existing testers' data adopts forward into the active-chain key.
-const scanCursorKey       = (u: string) => `${NS}/scan/${u.toLowerCase()}/${activeChainId()}/cursor`;
-const scanCursorKeyLegacy = (u: string) => `${NS}/scan/${u.toLowerCase()}/cursor`;
-const scanUtxosKey  = (u: string) => `${NS}/scan/${u.toLowerCase()}/utxos`;
+const scanCursorKey = (u: string) => `${NS}/scan/${u.toLowerCase()}/${activeChainId()}/cursor`;
 const PREFS_KEY     = `${NS}/prefs`;
 
 // ── Global wallet list ───────────────────────────────────────────────────────
@@ -88,7 +84,6 @@ export const removeWalletMeta = (username: string): void => {
   // Drop the whole per-account record + scan state — re-derives/rescans on next login.
   localStorage.removeItem(acctKey(u));
   localStorage.removeItem(scanCursorKey(u));
-  localStorage.removeItem(scanUtxosKey(u)); // legacy copy, if any remains
   // UTXOs now live in IndexedDB — clear the cache + durable store too.
   utxoCache.delete(u);
   hydratedUsers.delete(u);
@@ -179,10 +174,7 @@ interface ScanCursor {
 
 const readCursor = (username: string): ScanCursor => {
   try {
-    // Prefer the chain-scoped key; fall back to the pre-chain (legacy) key so an
-    // existing tester's scan continues from where it was instead of resetting to
-    // genesis. The first writeCursor stamps the new key; the legacy one then idles.
-    const raw = localStorage.getItem(scanCursorKey(username)) ?? localStorage.getItem(scanCursorKeyLegacy(username)) ?? "{}";
+    const raw = localStorage.getItem(scanCursorKey(username)) ?? "{}";
     const c = JSON.parse(raw);
     return { block: typeof c.block === "string" ? c.block : null, count: Number(c.count) || 0 };
   } catch {
@@ -205,9 +197,7 @@ const utxoDB = (): LocalForage => {
 };
 
 // UTXO store key — partitioned per {username, chainId} (see scanCursorKey note).
-// `ukeyBare` is the pre-chain key, kept for one-way migration on hydrate.
 const ukey = (u: string) => `${u.toLowerCase()}:${activeChainId()}`;
-const ukeyBare = (u: string) => u.toLowerCase();
 const readUtxos = (username: string): StealthUTXO[] => utxoCache.get(ukey(username)) ?? [];
 
 // Best-effort durability: write-through persists promptly, but a write fired in
@@ -240,41 +230,6 @@ export const hydrateStealthStore = async (username: string): Promise<void> => {
   hookFlush();
   let arr: StealthUTXO[] = [];
   try { arr = (await utxoDB().getItem<StealthUTXO[]>(k)) ?? []; } catch { arr = []; }
-
-  // Chain-scope migration: UTXOs used to live under the bare username key (pre
-  // network-partitioning). If the chain-scoped key is empty but the bare one has
-  // data, adopt it forward into the active chain's partition and drop the bare
-  // key (that data is necessarily from the chain in use at migration time). One
-  // way, non-destructive on error. Must run before the localStorage legacy tier.
-  if (arr.length === 0 && ukey(username) !== ukeyBare(username)) {
-    try {
-      const bare = (await utxoDB().getItem<StealthUTXO[]>(ukeyBare(username))) ?? [];
-      if (bare.length > 0) {
-        arr = bare;
-        await utxoDB().setItem(k, arr);
-        await utxoDB().removeItem(ukeyBare(username));
-      }
-    } catch { /* on any error, leave the bare key untouched */ }
-  }
-
-  // TEMP migration (remove alongside localstorage-migrate.tsx once all existing
-  // testers have logged in once post-change): UTXOs used to live in localStorage.
-  // If idb is empty but the legacy array exists, adopt it into idb and drop the
-  // localStorage copy. New users never write that key, so this is dead code for
-  // them. Non-destructive: any error leaves the legacy key untouched. Don't
-  // delete this branch until you're sure no tester still has un-migrated UTXOs
-  // (ghost / Courier notes aren't on-chain — orphaning them = data loss).
-  if (arr.length === 0) {
-    try {
-      const legacy = localStorage.getItem(scanUtxosKey(username));
-      const parsed = legacy ? JSON.parse(legacy) : null;
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        arr = parsed;
-        await utxoDB().setItem(k, arr);
-        localStorage.removeItem(scanUtxosKey(username));
-      }
-    } catch { /* on any error, leave the legacy key untouched */ }
-  }
 
   utxoCache.set(k, arr);
   hydratedUsers.add(k);

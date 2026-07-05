@@ -13,7 +13,7 @@ import {
   DEFAULT_SYMBOL,
   DEFAULT_DECIMALS,
 } from "@/lib/localstorage";
-import { NETWORKS, activeNetwork } from "@/lib/networks";
+import { NETWORKS, activeNetwork, setActiveNetwork } from "@/lib/networks";
 
 // R1DO's standard info indicator: click-to-open Popover (mobile-friendly), same
 // look as the Announce/Ghost explainer — NOT a hover Tooltip.
@@ -130,8 +130,9 @@ export function Settings({
   };
   const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   const [decimals, setDecimals] = useState(DEFAULT_DECIMALS);
-  // Both controls below are LOCKED for now (single network, tombstone-only). The
-  // UI is wired so flipping `disabled` off later is all it takes to ship them.
+  // `cleanup` is LOCKED for now (tombstone-only); the UI is wired so flipping
+  // `disabled` off later ships it. `network` is LIVE — it drives the switcher
+  // (handleNetworkChange: persist + reload).
   const [cleanup, setCleanup] = useState<string>("tombstone");
   const [network, setNetwork] = useState<string>(activeNetwork().id);
   const [confirmResync, setConfirmResync] = useState(false);
@@ -154,6 +155,18 @@ export function Settings({
     } finally {
       setResyncing(false);
     }
+  };
+
+  // Switching network persists the choice and RELOADS: the active network feeds
+  // module-level consts (RPC_URLS, BUNDLER_URL…) frozen at import, so a clean
+  // reload is the simplest correct way to re-derive them everywhere. The reload
+  // also clears the in-memory session (no silent F5 restore) → you land on the
+  // login screen for the newly selected chain, which is exactly the switch flow.
+  const handleNetworkChange = (id: string) => {
+    if (id === activeNetwork().id) return;
+    setNetwork(id);
+    setActiveNetwork(id as (typeof NETWORKS)[number]["id"]);
+    window.location.reload();
   };
 
   const handleOpen = () => {
@@ -270,7 +283,7 @@ export function Settings({
                 select
                 size="small"
                 value={network}
-                onChange={(e) => setNetwork(e.target.value)}
+                onChange={(e) => handleNetworkChange(e.target.value)}
                 sx={{ ...inputSx, width: "100%" }}
               >
                 {NETWORKS.map((n) => (

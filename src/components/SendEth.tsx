@@ -4,7 +4,7 @@ import SendIcon from "@mui/icons-material/Send";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import ArrowBackIcon from "@mui/icons-material/ArrowBackIosNew";
 import { QrScanner } from "./QrScanner";
-import { Safe4337Pack } from "@safe-global/relay-kit";
+import type { SafeWallet } from "@/lib/aa-client";
 import { smartSend, smartSendToken, getStealthTotal, quoteSendFee, prepareDraw, type PreparedDraw } from "@/lib/deploy";
 import { computeFee } from "@/lib/fees";
 import { readDirectory } from "@/lib/registry-v2";
@@ -15,9 +15,10 @@ import { parseUnits, formatUnits, zeroAddress, createPublicClient } from "viem";
 import { activeChain, networkName } from "@/lib/networks";
 import { sepoliaTransport } from "@/app/constants";
 import { isPQMetaAddress } from "@/lib/stealth";
+import { ProgressBar } from "./ProgressBar";
 
 type SendEthProps = {
-  wallet: Safe4337Pack;
+  wallet: SafeWallet;
   username: string;
   balance: number;
   onBack: (message: string) => void;
@@ -55,6 +56,9 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
 
   const [amount, setAmount] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  // Draw progress (UserOps done / total) for the "Sending i/N" bar. Null = single-tx
+  // send (no draw) → the button just shows "Sending…".
+  const [sendProgress, setSendProgress] = useState<{ done: number; total: number } | null>(null);
   const [scanning, setScanning] = useState(false);
   // Fee estimate for the Review (reads the real gas): the actual fee charged is
   // max(0.1%, gas). `estimatedFee` null until it returns (we fall back to the
@@ -350,6 +354,9 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
       return;
     }
     setIsLoading(true);
+    // Only a multi-source draw reports progress; show the bar only when total > 1.
+    const onProgress = (done: number, total: number) =>
+      setSendProgress(total > 1 ? { done, total } : null);
     try {
       // ERC20 — one path for public and private: draws from the main Safe and,
       // if short, drains stealth UTXOs tagged with this token (private derives a
@@ -363,6 +370,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
           username,
           resolved.metaAddress,
           preparedDraw?.prepared, // prepared draw → no second passkey tap
+          onProgress,
         );
         const priv = resolved.isPrivate ? " privately" : "";
         if (result.success) {
@@ -383,6 +391,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
         username,
         resolved.metaAddress,
         preparedDraw?.prepared, // prepared draw → no second passkey tap
+        onProgress,
       );
       const priv = resolved.isPrivate ? " privately" : "";
       if (result.success) {
@@ -398,6 +407,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
       handleBackToMenu(`Failed to send ${symbol}. Please try again.`);
     } finally {
       setIsLoading(false);
+      setSendProgress(null);
     }
   };
 
@@ -696,13 +706,24 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
               sx={{ py: 1.5, fontSize: "1rem", borderRadius: 2, mt: 2 }}
             >
               {isLoading
-                ? "Sending…"
+                ? sendProgress
+                  ? `Sending ${sendProgress.done}/${sendProgress.total}…`
+                  : "Sending…"
                 : estimatingFee
                   ? "Estimating fee…"
                   : feeTooBig
                     ? "Amount too small"
                     : "Confirm & Send"}
             </Button>
+            {isLoading && sendProgress && (
+              <div style={{ marginTop: 12 }}>
+                <ProgressBar
+                  done={sendProgress.done}
+                  total={sendProgress.total}
+                  label="Spending your private coins…"
+                />
+              </div>
+            )}
             <Button
               variant="text"
               color="secondary"

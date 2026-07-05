@@ -1,18 +1,7 @@
-import {
-  DIRECTORY_ADDRESS,
-  RPC_URL,
-  BUNDLER_URL,
-  PAYMASTER_URL,
-  ENTRYPOINT_ADDRESS,
-  SAFE_MODULES_ADDRESS,
-  SAFE_MODULES_VERSION,
-  SAFE_SW_VERSION,
-  sepoliaTransport,
-} from "@/app/constants";
-import { Safe4337Pack } from "@safe-global/relay-kit";
-import { encodeFunctionData, createPublicClient } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-import { activeChain, gasFloorEnabled } from "@/lib/networks";
+import { sepoliaTransport } from "@/app/constants";
+import { buildSafeWallet, type SafeWallet, type BuiltUserOp } from "./aa-client";
+import { encodeFunctionData, createPublicClient, formatEther } from "viem";
+import { activeChain, gasFloorEnabled, directoryAddress, directoryNetwork } from "@/lib/networks";
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { log } from "./common";
 import { getSpendableUTXOs } from "./localstorage";
@@ -35,7 +24,7 @@ const RECEIPT_POLL_INTERVAL_MS = 2000;
 const RECEIPT_POLL_MAX_ATTEMPTS = 30;
 
 const waitForUserOpReceipt = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   userOperationHash: string,
 ) => {
   for (let i = 0; i < RECEIPT_POLL_MAX_ATTEMPTS; i++) {
@@ -43,19 +32,36 @@ const waitForUserOpReceipt = async (
       setTimeout(resolve, RECEIPT_POLL_INTERVAL_MS),
     );
     const receipt = await wallet.getUserOperationReceipt(userOperationHash);
-    if (receipt) return receipt;
+    if (receipt) {
+      // MEASURE: the REAL on-chain gas (not the prepared-op limits, which
+      // overestimate). actualGasCost (wei paid) is the true economic cost — on
+      // Arbitrum it folds in the L1 calldata premium (huge for deploying ops, whose
+      // initCode is big). Correlate the hash with the `[aa] prepared op … deploy=…`
+      // line to know if this op deployed the Safe. Deploy cost = (op WITH deploy) −
+      // (same op WITHOUT deploy). TEMP instrumentation.
+      try {
+        const used = receipt.actualGasUsed ?? 0n;
+        const cost = receipt.actualGasCost ?? 0n;
+        const eff = used > 0n ? (Number(cost) / Number(used) / 1e9).toFixed(5) : "?";
+        console.log(
+          `[gas actual] op=${userOperationHash} success=${receipt.success} ` +
+            `actualGasUsed=${used} actualGasCost=${cost}wei (${formatEther(cost)} ETH) effPrice=${eff}gwei`,
+        );
+      } catch { /* logging must never break the send */ }
+      return receipt;
+    }
   }
   throw new Error("Timed out waiting for user operation receipt");
 };
 
 /**
  * Send 0 to Zero Address.
- * @param {Safe4337Pack} wallet - Wallet built by Safe client.
+ * @param {SafeWallet} wallet - Wallet built by Safe client.
  * @returns {Promise<void>}
  * @throws {Error} If the operation fails.
  */
 export const makeTx = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   destinationAddress: string,
   amount: string,
 ): Promise<string> => {
@@ -100,7 +106,7 @@ export const makeTx = async (
  * `value` being shielded comes from the Safe's balance. Returns the tx hash.
  */
 export const sendTxViaSafe = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   tx: { to: string; data: string; value: string },
   label = "", // MEASURE: tags the [gas] line (e.g. "transfer (USDT)")
 ): Promise<string> => {
@@ -135,7 +141,7 @@ export const sendTxViaSafe = async (
  * Returns the tx hash.
  */
 export const sendTxsViaSafe = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   txs: { to: string; data: string; value: string }[],
   label = "", // MEASURE: tags the [gas] line (e.g. "shield (USDT)")
 ): Promise<string> => {
@@ -184,7 +190,7 @@ const ERC20_TRANSFER_ABI = [
  * to the token contract, value 0. Returns the tx hash ("" on failure).
  */
 export const sendToken = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   tokenAddress: `0x${string}`,
   to: `0x${string}`,
   amount: bigint,
@@ -208,7 +214,7 @@ export const sendToken = async (
  * No announcer. Returns the tx hash ("" on failure).
  */
 export const sendStealthToken = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   stealthAddress: `0x${string}`,
   tokenAddress: `0x${string}`,
   amount: bigint,
@@ -252,7 +258,7 @@ export const sendStealthToken = async (
  * stealth UTXOs aren't drained here — that's the spend phase).
  */
 export const sendTokenPrivate = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   tokenAddress: `0x${string}`,
   metaAddress: `0x${string}`,
   amount: bigint,
@@ -273,22 +279,10 @@ export const relayViaEphemeralSafe = async (
   tx: { to: string; data: string; value: string },
   label = "", // MEASURE: tags the [gas] line (privacy-mode relay → includes ephemeral Safe deploy)
 ): Promise<string> => {
-  const owner = privateKeyToAccount(relayOwnerKey);
   const rand = crypto.getRandomValues(new Uint8Array(16));
-  const saltNonce = BigInt("0x" + Array.from(rand).map((b) => b.toString(16).padStart(2, "0")).join("")).toString();
+  const saltNonce = BigInt("0x" + Array.from(rand).map((b) => b.toString(16).padStart(2, "0")).join(""));
 
-  const relayPack = await Safe4337Pack.init({
-    provider: RPC_URL,
-    signer: relayOwnerKey,
-    bundlerUrl: BUNDLER_URL,
-    safeModulesVersion: SAFE_MODULES_VERSION,
-    customContracts: {
-      entryPointAddress: ENTRYPOINT_ADDRESS,
-      safe4337ModuleAddress: SAFE_MODULES_ADDRESS,
-    },
-    paymasterOptions: { isSponsored: true, paymasterUrl: PAYMASTER_URL },
-    options: { owners: [owner.address], threshold: 1, safeVersion: SAFE_SW_VERSION, saltNonce },
-  });
+  const relayPack = await buildSafeWallet(relayOwnerKey, saltNonce);
   const relayAddr = await relayPack.protocolKit.getAddress();
   console.log(`[relay] fresh ephemeral relay Safe ${relayAddr} (unlinkable)`);
   return sendTxViaSafe(relayPack, tx, label);
@@ -301,14 +295,20 @@ export const relayViaEphemeralSafe = async (
  * As the user's first UserOp this also deploys the counterfactual Safe.
  */
 export const setDirectoryEntry = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   fp: `0x${string}`,
   blob: `0x${string}`,
 ): Promise<string> => {
   try {
     const { DIRECTORY_ABI } = await import("./registry-v2");
+    const dir = directoryAddress();
+    // The directory is ONE global contract on the directory network. Rebind the
+    // caller's wallet to that network so this write (and its Safe deploy) lands on
+    // Arbitrum via Arbitrum's Pimlico bundler — even when the active chain differs.
+    // SafeL2-everywhere ⇒ the same Safe address, so the entry's safeAddress matches.
+    const dirWallet = await wallet.onNetwork(directoryNetwork());
     const storeTransaction = {
-      to: DIRECTORY_ADDRESS,
+      to: dir,
       data: encodeFunctionData({
         abi: DIRECTORY_ABI,
         functionName: "setEntry",
@@ -317,18 +317,18 @@ export const setDirectoryEntry = async (
       value: "0",
     };
 
-    const safeOperation = await wallet.createTransaction({
+    const safeOperation = await dirWallet.createTransaction({
       transactions: [storeTransaction],
     });
 
-    const signedSafeOperation = await wallet.signSafeOperation(safeOperation);
+    const signedSafeOperation = await dirWallet.signSafeOperation(safeOperation);
 
     if (signedSafeOperation) {
-      const userOperationHash = await wallet.executeTransaction({
+      const userOperationHash = await dirWallet.executeTransaction({
         executable: signedSafeOperation,
       });
 
-      const receipt = await waitForUserOpReceipt(wallet, userOperationHash);
+      const receipt = await waitForUserOpReceipt(dirWallet, userOperationHash);
 
       if (!receipt.success) {
         throw new Error("Directory entry transaction reverted");
@@ -347,7 +347,7 @@ export const setDirectoryEntry = async (
 // Δ1: single tx — the value transfer to the (codeless) stealth Safe carries
 // the delivery blob as calldata. No announcer contract, no extra call.
 export const sendStealth = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   stealthAddress: `0x${string}`,
   amount: string,
   calldataBlob: `0x${string}`,
@@ -386,22 +386,13 @@ const deriveStealthPack = async (
   spendingPrivateKey: `0x${string}`,
   viewingPrivateKey: `0x${string}`,
   mlkemDecapsKey: Uint8Array,
-): Promise<Safe4337Pack> => {
+): Promise<SafeWallet> => {
   const h = await deriveStealthH(viewingPrivateKey, mlkemDecapsKey, utxo.ephemeralPubkey, utxo.kemCiphertext);
-  const saltNonce = BigInt(h).toString();
+  const saltNonce = BigInt(h);
   const stealthPrivKey = await deriveStealthSpendingKey(
     spendingPrivateKey, viewingPrivateKey, mlkemDecapsKey, utxo.ephemeralPubkey, utxo.kemCiphertext,
   );
-  const stealthOwner = privateKeyToAccount(stealthPrivKey);
-  const stealthPack = await Safe4337Pack.init({
-    provider: RPC_URL,
-    signer: stealthPrivKey,
-    bundlerUrl: BUNDLER_URL,
-    safeModulesVersion: SAFE_MODULES_VERSION,
-    customContracts: { entryPointAddress: ENTRYPOINT_ADDRESS, safe4337ModuleAddress: SAFE_MODULES_ADDRESS },
-    paymasterOptions: { isSponsored: true, paymasterUrl: PAYMASTER_URL },
-    options: { owners: [stealthOwner.address], threshold: 1, safeVersion: SAFE_SW_VERSION, saltNonce },
-  });
+  const stealthPack = await buildSafeWallet(stealthPrivKey, saltNonce);
   const predicted = await stealthPack.protocolKit.getAddress();
   if (predicted.toLowerCase() !== utxo.stealthAddress.toLowerCase()) {
     throw new Error(`Predicted Safe address mismatch: ${predicted} ≠ ${utxo.stealthAddress}`);
@@ -648,7 +639,7 @@ const shieldStealthUTXO = async (
   label = "", // MEASURE: tags the [gas] line (e.g. "shield (native)")
 ): Promise<string> => {
   const h = await deriveStealthH(keys.viewingPrivateKey, keys.mlkemDecapsKey, utxo.ephemeralPubkey, utxo.kemCiphertext);
-  const saltNonce = BigInt(h).toString();
+  const saltNonce = BigInt(h);
   const stealthPrivKey = await deriveStealthSpendingKey(
     keys.spendingPrivateKey,
     keys.viewingPrivateKey,
@@ -656,19 +647,7 @@ const shieldStealthUTXO = async (
     utxo.ephemeralPubkey,
     utxo.kemCiphertext,
   );
-  const stealthOwner = privateKeyToAccount(stealthPrivKey);
-  const stealthPack = await Safe4337Pack.init({
-    provider: RPC_URL,
-    signer: stealthPrivKey,
-    bundlerUrl: BUNDLER_URL,
-    safeModulesVersion: SAFE_MODULES_VERSION,
-    customContracts: {
-      entryPointAddress: ENTRYPOINT_ADDRESS,
-      safe4337ModuleAddress: SAFE_MODULES_ADDRESS,
-    },
-    paymasterOptions: { isSponsored: true, paymasterUrl: PAYMASTER_URL },
-    options: { owners: [stealthOwner.address], threshold: 1, safeVersion: SAFE_SW_VERSION, saltNonce },
-  });
+  const stealthPack = await buildSafeWallet(stealthPrivKey, saltNonce);
   const predicted = await stealthPack.protocolKit.getAddress();
   if (predicted.toLowerCase() !== utxo.stealthAddress.toLowerCase()) {
     throw new Error(`Stealth Safe mismatch: ${predicted} ≠ ${utxo.stealthAddress}`);
@@ -823,7 +802,7 @@ export type ShieldFeeResult =
   | { ok: false; reason: "no-recipient" | "too-small" };
 
 export const shieldPublicWithFee = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   asset: Asset,
   token: `0x${string}` | null,
   amount: bigint,
@@ -873,7 +852,7 @@ export const shieldPublicWithFee = async (
  * back to the flat margin on failure / no recipient.
  */
 export const quoteShieldFee = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   asset: Asset,
   token: `0x${string}` | null,
   amount: bigint,
@@ -925,7 +904,7 @@ const randHex = (bytes: number): `0x${string}` =>
 
 /** Total gas cost (wei) of a built (un-submitted) SafeOperation. `label` tags the
  *  log line so measurement runs are self-identifying (op + asset). */
-const gasWeiOf = (op: Awaited<ReturnType<Safe4337Pack["createTransaction"]>>, label = ""): bigint => {
+const gasWeiOf = (op: BuiltUserOp, label = ""): bigint => {
   const uo = op.getUserOperation() as {
     callGasLimit: bigint | string;
     verificationGasLimit: bigint | string;
@@ -952,7 +931,7 @@ const gasWeiOf = (op: Awaited<ReturnType<Safe4337Pack["createTransaction"]>>, la
  * to r1do). Returns null (fail-open) if the amount can't cover the fee.
  */
 const submitSendWithFee = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   asset: Asset,
   // The 0.1% margin is computed off `marginAmount` (the WHOLE send). The fee is
   // CARVED from `carveAmount` (defaults to marginAmount) — in the draw path the
@@ -995,7 +974,7 @@ const submitSendWithFee = async (
  * gas-dominated branch); the 0.1% branch is exact.
  */
 export const quoteSendFee = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   token: `0x${string}` | null,
   totalAmount: bigint,
   recipientAddress: `0x${string}`,
@@ -1129,7 +1108,7 @@ const buildChunkCalls = (
  *  undefined for native, else the ERC20 to drain. Keyless — only reads balances.
  *  Returns null if the combined balance can't cover `total`. */
 export const planDraw = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   username: string,
   total: bigint,
   token?: `0x${string}`,
@@ -1183,7 +1162,7 @@ export const planDraw = async (
  * floor is off or an estimate throws.
  */
 export const quoteDrawFee = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   keys: DrawKeys,
   plan: { source: DrawSource; amount: bigint }[],
   total: bigint,
@@ -1238,7 +1217,7 @@ export const quoteDrawFee = async (
  * `sentAmount` is what the recipient receives (total − fee).
  */
 const executeDraw = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   plan: { source: DrawSource; amount: bigint }[],
   keys: DrawKeys,
   fee: bigint,
@@ -1246,6 +1225,9 @@ const executeDraw = async (
   blob: `0x${string}` | undefined,
   feePay: { stealthAddress: `0x${string}`; calldataBlob: `0x${string}` } | null,
   token?: `0x${string}`,
+  // Reports (chunksDone, totalChunks) as each UserOp lands → the UI draws a
+  // determinate "Sending i/N" bar (a draw fans out one sponsored UserOp per source).
+  onProgress?: (done: number, total: number) => void,
 ): Promise<SmartSendResult> => {
   // Guard: the fee must never eat the whole send (that's "Amount too small",
   // which the Review blocks). Belt-and-suspenders so execution can't send free.
@@ -1254,6 +1236,7 @@ const executeDraw = async (
   }
 
   console.log(`[executeDraw] ${plan.length} chunk(s) → ${destination} | fee ${feePay ? fee : 0n}${token ? ` (token ${token})` : ""}`);
+  onProgress?.(0, plan.length);
 
   let feeRemaining = feePay ? fee : 0n;
   let recipBlobSent = false;
@@ -1282,6 +1265,7 @@ const executeDraw = async (
       if (toFee > 0n) feeBlobSent = true;
       txHashes.push(tx);
       sent += toRecip;
+      onProgress?.(txHashes.length, plan.length);
     } catch (e: unknown) {
       console.error("[executeDraw] Chunk failed:", e);
       return { success: false, sentAmount: sent, txHashes };
@@ -1292,7 +1276,7 @@ const executeDraw = async (
 };
 
 export const smartSend = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   recipientAddress: `0x${string}`,
   totalAmount: bigint,
   username: string,
@@ -1300,6 +1284,8 @@ export const smartSend = async (
   // A draw prepared at the Review step (SendEth private send). When set, smartSend
   // skips re-derivation/estimation and executes it directly (no extra passkey tap).
   prepared?: PreparedDraw,
+  // Forwarded to executeDraw for the "Sending i/N" progress bar (draw path only).
+  onProgress?: (done: number, total: number) => void,
 ): Promise<SmartSendResult> => {
   // One destination for the whole logical send. Reuse the one prepared at the
   // Review (so the breakdown the user saw matches what's sent), else generate now.
@@ -1353,7 +1339,7 @@ export const smartSend = async (
   // inline — blocking if the total can't cover it (never a free send).
   if (prepared) {
     console.log(`[smartSend] Executing prepared draw: ${prepared.plan.length} chunk(s) → ${destination}`);
-    return executeDraw(wallet, prepared.plan, prepared.keys, prepared.fee, destination, blob, prepared.feePay);
+    return executeDraw(wallet, prepared.plan, prepared.keys, prepared.fee, destination, blob, prepared.feePay, undefined, onProgress);
   }
 
   console.log(`[smartSend] Main Safe short of ${totalAmount} — drawing from stealth UTXOs`);
@@ -1391,7 +1377,7 @@ export const smartSend = async (
   }
 
   console.log(`[smartSend] Plan: ${plan.length} chunk(s) → ${destination} | fee ${fee}`);
-  return executeDraw(wallet, plan, keys, fee, destination, blob, feePay);
+  return executeDraw(wallet, plan, keys, fee, destination, blob, feePay, undefined, onProgress);
 };
 
 /**
@@ -1407,7 +1393,7 @@ export type PrepareDrawResult =
   | { ok: false; error: string };
 
 export const prepareDraw = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   recipientAddress: `0x${string}`,
   total: bigint,
   username: string,
@@ -1461,7 +1447,7 @@ export const prepareDraw = async (
 // first). Same plan/blob/single-passkey discipline as smartSend; only the
 // primitives differ — balanceOf reads, asset-filtered candidates, token sends.
 export const smartSendToken = async (
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   token: `0x${string}`,
   recipientAddress: `0x${string}`,
   totalAmount: bigint,
@@ -1469,6 +1455,8 @@ export const smartSendToken = async (
   metaAddress: `0x${string}` | null,
   // A draw prepared at the Review step. When set, executes it directly (no extra tap).
   prepared?: PreparedDraw,
+  // Forwarded to executeDraw for the "Sending i/N" progress bar (draw path only).
+  onProgress?: (done: number, total: number) => void,
 ): Promise<SmartSendResult> => {
   // Destination: reuse the prepared one (matches the Review) else generate now.
   let destination = recipientAddress;
@@ -1540,7 +1528,7 @@ export const smartSendToken = async (
   // fee inline (SUMMED gas of every chunk), blocking if the total can't cover it.
   if (prepared) {
     console.log(`[smartSendToken] Executing prepared draw: ${prepared.plan.length} chunk(s) → ${destination}`);
-    return executeDraw(wallet, prepared.plan, prepared.keys, prepared.fee, destination, blob, prepared.feePay, token);
+    return executeDraw(wallet, prepared.plan, prepared.keys, prepared.fee, destination, blob, prepared.feePay, token, onProgress);
   }
 
   console.log(`[smartSendToken] Main ${token} balance short of ${totalAmount} — drawing from stealth UTXOs`);
@@ -1578,6 +1566,6 @@ export const smartSendToken = async (
   }
 
   console.log(`[smartSendToken] Plan: ${plan.length} chunk(s) of ${token} → ${destination} | fee ${fee}`);
-  return executeDraw(wallet, plan, keys, fee, destination, blob, feePay, token);
+  return executeDraw(wallet, plan, keys, fee, destination, blob, feePay, token, onProgress);
 };
 

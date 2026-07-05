@@ -11,7 +11,6 @@ import {
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import { useEffect, useRef, useState } from "react";
 import { getWalletMetas } from "@/lib/localstorage";
-import { migrateLocalStorageToV1 } from "@/lib/localstorage-migrate"; // TEMP: remove in a future iteration
 import { listWalletCredentials } from "@/lib/credstore";
 import { LOCAL_LAST_USER } from "@/app/constants";
 import { WalletMeta } from "@/types";
@@ -38,13 +37,13 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
   useEffect(() => {
     if (hasAutoLoaded.current) return;
     hasAutoLoaded.current = true;
-    migrateLocalStorageToV1(); // TEMP one-shot: pre-namespace keys → r1do/wallet/v1
     (async () => {
       // Wallet list = local metadata FIRST (so wallets[0] is THIS device's
       // primary wallet — "the first in the localStorage array"), then any
       // suite-wide credential from the shared store (R1DOToolsDB) not already
-      // present. The Welcome-back card always unlocks wallets[0], even if more
-      // exist; the rest are reachable via "use a different wallet".
+      // present. The Welcome-back card always unlocks the primary wallet
+      // (LOCAL_LAST_USER, else wallets[0]); the rest are reachable via
+      // "use a different wallet".
       const byName = new Map<string, WalletMeta>();
       for (const m of getWalletMetas()) {
         byName.set(m.username.toLowerCase(), m);

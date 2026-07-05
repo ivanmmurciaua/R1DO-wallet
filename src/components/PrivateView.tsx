@@ -25,7 +25,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import { formatUnits, parseUnits, createPublicClient } from "viem";
-import type { Safe4337Pack } from "@safe-global/relay-kit";
+import type { SafeWallet } from "@/lib/aa-client";
 import { activeChain } from "@/lib/networks";
 import { sepoliaTransport } from "@/app/constants";
 import { getTokenBalances } from "@/lib/balances";
@@ -98,7 +98,7 @@ export default function PrivateView({
   wallet,
 }: {
   username: string;
-  wallet: Safe4337Pack;
+  wallet: SafeWallet;
 }) {
   const [engine, setEngine] = useState<EngineStatus>("booting");
   const [zk, setZk] = useState<string | null>(null); // 0zk derived THIS session (unlocked)

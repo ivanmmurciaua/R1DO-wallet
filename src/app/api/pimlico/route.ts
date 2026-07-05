@@ -1,4 +1,4 @@
-import { activeNetwork } from "@/lib/networks";
+import { activeNetwork, NETWORKS } from "@/lib/networks";
 
 // Server-side proxy for the Pimlico bundler + paymaster.
 //
@@ -64,8 +64,14 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  const slug = activeNetwork().bundlerSlug;
-  const upstream = `https://api.pimlico.io/v2/${slug}/rpc?apikey=${key}`;
+  // The client tags the request with `?net=<id>` so a cross-chain op (notably a
+  // directory write pinned to Arbitrum) forwards to THAT chain's Pimlico slug —
+  // the server has no session state, so activeNetwork() alone can't tell. Validate
+  // the id against the registry (never trust it as a raw slug → no open relay to
+  // arbitrary chains); fall back to the active network when absent/unknown.
+  const netId = new URL(req.url).searchParams.get("net");
+  const net = (netId && NETWORKS.find((n) => n.id === netId)) || activeNetwork();
+  const upstream = `https://api.pimlico.io/v2/${net.bundlerSlug}/rpc?apikey=${key}`;
 
   let res: Response;
   try {

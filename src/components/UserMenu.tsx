@@ -23,7 +23,7 @@ import { ReceivePrivate } from "./ReceivePrivate";
 import { QrCode } from "./QrCode";
 import { GlitchText } from "./GlitchText";
 import Popup from "./Popup";
-import { Safe4337Pack } from "@safe-global/relay-kit";
+import type { SafeWallet } from "@/lib/aa-client";
 import { formatUnits, createPublicClient } from "viem";
 import { sepoliaTransport } from "@/app/constants";
 import { activeChain, activeChainId, networkName, explorerTxUrl } from "@/lib/networks";
@@ -36,7 +36,7 @@ import { loadFromDevice } from "@/lib/passkeys";
 import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
 
 type UserMenuProps = {
-  wallet: Safe4337Pack;
+  wallet: SafeWallet;
   username: string;
   balance: number;
   address: string; // public Safe address — shown/copied in public Receive
