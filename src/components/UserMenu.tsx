@@ -26,7 +26,7 @@ import Popup from "./Popup";
 import type { SafeWallet } from "@/lib/aa-client";
 import { formatUnits, createPublicClient } from "viem";
 import { sepoliaTransport } from "@/app/constants";
-import { activeChain, activeChainId, networkName, explorerTxUrl } from "@/lib/networks";
+import { activeChain, activeChainId, networkName, explorerTxUrl, explorerAddressUrl } from "@/lib/networks";
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { activeTokens, assetByAddress, formatAsset, type Asset } from "@/lib/assets";
 import { getLastBlock } from "@/lib/client";
@@ -610,7 +610,8 @@ const handleBackToMenu = (message: string = "") => {
                 fontWeight: 500,
               }}
             >
-              Recent Transactions
+              {/* Private wallets list stealth UTXOs, not txs — be honest about it. */}
+              {privacy ? "Stealth UTXOs" : "Recent Transactions"}
             </Typography>
             <IconButton
               onClick={privacy ? refreshPrivate : fetchTransactions}
@@ -662,7 +663,18 @@ const handleBackToMenu = (message: string = "") => {
                   )}
                   <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flex: 1, gap: 1, minWidth: 0, fontFamily: "var(--font-geist-mono), monospace" }}>
                     {transaction.type === "private" && (
-                      <Typography variant="caption" sx={{ fontFamily: "inherit", letterSpacing: "0.04em", opacity: 0.7 }}>
+                      // Clickable → explorer for the ACTIVE network. stopPropagation so
+                      // it opens the address page instead of triggering the row's spend.
+                      <Typography
+                        component="a"
+                        href={explorerAddressUrl(transaction.stealthAddress ?? "") ?? undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        title="View this stealth address on the explorer"
+                        variant="caption"
+                        sx={{ fontFamily: "inherit", letterSpacing: "0.04em", opacity: 0.7, color: "inherit", textDecoration: "none", "&:hover": { textDecoration: "underline", opacity: 1 } }}
+                      >
                         {transaction.stealthAddress?.slice(0, 6)}…{transaction.stealthAddress?.slice(-4)}
                       </Typography>
                     )}

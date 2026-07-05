@@ -161,6 +161,10 @@ export const NETWORKS: readonly Network[] = [
     imports networks, never the reverse. */
 export const ACTIVE_NETWORK_KEY = "r1do/wallet/v1/network";
 
+/** The network a fresh user (no persisted choice) starts on, and the selector's
+    default. Arbitrum One — the production chain. */
+export const DEFAULT_NETWORK_ID: NetworkId = "arbitrum";
+
 /**
  * The network currently in use. Reads the user's persisted choice
  * (ACTIVE_NETWORK_KEY) on the client; falls back to the default (NETWORKS[0]) on
@@ -190,7 +194,8 @@ export function activeNetwork(): Network {
       /* localStorage blocked (private mode / SSR edge) → default below */
     }
   }
-  return NETWORKS[0];
+  // No persisted choice → the default network (Arbitrum One), not merely NETWORKS[0].
+  return NETWORKS.find((n) => n.id === DEFAULT_NETWORK_ID) ?? NETWORKS[0];
 }
 
 /** Persist the active network choice. The caller reloads the page afterwards so
@@ -276,4 +281,11 @@ export function scanPaymasters(): readonly `0x${string}`[] | undefined {
 export function explorerTxUrl(hash: string): string | null {
   const base = activeNetwork().chain.blockExplorers?.default.url;
   return base ? `${base}/tx/${hash}` : null;
+}
+
+/** Explorer address URL for an address, or null if the active chain has no explorer.
+    Follows the active chain, so a stealth address links to the right network's explorer. */
+export function explorerAddressUrl(address: string): string | null {
+  const base = activeNetwork().chain.blockExplorers?.default.url;
+  return base ? `${base}/address/${address}` : null;
 }
