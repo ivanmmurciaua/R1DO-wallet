@@ -212,7 +212,7 @@ export function setActiveNetwork(id: NetworkId): void {
     sync with RAILGUN_NETWORK in pool/railgun.ts. Declared here (SDK-free) so the UI
     can gate the shadow world WITHOUT importing railgun.ts — whose module-load
     throws on an unsupported chain. */
-const RAILGUN_SUPPORTED_IDS: readonly NetworkId[] = ["sepolia"];
+const RAILGUN_SUPPORTED_IDS: readonly NetworkId[] = ["sepolia", "arbitrum"];
 
 /** Whether the ACTIVE network has the shielded (shadow) pool available. When false
     the UI must block entering the private world (Railgun would throw at pool boot). */

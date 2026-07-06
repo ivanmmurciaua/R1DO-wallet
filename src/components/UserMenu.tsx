@@ -34,6 +34,7 @@ import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealt
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
+import { useScanning } from "@/lib/scanState";
 
 type UserMenuProps = {
   wallet: SafeWallet;
@@ -102,6 +103,10 @@ const compactFmt = new Intl.NumberFormat("en-US", { notation: "compact", maximum
 const fmtAmount = (n: number) => compactFmt.format(n);
 
 export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, address }) => {
+  // A running stealth (sUTXO) scan means the balance/UTXO view is still
+  // incomplete → disable Send so we never spend from a partial set. Receive is
+  // always safe (no state dependency), so it stays enabled.
+  const scanning = useScanning();
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
   const [currentView, setCurrentView] = useState<"menu" | "sendEth" | "spendUtxo" | "receivePrivate" | "receivePublic">("menu");
@@ -707,7 +712,7 @@ const handleBackToMenu = (message: string = "") => {
       >
         <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
           {[
-            { key: "send", label: "Send", icon: <ArrowUpwardIcon fontSize="small" />, onClick: handleSendEth, disabled: false },
+            { key: "send", label: scanning ? "Scanning…" : "Send", icon: <ArrowUpwardIcon fontSize="small" />, onClick: handleSendEth, disabled: scanning },
             { key: "receive", label: "Receive", icon: <ArrowDownwardIcon fontSize="small" />, onClick: handleReceive, disabled: false },
             { key: "soon", label: "soon", icon: <AddIcon fontSize="small" />, onClick: undefined, disabled: true },
           ].map((slot) => (

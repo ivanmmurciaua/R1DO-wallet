@@ -843,6 +843,61 @@ export const shieldPublicWithFee = async (
   return tx ? { ok: true, txHash: tx, fee } : { ok: false, reason: "no-recipient" };
 };
 
+export type UnshieldFeeResult =
+  | { ok: true; txHash: string; fee: bigint }
+  | { ok: false; reason: "no-recipient" | "too-small" };
+
+/**
+ * PUBLIC ERC20 unshield WITH the R1DO operator fee, skimmed like the shield's.
+ * Railgun rejects two unshields of the same token in one batch ("addUnshieldData
+ * once per token"), so the fee can't be a second proof output. Instead we unshield
+ * the FULL amount to our OWN Safe (one legal output) and, in the SAME UserOp, the
+ * Safe distributes: `net` to the user's destination + `fee` to a fresh Δ1 stealth
+ * of r1do-wallet (with the blob announced so r1do can detect+spend it).
+ * Fase A: PUBLIC + ERC20 only. Flat margin (gasWei 0 → no gasFloor; it's TEMP).
+ * Fails open ("no-recipient"/"too-small") so the caller can do a plain unshield.
+ */
+export const unshieldPublicWithFee = async (
+  wallet: SafeWallet,
+  asset: Asset,
+  token: `0x${string}`,
+  moves: bigint, // total leaving the pool (gross, before Railgun's own fee)
+  destination: `0x${string}`,
+  railgunBps: number, // Railgun's unshield fee (25 = 0.25%) — the Safe receives moves minus this
+  proveUnshield: (toAddress: string, amount: bigint) => Promise<{ to: string; data: string; value: string }>,
+): Promise<UnshieldFeeResult> => {
+  const recipient = await getFeeRecipient();
+  if (!recipient) return { ok: false, reason: "no-recipient" };
+  const { fee } = await quoteFee({ op: "unshield", asset, amount: moves, gasWei: 0n });
+  // The Safe only receives `moves − Railgun's 0.25%`, so that (minus our fee) is
+  // what's actually distributable. Guard against the fee eating it all.
+  const received = moves - (moves * BigInt(railgunBps)) / 10_000n;
+  const net = received - fee;
+  if (fee <= 0n || net <= 0n) return { ok: false, reason: "too-small" };
+  const feePay = await generateStealthPayment(recipient.metaAddress);
+  const safeAddr = (await wallet.protocolKit.getAddress()) as `0x${string}`;
+  // Unshield the FULL amount to our own Safe (the proof runs here — heavy), then
+  // the Safe fans it out in the same batch. Railgun allows one unshield per token,
+  // hence the fan-out (not a second proof output).
+  const proven = await proveUnshield(safeAddr, moves);
+  const transfer = (to: string, amt: bigint) => ({
+    to: token as string,
+    data: encodeFunctionData({ abi: ERC20_TRANSFER_ABI, functionName: "transfer", args: [to as `0x${string}`, amt] }),
+    value: "0",
+  });
+  const calls = [
+    proven,
+    // net → user's chosen destination (skip when they withdrew to their own Safe:
+    // the net simply stays there, and we only move the fee out).
+    ...(destination.toLowerCase() !== safeAddr.toLowerCase() ? [transfer(destination, net)] : []),
+    // fee → r1do's fresh Δ1 stealth + announce the blob (0-value) so r1do finds it
+    transfer(feePay.stealthAddress, fee),
+    { to: feePay.stealthAddress, data: feePay.calldataBlob, value: "0" },
+  ];
+  const txHash = await sendTxsViaSafe(wallet, calls, `unshield (${asset.symbol}, public + fee)`);
+  return txHash ? { ok: true, txHash, fee } : { ok: false, reason: "no-recipient" };
+};
+
 /**
  * UI helper: estimate the PUBLIC shield operator fee (no submit) so the deposit
  * dialog shows the breakdown and blocks "amount too small". Builds the real shield

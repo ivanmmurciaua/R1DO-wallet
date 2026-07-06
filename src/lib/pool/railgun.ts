@@ -64,6 +64,7 @@ import { activeNetwork, type NetworkId } from "@/lib/networks";
 // loudly if the private side is entered on an unsupported chain.
 const RAILGUN_NETWORK: Partial<Record<NetworkId, NetworkName>> = {
   sepolia: NetworkName.EthereumSepolia,
+  arbitrum: NetworkName.Arbitrum,
 };
 
 export const POOL_NETWORK = (() => {
@@ -215,7 +216,7 @@ export async function bootEngine(): Promise<void> {
     console.log("[pool] ✓ Groth16 prover (snarkjs) injected");
 
     console.log(
-      `[pool] loading Sepolia provider (chainId ${CHAIN.id}) — ${RPC_URLS.length} RPCs w/ failover…`,
+      `[pool] loading ${POOL_NETWORK} provider (chainId ${CHAIN.id}) — ${RPC_URLS.length} RPCs w/ failover…`,
     );
     const { feesSerialized } = await loadProvider(
       {
@@ -560,6 +561,9 @@ export async function populateUnshieldTx(
   // ERC20 unshield: the generic (NON base-token) path. The proxy already holds
   // the tokens (NO approve) and sends `tokenAddress` straight to the public 0x —
   // no unwrap. The 0.25% fee goes to Railgun's treasury as a separate transfer.
+  // NOTE: Railgun allows only ONE unshield per token per batch, so the R1DO
+  // operator fee can't be a second output here — it's skimmed by the caller
+  // (unshieldPublicWithFee) as a post-unshield transfer from the Safe.
   if (tokenAddress && tokenAddress.toLowerCase() !== WETH.toLowerCase()) {
     const erc20AmountRecipients = [
       { tokenAddress, amount, recipientAddress: toAddress },

@@ -39,7 +39,7 @@ import {
   getCachedPoolZk,
   hydrateStealthStore,
 } from "@/lib/localstorage";
-import { beginScan, endScan, setScanProgress } from "@/lib/scanState";
+import { beginScan, endScan, setScanProgress, useScanning } from "@/lib/scanState";
 import { LOCAL_LAST_USER, DIRECTORY_ADDRESS } from "@/app/constants";
 import { poolSupported } from "@/lib/networks";
 import Popup from "@/components/Popup";
@@ -66,17 +66,32 @@ export default function Home() {
   // no pool, and pool/railgun.ts THROWS at boot on them. So we gate the toggle and
   // show a transient message instead of letting the user cross into a broken world.
   const shadowAvailable = poolSupported();
+  // A stealth (sUTXO) scan running on the light side means the private-payment
+  // view is still incomplete — block ENTERING the shadow until it finishes so we
+  // never boot the heavy Railgun engine mid-scan (and never act on a partial set).
+  const scanning = useScanning();
   const [shadowMsg, setShadowMsg] = useState<string | null>(null);
   const handleShadowToggle = useCallback(() => {
-    // Leaving the shadow (already private) is always allowed; only ENTERING an
-    // unsupported network's shadow is blocked.
-    if (isPrivate || shadowAvailable) {
+    // Leaving the shadow (already private) is always allowed; only ENTERING is
+    // gated — on an unsupported network, or while a light-side scan is running.
+    if (isPrivate) {
+      toggleView();
+      return;
+    }
+    if (scanning) {
+      setShadowMsg("Scanning the chain for your private payments — hold on a moment.");
+      setTimeout(() => setShadowMsg(null), 3200);
+      return;
+    }
+    if (shadowAvailable) {
       toggleView();
       return;
     }
     setShadowMsg("The shadow (private) world isn't available on this network yet.");
     setTimeout(() => setShadowMsg(null), 3200);
-  }, [isPrivate, shadowAvailable, toggleView]);
+  }, [isPrivate, shadowAvailable, scanning, toggleView]);
+  // Entering the shadow is blocked when the network has no pool OR a scan runs.
+  const shadowEnterBlocked = !isPrivate && (!shadowAvailable || scanning);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deferredPrompt = useRef<any>(null);
 
@@ -474,12 +489,14 @@ export default function Home() {
           title={
             isPrivate
               ? "Back to the light (public)"
-              : shadowAvailable
-                ? "Enter the shadow (private)"
-                : "Shadow (private) world isn't available on this network yet"
+              : scanning
+                ? "Scanning your private payments — hold on"
+                : shadowAvailable
+                  ? "Enter the shadow (private)"
+                  : "Shadow (private) world isn't available on this network yet"
           }
           aria-label={isPrivate ? "Exit private mode" : "Enter private mode"}
-          aria-disabled={!isPrivate && !shadowAvailable}
+          aria-disabled={shadowEnterBlocked}
           style={{
             position: "fixed",
             top: 16,
@@ -494,12 +511,12 @@ export default function Home() {
             padding: 8,
             lineHeight: 0,
             borderRadius: isPrivate ? 2 : 10,
-            cursor: !isPrivate && !shadowAvailable ? "not-allowed" : "pointer",
-            opacity: !isPrivate && !shadowAvailable ? 0.3 : 0.65,
+            cursor: shadowEnterBlocked ? "not-allowed" : "pointer",
+            opacity: shadowEnterBlocked ? 0.3 : 0.65,
             transition: "opacity 0.15s, border-radius 0.3s",
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.opacity = !isPrivate && !shadowAvailable ? "0.45" : "1")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = !isPrivate && !shadowAvailable ? "0.3" : "0.65")}
+          onMouseEnter={(e) => (e.currentTarget.style.opacity = shadowEnterBlocked ? "0.45" : "1")}
+          onMouseLeave={(e) => (e.currentTarget.style.opacity = shadowEnterBlocked ? "0.3" : "0.65")}
         >
           {isPrivate ? (
             // sun → back to the light

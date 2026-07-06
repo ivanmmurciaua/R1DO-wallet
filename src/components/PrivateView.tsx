@@ -41,6 +41,7 @@ import { QrScanner } from "./QrScanner";
 import type { PoolBalances, TokenBuckets } from "@/lib/pool/railgun";
 import { protocolName } from "@/lib/pool/protocols";
 import { generateStealthPayment, type StealthUTXO, type StealthPayment } from "@/lib/stealth";
+import { computeFee as computeOpFee } from "@/lib/fees";
 
 type Coin = { utxo: StealthUTXO; balance: bigint };
 
@@ -634,22 +635,43 @@ export default function PrivateView({
     try {
       setUnshieldStage("proving");
       setUnshieldProgress(0);
-      console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
+      const deploy = await import("@/lib/deploy");
       const mod = await import("@/lib/pool/railgun");
       const tokenAddress = isToken ? unshieldAsset.address : undefined;
-      const tx = await mod.populateUnshieldTx(to, moves, (p) => setUnshieldProgress(p), tokenAddress);
-      setUnshieldStage("submitting");
-      const deploy = await import("@/lib/deploy");
+      const proveUnshield = (addr: string, amt: bigint) =>
+        mod.populateUnshieldTx(addr, amt, (p) => setUnshieldProgress(p), tokenAddress);
+      console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
       let txHash: string;
-      if (isPrivacy) {
-        // inlinkable submitter: relay from a fresh ephemeral Safe
-        const relayKey = mod.getRelayKey();
-        if (!relayKey) throw new Error("relay key not available");
-        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `unshield (${unSymbol}, privacy)`);
+      if (!isPrivacy && isToken) {
+        // PUBLIC + ERC20 → skim the R1DO operator fee via the batch: unshield the
+        // full amount to our Safe, then the Safe fans out net + fee in one UserOp.
+        const res = await deploy.unshieldPublicWithFee(
+          wallet, unshieldAsset, unshieldAsset.address as `0x${string}`, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield,
+        );
+        if (res.ok) {
+          txHash = res.txHash;
+          console.log(`[private] ✓ unshield submitted (fee ${fmt(res.fee, unDecimals)} ${unSymbol}) — tx: ${txHash}`);
+        } else {
+          // no fee recipient / amount too small → plain unshield, never block (the
+          // early-return happens BEFORE proving, so this proves exactly once).
+          const tx = await proveUnshield(to, moves);
+          setUnshieldStage("submitting");
+          txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
+          console.log(`[private] ✓ unshield submitted (no fee) — tx: ${txHash}`);
+        }
       } else {
-        txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
+        // native (fee = Fase B) or privacy (later) → plain unshield, untouched.
+        const tx = await proveUnshield(to, moves);
+        setUnshieldStage("submitting");
+        if (isPrivacy) {
+          const relayKey = mod.getRelayKey();
+          if (!relayKey) throw new Error("relay key not available");
+          txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `unshield (${unSymbol}, privacy)`);
+        } else {
+          txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
+        }
+        console.log(`[private] ✓ unshield submitted — tx: ${txHash}`);
       }
-      console.log(`[private] ✓ unshield submitted — tx: ${txHash}`);
 
       // Privacy mode, destination still the fresh stealth we generated (user
       // didn't edit it): make that one-time address discoverable/spendable.
@@ -802,6 +824,15 @@ export default function PrivateView({
     (balances?.missingInternal ?? 0n) +
     (balances?.shieldPending ?? 0n);
   const tokPending = (b: TokenBuckets) => b.missingExternal + b.missingInternal + b.shieldPending;
+  // Distinguish WHY something is pending, to pick an honest badge (across all assets,
+  // since `balances` is only the native/WETH slice):
+  //  · a SHIELD awaiting the external list-provider → slow (mins–~1h on mainnet),
+  //    the user can leave; nothing client-side speeds it up.
+  //  · anything else (a transfer/unshield change, i.e. a spent-POI) → finalized
+  //    CLIENT-side by the watcher → fast, and staying on screen completes it now.
+  const anyShieldPending =
+    (balances?.shieldPending ?? 0n) > 0n ||
+    (tokenBals != null && [...tokenBals.values()].some((b) => b.shieldPending > 0n));
 
   // Shielded ERC20s for the expandable list under the headline. The headline is
   // the native (WETH/⧫) spendable; this lists the curated tokens shielded in the
@@ -838,6 +869,37 @@ export default function PrivateView({
     ...(spendable > 0n ? [nativeAsset()] : []),
     ...shieldedTokens.map((t) => t.asset), // tokens now offered in BOTH worlds
   ];
+
+  // Auto-select a funded asset — mirror the light-side Send (SendEth): the picker
+  // defaults to native, but the selector is hidden when there's a single option,
+  // so if native has no balance the user would be stuck on an empty asset with no
+  // way to switch. When the current pick isn't among the funded/spendable ones,
+  // snap to the first that is (and reset the amount — decimals differ). Applies to
+  // all three shadow flows: shield (source balance), send + unshield (spendable).
+  useEffect(() => {
+    if (!depositOpen || fundedAssets.length === 0) return;
+    if (!fundedAssets.some((a) => keyOf(a) === keyOf(shieldAsset))) {
+      setShieldAsset(fundedAssets[0]);
+      setDepositAmt("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositOpen, fundedAssets]);
+  useEffect(() => {
+    if (!sendOpen || sendAssets.length === 0) return;
+    if (!sendAssets.some((a) => keyOf(a) === keyOf(sendAsset))) {
+      setSendAsset(sendAssets[0]);
+      setSendAmt("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sendOpen, sendAssets]);
+  useEffect(() => {
+    if (!unshieldOpen || unshieldAssets.length === 0) return;
+    if (!unshieldAssets.some((a) => keyOf(a) === keyOf(unshieldAsset))) {
+      setUnshieldAsset(unshieldAssets[0]);
+      setUnshieldAmt("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unshieldOpen, unshieldAssets]);
 
   // Assets with a pending POI (native + tokens) — drives the "validating" /
   // finalizing badges for ANY asset, each shown in its own symbol/decimals (we
@@ -890,6 +952,13 @@ export default function PrivateView({
   };
   const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined, shDecimals);
   const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, unSpendable, unDecimals);
+  // R1DO operator fee shown in the unshield dialog — PUBLIC + ERC20 only (Fase A).
+  // Flat margin (gasWei 0 → no oracle, sync), skimmed from what leaves the pool.
+  const unshieldR1doFee = (() => {
+    if (isPrivacy || unshieldAsset.kind === "native" || !unshieldPreview) return null;
+    const { fee } = computeOpFee({ op: "unshield", asset: unshieldAsset, amount: unshieldPreview.moves, gasWei: 0n });
+    return fee > 0n && fee < unshieldPreview.moves ? fee : null;
+  })();
 
   // Estimate the operator fee for the PUBLIC shield (deployed main Safe → no tap)
   // so the dialog shows the breakdown and the button blocks "amount too small".
@@ -1142,8 +1211,10 @@ export default function PrivateView({
             </Stack>
           )}
 
-          {/* finalizing: SEPARATE badge — shows "stay on this screen" and switches
-              to "generating proof… %" while a proof is actively generating. */}
+          {/* finalizing: SEPARATE badge. Two honest states: a CLIENT-side proof is
+              generating ("generating proof… %", staying on screen finishes it now)
+              vs EXTERNAL list-provider validation (shield/receive pending POI —
+              staying does nothing, it can take a while, so tell them they can leave). */}
           {(poolActivity.finalizing || anyPending) && (
             <Box
               sx={{
@@ -1173,7 +1244,9 @@ export default function PrivateView({
               <Typography variant="body2" sx={{ fontSize: "0.62rem", letterSpacing: "0.03em", textAlign: "left", lineHeight: 1.5 }}>
                 {poolActivity.generatingProof
                   ? `Generating proof… ${poolActivity.proofProgress}%. Keep this screen open to finish now.`
-                  : "Finalizing your private transfer — stay on this screen so it completes now. If you leave, no worries: it resumes next time you unlock your private balance."}
+                  : anyShieldPending
+                    ? "Validating on the network — this can take a while. You can close this; your balance updates automatically when it's ready."
+                    : "Finalizing privately — stay on this screen so it completes now. If you leave, no worries: it resumes next time you unlock your private balance."}
               </Typography>
             </Box>
           )}
@@ -1820,7 +1893,8 @@ export default function PrivateView({
                   {unshieldPreview ? (
                     <>
                       {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, unDecimals)} {unSymbol} →
-                      you receive {fmt(unshieldPreview.receive, unDecimals)} {unSymbol}
+                      you receive {fmt(unshieldPreview.receive - (unshieldR1doFee ?? 0n), unDecimals)} {unSymbol}
+                      {unshieldR1doFee ? ` · service fee ${fmt(unshieldR1doFee, unDecimals)} ${unSymbol}` : ""}
                       {unshieldExact && unshieldPreview.forcedGross ? " · capped to spendable (fee not covered)" : ""}
                       . Funds land on confirmation; the POI finalizes in the background.
                     </>
