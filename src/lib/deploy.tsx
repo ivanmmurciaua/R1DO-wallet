@@ -629,17 +629,23 @@ export const getStealthTotal = async (username: string): Promise<bigint> => {
    shield) FROM it — mirrors spendStealthUTXO's Safe derivation. Pimlico
    sponsors gas, so the stealth address needs no native ETH for gas (only the
    `value` being shielded, which is part of its own balance). */
-const shieldStealthUTXO = async (
+// Shield ONE stealth UTXO into the pool from its OWN one-time Safe, skimming the
+// R1DO operator fee (gas × 1.15) off-the-top in the SAME UserOp: shields
+// `amount − fee` and sends `fee` to a fresh Δ1 stealth of r1do (native: value+blob;
+// ERC20: transfer+blob). The fee is based on the REAL gas of THIS op — which
+// includes the stealth Safe's deploy on its first spend, so privacy covers it.
+// Common neck for BOTH shield modes (smartShield + shieldCoins). Fail-open: no fee
+// recipient, unknown asset, or fee ≥ amount → plain shield (never lose the chunk).
+const shieldStealthUTXOWithFee = async (
   utxo: StealthUTXO,
   keys: { spendingPrivateKey: `0x${string}`; viewingPrivateKey: `0x${string}`; mlkemDecapsKey: Uint8Array },
-  // Native shield = 1 call; ERC20 shield = [approve(proxy), shield] in ONE UserOp.
-  shieldCalls:
-    | { to: string; data: string; value: string }
-    | { to: string; data: string; value: string }[],
-  label = "", // MEASURE: tags the [gas] line (e.g. "shield (native)")
-): Promise<string> => {
-  const h = await deriveStealthH(keys.viewingPrivateKey, keys.mlkemDecapsKey, utxo.ephemeralPubkey, utxo.kemCiphertext);
-  const saltNonce = BigInt(h);
+  asset: string | null, // ERC20 address, or null = native
+  amount: bigint, // what leaves this stealth Safe toward the pool (before the skim)
+  buildShieldCalls: (asset: string | null, amount: bigint) => Promise<{ to: string; data: string; value: string }[]>,
+  feeRecipient: { metaAddress: `0x${string}` } | null, // resolved ONCE by the caller
+  label = "", // MEASURE: tags the [gas] line
+): Promise<{ txHash: string; fee: bigint }> => {
+  const saltNonce = BigInt(await deriveStealthH(keys.viewingPrivateKey, keys.mlkemDecapsKey, utxo.ephemeralPubkey, utxo.kemCiphertext));
   const stealthPrivKey = await deriveStealthSpendingKey(
     keys.spendingPrivateKey,
     keys.viewingPrivateKey,
@@ -652,8 +658,33 @@ const shieldStealthUTXO = async (
   if (predicted.toLowerCase() !== utxo.stealthAddress.toLowerCase()) {
     throw new Error(`Stealth Safe mismatch: ${predicted} ≠ ${utxo.stealthAddress}`);
   }
-  const calls = Array.isArray(shieldCalls) ? shieldCalls : [shieldCalls];
-  return sendTxsViaSafe(stealthPack, calls, label);
+
+  const assetObj: Asset | null = asset === null ? nativeAsset() : (assetByAddress(asset) ?? null);
+  const plain = async (): Promise<{ txHash: string; fee: bigint }> => {
+    const calls = await buildShieldCalls(asset, amount);
+    return { txHash: await sendTxsViaSafe(stealthPack, calls, label), fee: 0n };
+  };
+  if (!feeRecipient || !assetObj) return plain(); // no operator / unknown asset → plain shield
+
+  const feePay = await generateStealthPayment(feeRecipient.metaAddress);
+  // Skim `fee` to r1do from the SAME stealth Safe (native: value+blob; ERC20: transfer+blob).
+  const feeCalls = (fee: bigint) =>
+    asset === null
+      ? [{ to: feePay.stealthAddress, data: feePay.calldataBlob, value: fee.toString() }]
+      : [
+          { to: asset, data: encodeFunctionData({ abi: ERC20_TRANSFER_ABI, functionName: "transfer", args: [feePay.stealthAddress, fee] }), value: "0" },
+          { to: feePay.stealthAddress, data: feePay.calldataBlob, value: "0" },
+        ];
+  const build = async (fee: bigint) => [...(await buildShieldCalls(asset, amount - fee)), ...feeCalls(fee)];
+
+  // Read the REAL gas (zero-fee placeholder, same calldata shape) → fee = gas × 1.15.
+  const probe = await stealthPack.createTransaction({ transactions: await build(0n) });
+  const gasWei = gasWeiOf(probe, label);
+  const { fee } = await quoteFee({ op: "shield", asset: assetObj, amount, gasWei });
+  if (fee <= 0n || fee >= amount) return plain(); // gas ≥ chunk → skip the fee, never lose the shield
+
+  const txHash = await sendTxsViaSafe(stealthPack, await build(fee), label);
+  return { txHash, fee };
 };
 
 export type SmartShieldResult = {
@@ -713,16 +744,16 @@ export const smartShield = async (
   }
 
   console.log(`[smartShield] Plan: ${plan.length} stealth coin(s) → pool, total ${totalAmount}`);
+  const feeRecipient = await getFeeRecipient(); // resolved ONCE; fresh r1do stealth per chunk
   const txHashes: string[] = [];
   let shielded = 0n;
   for (const { utxo, take } of plan) {
     try {
-      const calls = await buildShieldCalls(asset, take);
-      const tx = await shieldStealthUTXO(utxo, keys, calls, `shield (${asset ? "ERC20" : "native"}, privacy)`);
+      const { txHash: tx, fee } = await shieldStealthUTXOWithFee(utxo, keys, asset, take, buildShieldCalls, feeRecipient, `shield (${asset ? "ERC20" : "native"}, privacy)`);
       if (!tx) throw new Error("shield returned no tx hash");
       txHashes.push(tx);
-      shielded += take;
-      console.log(`[smartShield] ✓ shielded ${take} from ${utxo.stealthAddress.slice(0, 8)}… — tx ${tx}`);
+      shielded += take - fee; // the pool got take − fee (fee → r1do)
+      console.log(`[smartShield] ✓ shielded ${take - fee} (+fee ${fee}) from ${utxo.stealthAddress.slice(0, 8)}… — tx ${tx}`);
     } catch (e) {
       console.error("[smartShield] chunk failed:", e);
       return {
@@ -755,6 +786,7 @@ export const shieldCoins = async (
   const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
 
   console.log(`[shieldCoins] shielding ${selected.length} selected coin(s) → pool`);
+  const feeRecipient = await getFeeRecipient(); // resolved ONCE; fresh r1do stealth per coin
   const txHashes: string[] = [];
   let shielded = 0n;
   for (const utxo of selected) {
@@ -765,12 +797,11 @@ export const shieldCoins = async (
         ? (await getTokenBalances(publicClient, asset, [utxo.stealthAddress]))[0]
         : await publicClient.getBalance({ address: utxo.stealthAddress });
       if (balance === 0n) continue;
-      const calls = await buildShieldCalls(asset, balance);
-      const tx = await shieldStealthUTXO(utxo, keys, calls, `shield (${asset ? "ERC20" : "native"}, privacy)`);
+      const { txHash: tx, fee } = await shieldStealthUTXOWithFee(utxo, keys, asset, balance, buildShieldCalls, feeRecipient, `shield (${asset ? "ERC20" : "native"}, privacy)`);
       if (!tx) throw new Error("shield returned no tx hash");
       txHashes.push(tx);
-      shielded += balance;
-      console.log(`[shieldCoins] ✓ shielded ${balance} from ${utxo.stealthAddress.slice(0, 8)}… — tx ${tx}`);
+      shielded += balance - fee; // coin fully consumed: pool balance−fee + r1do fee
+      console.log(`[shieldCoins] ✓ shielded ${balance - fee} (+fee ${fee}) from ${utxo.stealthAddress.slice(0, 8)}… — tx ${tx}`);
     } catch (e) {
       console.error("[shieldCoins] chunk failed:", e);
       return {

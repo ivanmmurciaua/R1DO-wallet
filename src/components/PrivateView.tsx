@@ -1528,6 +1528,14 @@ export default function PrivateView({
                       </Typography>
                     )}
 
+                    {/* Privacy shield: the fee is per-chunk on the stealth Safes (can't
+                        estimate without the passkey), so it's noted qualitatively. */}
+                    {isPrivacy && shieldPreview && (
+                      <Typography variant="body2" sx={{ fontSize: "0.58rem", mb: 1.25, lineHeight: 1.5, color: "text.secondary", opacity: 0.55 }}>
+                        minus a small service fee (network gas)
+                      </Typography>
+                    )}
+
                     <Button
                       variant="contained"
                       color="primary"
@@ -1799,8 +1807,8 @@ export default function PrivateView({
 
                 <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: unshieldToSelfStealth ? 0.5 : 1.25, lineHeight: 1.5 }}>
                   {isPrivacy
-                    ? "Goes to a brand-new one-time stealth address you own — unlinkable. Edit to send anywhere."
-                    : "Defaults to your own Safe. Sending to a fresh address you control breaks the link to your public identity — better privacy."}
+                    ? "Goes to a brand-new one-time stealth address you own, unlinkable."
+                    : "Defaults to your own Safe. Send it anywhere, but your Safe is the on-chain sender, so a public withdrawal is always linkable to you."}
                 </Typography>
 
                 {unshieldToSelfStealth && (
