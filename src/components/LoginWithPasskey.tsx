@@ -26,8 +26,9 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState("");
   const [external, setExternal] = useState(true);
-  // New wallets are private by default
-  const [privacy, setPrivacy] = useState(true);
+  // New wallets are PUBLIC by default; privacy is an explicit opt-in.
+  const [privacy, setPrivacy] = useState(false);
+  const [privacyInfoAnchor, setPrivacyInfoAnchor] = useState<HTMLElement | null>(null);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   const handleInfoClick = (event: React.MouseEvent<HTMLElement>) => {
@@ -212,6 +213,34 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           >
             Enable privacy
           </label>
+          <IconButton
+            size="small"
+            onClick={(e) => setPrivacyInfoAnchor(e.currentTarget)}
+            sx={{ p: 0.25, color: (theme) => (theme.palette.mode === "dark" ? "#fff" : "inherit") }}
+            aria-label="What is privacy mode?"
+          >
+            <InfoOutlinedIcon fontSize="small" />
+          </IconButton>
+          <Popover
+            open={Boolean(privacyInfoAnchor)}
+            anchorEl={privacyInfoAnchor}
+            onClose={() => setPrivacyInfoAnchor(null)}
+            anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+          >
+            <Box
+              p={2}
+              maxWidth={260}
+              sx={{
+                fontSize: "0.7rem",
+                lineHeight: 1.5,
+                backgroundColor: (theme) => (theme.palette.mode === "dark" ? "#222" : "#3B3B3B"),
+                color: "#fff",
+              }}
+            >
+              Receive each payment at a fresh one-time <b>stealth address</b>, unlinkable to you,
+              instead of a single reusable public address.
+            </Box>
+          </Popover>
         </Box>
 
         <Button
@@ -222,7 +251,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             const priv = privacy;
             setUsername("");
             setExternal(true);
-            setPrivacy(true);
+            setPrivacy(false);
             createOrLoad(user.toLowerCase(), ext, priv);
           }}
           variant="contained"

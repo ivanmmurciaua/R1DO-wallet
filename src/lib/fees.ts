@@ -24,7 +24,6 @@
 
   SDK-free / stateless: pure arithmetic so it's trivial to reason about and test.
 */
-import { parseUnits } from "viem";
 import type { Asset } from "./assets";
 import { ETH_USD_DECIMALS, getEthUsd } from "./oracle";
 
@@ -34,13 +33,14 @@ export type FeeOp = "send" | "shield" | "unshield" | "receive";
 export const SEND_FEE_BPS = 10n;
 const BPS_DENOM = 10_000n;
 
-/** Flat shield/unshield pinch, in human units per asset kind: ~1 cent. For a
- *  STABLE (≈$1) one number works for all of them (USDC/DAI/USDT); for ETH it's
- *  its own number. (The day a volatile ERC20 — WBTC — joins, this single flat
- *  breaks and must be calibrated per token; today the curated list is 100%
- *  stables + ETH, so it's consistent.) */
-const FLAT_STABLE = "0.01"; // 0.01 USDC/DAI/USDT ≈ 1 cent
-const FLAT_NATIVE = "0.00001"; // 0.00001 ETH ≈ 1 cent at ~$1400/ETH
+/** Shadow-world (Railgun) fee = the REAL gas × a markup. Cost-plus: it tracks the
+ *  gas the operator fronts to Pimlico, NOT the value moved (no flat, no %-of-value).
+ *  A shield of 10 or 10 000 USDC pays ~the same — the gas is the same.
+ *  · shield  ×1.15 (fine — entering the pool)
+ *  · unshield ×1.30 (gross — leaving; covers the heavier fan-out)
+ *  (transfers 0zk→0zk are deliberately FREE — subsidised, not fee'd here.) */
+const SHIELD_MARKUP_BPS = 11_500n; // ×1.15
+const UNSHIELD_MARKUP_BPS = 13_000n; // ×1.30
 
 const ONE_ETH_WEI = 10n ** 18n;
 
@@ -57,19 +57,10 @@ export type FeeQuote = {
   usedOracle: boolean;
 };
 
-/** Nominal margin (no floor) by operation and asset, in asset units. */
-function nominalMargin(op: FeeOp, asset: Asset, amount: bigint): bigint {
-  switch (op) {
-    case "receive":
-      return 0n;
-    case "send":
-      return (amount * SEND_FEE_BPS) / BPS_DENOM;
-    case "shield":
-    case "unshield":
-      return asset.kind === "native"
-        ? parseUnits(FLAT_NATIVE, asset.decimals)
-        : parseUnits(FLAT_STABLE, asset.decimals);
-  }
+/** Send margin (0.1% of amount). Shield/unshield no longer use a nominal margin —
+ *  they're pure gas × markup (see computeFee) — so this only serves send/receive. */
+function nominalMargin(op: FeeOp, amount: bigint): bigint {
+  return op === "send" ? (amount * SEND_FEE_BPS) / BPS_DENOM : 0n;
 }
 
 /**
@@ -109,18 +100,25 @@ export function computeFee(args: {
     return { fee: 0n, margin: 0n, floor: 0n, boundBy: "margin", usedOracle: false };
   }
 
-  const margin = nominalMargin(op, asset, amount);
   const needsOracle = asset.kind !== "native" && gasWei > 0n;
-  const floor = gasFloorInAsset(gasWei, asset, ethUsd);
+  const gasInAsset = gasFloorInAsset(gasWei, asset, ethUsd);
 
-  // fee = max(margin, gas). The margin (0.1%) IS the profit and already covers
-  // the gas when it exceeds it — so we DON'T add gas on top. The gas only acts as
-  // a floor: if the margin doesn't reach it, charge the gas to break even.
-  const boundBy = floor > margin ? "floor" : "margin";
+  // Shadow ops (shield/unshield): cost-plus — fee = gas × markup. No flat, no
+  // %-of-value. gasWei 0 (no estimate yet) → fee 0; the caller MUST read real gas.
+  if (op === "shield" || op === "unshield") {
+    const markup = op === "shield" ? SHIELD_MARKUP_BPS : UNSHIELD_MARKUP_BPS;
+    const fee = (gasInAsset * markup) / BPS_DENOM;
+    return { fee, margin: 0n, floor: gasInAsset, boundBy: "floor", usedOracle: needsOracle };
+  }
+
+  // send: fee = max(0.1% × amount, gas). The margin is the profit and already
+  // covers the gas when it exceeds it; the gas only floors small (dust) amounts.
+  const margin = nominalMargin(op, amount);
+  const boundBy = gasInAsset > margin ? "floor" : "margin";
   return {
-    fee: boundBy === "floor" ? floor : margin,
+    fee: boundBy === "floor" ? gasInAsset : margin,
     margin,
-    floor,
+    floor: gasInAsset,
     boundBy,
     usedOracle: needsOracle,
   };

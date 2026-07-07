@@ -21,6 +21,7 @@ import {
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
@@ -41,7 +42,6 @@ import { QrScanner } from "./QrScanner";
 import type { PoolBalances, TokenBuckets } from "@/lib/pool/railgun";
 import { protocolName } from "@/lib/pool/protocols";
 import { generateStealthPayment, type StealthUTXO, type StealthPayment } from "@/lib/stealth";
-import { computeFee as computeOpFee } from "@/lib/fees";
 
 type Coin = { utxo: StealthUTXO; balance: bigint };
 
@@ -188,6 +188,7 @@ export default function PrivateView({
   const [hideBalance, setHide] = useState<boolean>(() => getHideBalance());
   const [zkCopied, setZkCopied] = useState(false); // copy feedback on the 0zk receive card
   const [scanning, setScanning] = useState(false); // QR scanner overlay (private transfer "To")
+  const [refreshing, setRefreshing] = useState(false); // manual balance/POI refresh in flight
 
   const toggleHideBalance = () =>
     setHide((h) => {
@@ -195,6 +196,22 @@ export default function PrivateView({
       setHideBalance(next);
       return next;
     });
+
+  // Force an immediate POI+balance check instead of waiting for the 20s watcher
+  // tick (handy when a shield is stuck pending on a slow PPOI node). Resets the
+  // watcher's countdown so the next auto-tick is a fresh 20s away.
+  const handleRefresh = async () => {
+    if (refreshing || engine !== "up") return;
+    setRefreshing(true);
+    try {
+      const mod = await import("@/lib/pool/railgun");
+      await mod.refreshNow();
+    } catch (e) {
+      console.warn("[private] manual refresh failed:", e);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     setDecimals(getDecimals());
@@ -642,34 +659,35 @@ export default function PrivateView({
         mod.populateUnshieldTx(addr, amt, (p) => setUnshieldProgress(p), tokenAddress);
       console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
       let txHash: string;
-      if (!isPrivacy && isToken) {
-        // PUBLIC + ERC20 → skim the R1DO operator fee via the batch: unshield the
-        // full amount to our Safe, then the Safe fans out net + fee in one UserOp.
+      if (!isPrivacy) {
+        // PUBLIC (ERC20 or native ETH) → skim the R1DO operator fee via the batch:
+        // unshield the full amount to our Safe, then fan out net + fee in one UserOp.
         const res = await deploy.unshieldPublicWithFee(
-          wallet, unshieldAsset, unshieldAsset.address as `0x${string}`, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield,
+          wallet, unshieldAsset, isToken ? (unshieldAsset.address as `0x${string}`) : null, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield,
         );
         if (res.ok) {
           txHash = res.txHash;
           console.log(`[private] ✓ unshield submitted (fee ${fmt(res.fee, unDecimals)} ${unSymbol}) — tx: ${txHash}`);
-        } else {
-          // no fee recipient / amount too small → plain unshield, never block (the
-          // early-return happens BEFORE proving, so this proves exactly once).
+        } else if (res.reason === "no-recipient") {
+          // no operator to collect → plain unshield, no fee (proof not yet run in
+          // that early-return, so this proves exactly once).
           const tx = await proveUnshield(to, moves);
           setUnshieldStage("submitting");
           txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
           console.log(`[private] ✓ unshield submitted (no fee) — tx: ${txHash}`);
+        } else {
+          // too-small: the network fee would eat what you'd receive → block, never
+          // unshield for free (mirror the shield).
+          setToast({ msg: "Amount too small — the network fee would eat it. Withdraw more.", sev: "error" });
+          return;
         }
       } else {
-        // native (fee = Fase B) or privacy (later) → plain unshield, untouched.
+        // privacy → plain unshield, relayed from a fresh ephemeral Safe (fee = Fase B).
         const tx = await proveUnshield(to, moves);
         setUnshieldStage("submitting");
-        if (isPrivacy) {
-          const relayKey = mod.getRelayKey();
-          if (!relayKey) throw new Error("relay key not available");
-          txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `unshield (${unSymbol}, privacy)`);
-        } else {
-          txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
-        }
+        const relayKey = mod.getRelayKey();
+        if (!relayKey) throw new Error("relay key not available");
+        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `unshield (${unSymbol}, privacy)`);
         console.log(`[private] ✓ unshield submitted — tx: ${txHash}`);
       }
 
@@ -952,13 +970,10 @@ export default function PrivateView({
   };
   const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined, shDecimals);
   const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, unSpendable, unDecimals);
-  // R1DO operator fee shown in the unshield dialog — PUBLIC + ERC20 only (Fase A).
-  // Flat margin (gasWei 0 → no oracle, sync), skimmed from what leaves the pool.
-  const unshieldR1doFee = (() => {
-    if (isPrivacy || unshieldAsset.kind === "native" || !unshieldPreview) return null;
-    const { fee } = computeOpFee({ op: "unshield", asset: unshieldAsset, amount: unshieldPreview.moves, gasWei: 0n });
-    return fee > 0n && fee < unshieldPreview.moves ? fee : null;
-  })();
+  // Whether this unshield carries the R1DO operator fee — PUBLIC only (ERC20 or
+  // native ETH; privacy = Fase B). The exact amount is gas-based (gas × markup),
+  // only known after proving, so the dialog notes it qualitatively, not as a number.
+  const chargesUnshieldFee = !isPrivacy;
 
   // Estimate the operator fee for the PUBLIC shield (deployed main Safe → no tap)
   // so the dialog shows the breakdown and the button blocks "amount too small".
@@ -1154,6 +1169,22 @@ export default function PrivateView({
               sx={{ p: 0.25 }}
             >
               {hideBalance ? <VisibilityOffIcon sx={{ fontSize: "0.95rem" }} /> : <VisibilityIcon sx={{ fontSize: "0.95rem" }} />}
+            </IconButton>
+            <IconButton
+              onClick={handleRefresh}
+              size="small"
+              disabled={refreshing || engine !== "up"}
+              aria-label="Refresh balance"
+              title="Refresh balance now"
+              sx={{ p: 0.25 }}
+            >
+              <RefreshIcon
+                sx={{
+                  fontSize: "0.95rem",
+                  "@keyframes r1do-spin": { to: { transform: "rotate(360deg)" } },
+                  animation: refreshing ? "r1do-spin 0.8s linear infinite" : "none",
+                }}
+              />
             </IconButton>
           </Box>
 
@@ -1492,10 +1523,7 @@ export default function PrivateView({
                         ) : shieldQuote.feeTooBig ? (
                           <>Amount too small — service fee ({fmt(shieldQuote.fee, shDecimals)} {shSymbol}) exceeds it.</>
                         ) : (
-                          <>
-                            service fee {fmt(shieldQuote.fee, shDecimals)} {shSymbol}
-                            {shieldQuote.coversGas ? " · gas sponsored" : ""}
-                          </>
+                          <>service fee {fmt(shieldQuote.fee, shDecimals)} {shSymbol}</>
                         )}
                       </Typography>
                     )}
@@ -1893,8 +1921,8 @@ export default function PrivateView({
                   {unshieldPreview ? (
                     <>
                       {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, unDecimals)} {unSymbol} →
-                      you receive {fmt(unshieldPreview.receive - (unshieldR1doFee ?? 0n), unDecimals)} {unSymbol}
-                      {unshieldR1doFee ? ` · service fee ${fmt(unshieldR1doFee, unDecimals)} ${unSymbol}` : ""}
+                      you receive {fmt(unshieldPreview.receive, unDecimals)} {unSymbol}
+                      {chargesUnshieldFee ? " minus a small service fee (network gas)" : ""}
                       {unshieldExact && unshieldPreview.forcedGross ? " · capped to spendable (fee not covered)" : ""}
                       . Funds land on confirmation; the POI finalizes in the background.
                     </>

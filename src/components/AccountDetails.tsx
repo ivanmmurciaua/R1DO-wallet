@@ -145,6 +145,7 @@ export default function AccountDetails({ username, wallet, address, makeFindable
             done={scanProgress?.done ?? 0}
             total={scanProgress?.total ?? 0}
             label="Scanning the chain for your private payments…"
+            showCount={false}
           />
         </div>
       )}

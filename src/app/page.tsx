@@ -87,7 +87,7 @@ export default function Home() {
       toggleView();
       return;
     }
-    setShadowMsg("The shadow (private) world isn't available on this network yet.");
+    setShadowMsg("Private mode isn't available on this network yet.");
     setTimeout(() => setShadowMsg(null), 3200);
   }, [isPrivate, shadowAvailable, scanning, toggleView]);
   // Entering the shadow is blocked when the network has no pool OR a scan runs.
@@ -488,12 +488,12 @@ export default function Home() {
           onClick={handleShadowToggle}
           title={
             isPrivate
-              ? "Back to the light (public)"
+              ? "Back to public"
               : scanning
                 ? "Scanning your private payments — hold on"
                 : shadowAvailable
-                  ? "Enter the shadow (private)"
-                  : "Shadow (private) world isn't available on this network yet"
+                  ? "Go private"
+                  : "Private mode isn't available on this network yet"
           }
           aria-label={isPrivate ? "Exit private mode" : "Enter private mode"}
           aria-disabled={shadowEnterBlocked}

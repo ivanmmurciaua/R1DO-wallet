@@ -824,20 +824,15 @@ export const shieldPublicWithFee = async (
       : [{ to: feePay.stealthAddress, data: feePay.calldataBlob, value: fee.toString() }];
   const build = async (fee: bigint) => [...(await buildShieldCalls(token, amount - fee)), ...feeCalls(fee)];
 
-  const margin = (await quoteFee({ op: "shield", asset, amount, gasWei: 0n })).fee;
-  if (amount <= margin) return { ok: false, reason: "too-small" };
-
-  // Build once with the margin fee. With the gas floor on, read the real gas off
-  // that build, bump to max(margin, gas) and rebuild only if it changed.
-  let fee = margin;
-  let calls = await build(margin);
-  if (gasFloorEnabled()) {
-    const probe = await wallet.createTransaction({ transactions: calls });
-    const gasWei = gasWeiOf(probe, label);
-    fee = (await quoteFee({ op: "shield", asset, amount, gasWei })).fee;
-    if (amount <= fee) return { ok: false, reason: "too-small" }; // gas pushed the fee past the amount → block, never free
-    if (fee !== margin) calls = await build(fee);
-  }
+  // Gas-based cost-plus: build once with a zero-fee placeholder to read the REAL
+  // gas, then fee = gas × markup (op "shield" → ×1.15) and rebuild. The gas barely
+  // changes with the fee amount (same calldata shape), so one estimate is enough.
+  let calls = await build(0n);
+  const probe = await wallet.createTransaction({ transactions: calls });
+  const gasWei = gasWeiOf(probe, label);
+  const fee = (await quoteFee({ op: "shield", asset, amount, gasWei })).fee;
+  if (fee <= 0n || amount <= fee) return { ok: false, reason: "too-small" }; // gas ≥ amount → block, never free
+  calls = await build(fee);
 
   const tx = await sendTxsViaSafe(wallet, calls, label);
   return tx ? { ok: true, txHash: tx, fee } : { ok: false, reason: "no-recipient" };
@@ -848,19 +843,21 @@ export type UnshieldFeeResult =
   | { ok: false; reason: "no-recipient" | "too-small" };
 
 /**
- * PUBLIC ERC20 unshield WITH the R1DO operator fee, skimmed like the shield's.
- * Railgun rejects two unshields of the same token in one batch ("addUnshieldData
- * once per token"), so the fee can't be a second proof output. Instead we unshield
- * the FULL amount to our OWN Safe (one legal output) and, in the SAME UserOp, the
- * Safe distributes: `net` to the user's destination + `fee` to a fresh Δ1 stealth
- * of r1do-wallet (with the blob announced so r1do can detect+spend it).
- * Fase A: PUBLIC + ERC20 only. Flat margin (gasWei 0 → no gasFloor; it's TEMP).
+ * PUBLIC unshield (ERC20 or native ETH) WITH the R1DO operator fee, skimmed like the
+ * shield's. Railgun rejects two unshields of the same token in one batch
+ * ("addUnshieldData once per token"), so the fee can't be a second proof output.
+ * Instead we unshield the FULL amount to our OWN Safe (one legal output) and, in the
+ * SAME UserOp, the Safe distributes: `net` to the user's destination + `fee` to a
+ * fresh Δ1 stealth of r1do-wallet (blob announced so r1do can detect+spend it).
+ * The batch also unlocks the NATIVE fee in ETH: the base-token unshield unwraps
+ * WETH→ETH into the Safe, so the fee leg is a plain ETH transfer (no WETH detour).
+ * Gas-based fee = gas × markup (op "unshield" → ×1.30). PUBLIC only (privacy = later).
  * Fails open ("no-recipient"/"too-small") so the caller can do a plain unshield.
  */
 export const unshieldPublicWithFee = async (
   wallet: SafeWallet,
   asset: Asset,
-  token: `0x${string}`,
+  token: `0x${string}` | null, // null = native ETH (fee leg is a value transfer)
   moves: bigint, // total leaving the pool (gross, before Railgun's own fee)
   destination: `0x${string}`,
   railgunBps: number, // Railgun's unshield fee (25 = 0.25%) — the Safe receives moves minus this
@@ -868,43 +865,53 @@ export const unshieldPublicWithFee = async (
 ): Promise<UnshieldFeeResult> => {
   const recipient = await getFeeRecipient();
   if (!recipient) return { ok: false, reason: "no-recipient" };
-  const { fee } = await quoteFee({ op: "unshield", asset, amount: moves, gasWei: 0n });
-  // The Safe only receives `moves − Railgun's 0.25%`, so that (minus our fee) is
-  // what's actually distributable. Guard against the fee eating it all.
-  const received = moves - (moves * BigInt(railgunBps)) / 10_000n;
-  const net = received - fee;
-  if (fee <= 0n || net <= 0n) return { ok: false, reason: "too-small" };
   const feePay = await generateStealthPayment(recipient.metaAddress);
   const safeAddr = (await wallet.protocolKit.getAddress()) as `0x${string}`;
-  // Unshield the FULL amount to our own Safe (the proof runs here — heavy), then
-  // the Safe fans it out in the same batch. Railgun allows one unshield per token,
-  // hence the fan-out (not a second proof output).
+  const label = `unshield (${asset.symbol}, public + fee)`;
+  // Unshield the FULL amount to our own Safe (the proof runs here — heavy). This is
+  // fee-INDEPENDENT, so it's proved ONCE; the fee only changes the transfer amounts.
   const proven = await proveUnshield(safeAddr, moves);
-  const transfer = (to: string, amt: bigint) => ({
-    to: token as string,
-    data: encodeFunctionData({ abi: ERC20_TRANSFER_ABI, functionName: "transfer", args: [to as `0x${string}`, amt] }),
-    value: "0",
-  });
-  const calls = [
+  // The Safe only receives `moves − Railgun's 0.25%` → that's what's distributable.
+  const received = moves - (moves * BigInt(railgunBps)) / 10_000n;
+  const isNative = token === null;
+  // A plain value/token move as a Safe call.
+  const transfer = (to: string, amt: bigint) =>
+    isNative
+      ? { to, data: "0x", value: amt.toString() }
+      : {
+          to: token as string,
+          data: encodeFunctionData({ abi: ERC20_TRANSFER_ABI, functionName: "transfer", args: [to as `0x${string}`, amt] }),
+          value: "0",
+        };
+  const isExternal = destination.toLowerCase() !== safeAddr.toLowerCase();
+  const buildCalls = (fee: bigint) => [
     proven,
-    // net → user's chosen destination (skip when they withdrew to their own Safe:
-    // the net simply stays there, and we only move the fee out).
-    ...(destination.toLowerCase() !== safeAddr.toLowerCase() ? [transfer(destination, net)] : []),
-    // fee → r1do's fresh Δ1 stealth + announce the blob (0-value) so r1do finds it
-    transfer(feePay.stealthAddress, fee),
-    { to: feePay.stealthAddress, data: feePay.calldataBlob, value: "0" },
+    // net → user's destination (skip when they withdrew to their own Safe: the net
+    // just stays there, and we only move the fee out).
+    ...(isExternal ? [transfer(destination, received - fee)] : []),
+    // fee → r1do's fresh Δ1 stealth. Native: ONE call carries the fee (value) AND
+    // the blob. ERC20: a token transfer + a 0-value blob announce.
+    ...(isNative
+      ? [{ to: feePay.stealthAddress, data: feePay.calldataBlob, value: fee.toString() }]
+      : [transfer(feePay.stealthAddress, fee), { to: feePay.stealthAddress, data: feePay.calldataBlob, value: "0" }]),
   ];
-  const txHash = await sendTxsViaSafe(wallet, calls, `unshield (${asset.symbol}, public + fee)`);
+  // Gas-based cost-plus: read the batch's REAL gas (zero-fee placeholder), then
+  // fee = gas × markup and rebuild the transfers (no re-prove — proven leg unchanged).
+  const probe = await wallet.createTransaction({ transactions: buildCalls(0n) });
+  const gasWei = gasWeiOf(probe, label);
+  const { fee } = await quoteFee({ op: "unshield", asset, amount: moves, gasWei });
+  if (fee <= 0n || received - fee <= 0n) return { ok: false, reason: "too-small" };
+  const txHash = await sendTxsViaSafe(wallet, buildCalls(fee), label);
   return txHash ? { ok: true, txHash, fee } : { ok: false, reason: "no-recipient" };
 };
 
 /**
  * UI helper: estimate the PUBLIC shield operator fee (no submit) so the deposit
  * dialog shows the breakdown and blocks "amount too small". Builds the real shield
- * op on the main Safe (deployed → no passkey) to read gas → fee = max(flat, gas).
+ * op on the main Safe (deployed → no passkey) to read gas → fee = gas × markup.
  * Uses a random-blob dummy for the fee leg (gas depends on calldata SIZE, not the
- * real r1do stealth payment) so the estimate skips the ML-KEM derivation. Falls
- * back to the flat margin on failure / no recipient.
+ * real r1do stealth payment) so the estimate skips the ML-KEM derivation. Returns
+ * fee 0 on failure / no recipient (caller shields plain, never blocks).
  */
 export const quoteShieldFee = async (
   wallet: SafeWallet,
@@ -913,27 +920,27 @@ export const quoteShieldFee = async (
   amount: bigint,
   buildShieldCalls: (asset: string | null, amt: bigint) => Promise<{ to: string; data: string; value: string }[]>,
 ): Promise<{ fee: bigint; coversGas: boolean; feeTooBig: boolean }> => {
-  const margin = (await quoteFee({ op: "shield", asset, amount, gasWei: 0n })).fee;
-  if (!gasFloorEnabled()) return { fee: margin, coversGas: true, feeTooBig: amount <= margin };
   try {
     const recipient = await getFeeRecipient();
-    if (!recipient || amount <= margin) return { fee: margin, coversGas: true, feeTooBig: amount <= margin };
+    if (!recipient) return { fee: 0n, coversGas: true, feeTooBig: false };
+    // Estimate the op with a zero-fee placeholder leg (calldata shape = same gas).
     const reviewBlob = randHex(STEALTH_BLOB_LENGTH);
     const feeAddr = randHex(20);
     const feeCalls = token
       ? [
-          { to: token as string, data: encodeFunctionData({ abi: ERC20_TRANSFER_ABI, functionName: "transfer", args: [feeAddr, margin] }), value: "0" },
+          { to: token as string, data: encodeFunctionData({ abi: ERC20_TRANSFER_ABI, functionName: "transfer", args: [feeAddr, 0n] }), value: "0" },
           { to: feeAddr, data: reviewBlob, value: "0" },
         ]
-      : [{ to: feeAddr, data: reviewBlob, value: margin.toString() }];
-    const calls = [...(await buildShieldCalls(token, amount - margin)), ...feeCalls];
+      : [{ to: feeAddr, data: reviewBlob, value: "0" }];
+    const calls = [...(await buildShieldCalls(token, amount)), ...feeCalls];
     const op = await wallet.createTransaction({ transactions: calls });
     const gasWei = gasWeiOf(op, `${token ? "ERC20" : "native"} shield [quote]`);
     const q = await quoteFee({ op: "shield", asset, amount, gasWei });
-    return { fee: q.fee, coversGas: q.boundBy === "margin", feeTooBig: amount <= q.fee };
+    // Gas-based: the fee IS the gas × markup, so it always "covers gas" by design.
+    return { fee: q.fee, coversGas: true, feeTooBig: amount <= q.fee };
   } catch (e) {
-    console.warn("[quoteShieldFee] estimate failed, using margin:", e);
-    return { fee: margin, coversGas: true, feeTooBig: amount <= margin };
+    console.warn("[quoteShieldFee] estimate failed, no fee:", e);
+    return { fee: 0n, coversGas: true, feeTooBig: false };
   }
 };
 

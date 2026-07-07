@@ -899,6 +899,19 @@ async function watcherTick(): Promise<void> {
 
 let watcherActive = false;
 const WATCH_INTERVAL = 20_000;
+// Timestamp (ms) of the last completed tick. The loop sleeps until 20s AFTER this,
+// so a manual refresh (runs a tick + updates it) resets the automatic countdown.
+let lastTickAt = 0;
+
+async function runTick(): Promise<void> {
+  try {
+    await withEngineLock(watcherTick);
+  } catch (e) {
+    console.warn("[watcher] tick error:", e);
+  } finally {
+    lastTickAt = Date.now();
+  }
+}
 
 /** Start the background POI+balance watcher (tied to the private view). */
 export function startWatcher(): void {
@@ -908,6 +921,7 @@ export function startWatcher(): void {
     return;
   }
   watcherActive = true;
+  lastTickAt = 0; // → the first loop iteration ticks immediately
   console.log("[watcher] POI+balance watcher active (every 20s)");
   // Paint balances IMMEDIATELY (warm engine reads its cached scan state) so a
   // funded user never sees a 0 while the first tick's syncTxid/POI work runs.
@@ -915,12 +929,10 @@ export function startWatcher(): void {
   withEngineLock(scanBalances).catch((e) => console.warn("[watcher] initial balance paint:", e));
   (async () => {
     while (watcherActive && poolWallet) {
-      try {
-        await withEngineLock(watcherTick);
-      } catch (e) {
-        console.warn("[watcher] tick error:", e);
-      }
-      await sleep(WATCH_INTERVAL);
+      // Wait until 20s after the last tick — a manual refresh resets this window.
+      await sleep(Math.max(0, WATCH_INTERVAL - (Date.now() - lastTickAt)));
+      if (!watcherActive || !poolWallet) break;
+      if (Date.now() - lastTickAt >= WATCH_INTERVAL) await runTick();
     }
   })();
 }
@@ -930,6 +942,16 @@ export function stopWatcher(): void {
   if (!watcherActive) return;
   watcherActive = false;
   console.log("[watcher] stopped");
+}
+
+/** Force ONE POI+balance refresh right now (manual "refresh" button) — the same
+    work as a watcher tick (syncTxid → POIs → scan), serialized on the engine lock
+    so it never collides with the 20s loop. Lets a user re-check a pending shield
+    without waiting for the next tick (handy when the PPOI node is slow). */
+export async function refreshNow(): Promise<void> {
+  if (!poolWallet) return;
+  console.log("[watcher] manual refresh requested");
+  await runTick(); // updates lastTickAt → the 20s auto countdown restarts from now
 }
 
 /** "Nuclear" re-sync for the ACTIVE 0zk only: wipe and rebuild this wallet's
