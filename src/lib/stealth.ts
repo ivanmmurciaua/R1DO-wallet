@@ -2,7 +2,7 @@ import { keccak256, toHex, concat, hexToBytes, getAddress } from "viem";
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 
-// ── Δ1: announcer-less delivery ──────────────────────────────────────────────
+// ── Δ: announcer-less delivery ──────────────────────────────────────────────
 // The ERC-5564 announcer and the ERC-6538 registry are gone. The note-delivery
 // blob travels fused with the payment itself, as calldata of the value transfer
 // to the (counterfactual) stealth Safe:
@@ -152,7 +152,7 @@ export async function generateStealthPayment(metaAddressHex: `0x${string}`): Pro
   const saltNonce      = BigInt(h);
   const stealthAddress = await predictStealthSafeAddress(stealthOwner, saltNonce);
 
-  // Δ1: the blob is the tx calldata itself — no announcer call.
+  // Δ: the blob is the tx calldata itself — no announcer call.
   const calldataBlob = toHex(
     concat([hexToBytes(STEALTH_MAGIC), new Uint8Array([viewTag]), ephemeralPubKey, kemCiphertext])
   ) as `0x${string}`;
@@ -225,7 +225,7 @@ export interface StealthUTXO {
   ephemeralPubkey: `0x${string}`; // 33 bytes
   kemCiphertext:   `0x${string}`; // 1088 bytes
   blockNumber:     number;
-  // Set when WE pre-mint a receive address (Δ1 off-chain "Courier" flow) instead
+  // Set when WE pre-mint a receive address (Δ off-chain "Courier" flow) instead
   // of discovering it by scan. Lets the UI list/label pending receive addresses.
   createdAt?:      number;        // epoch ms at mint time
   memo?:           string;        // optional human label ("rent from Bob")
@@ -318,7 +318,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // stealth or not — it carries no scheme fingerprint), fetches each candidate
 // tx once, pattern-matches the calldata for the magic prefix and
 // trial-decrypts whatever it finds. Direct EOA payments carrying the blob in
-// tx.input would need block-level scanning — out of scope here, since Δ1
+// tx.input would need block-level scanning — out of scope here, since Δ
 // always pays through the EntryPoint.
 export async function scanStealthPayments(
   spendingPrivateKey: `0x${string}`,
@@ -361,7 +361,7 @@ export async function scanStealthPayments(
   const CHUNK = BigInt(scanWindowBlocks());
 
   // Paymaster filter (indexed): only OUR sponsored UserOps, not the whole chain's
-  // 4337 traffic → ~22× fewer txs to fetch. Complete by construction (every Δ1
+  // 4337 traffic → ~22× fewer txs to fetch. Complete by construction (every Δ
   // payment is a Pimlico-sponsored EntryPoint op). undefined → scan all (Sepolia).
   const paymasters = scanPaymasters();
   console.log(

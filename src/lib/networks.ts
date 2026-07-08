@@ -55,10 +55,10 @@ export type Network = {
       identical full results → 10× fewer windows). Defaults to 1000 (Sepolia's
       benched size) when omitted. */
   scanWindowBlocks?: number;
-  /** Known paymaster address(es) sponsoring THIS chain's Δ1 stealth payments. When
+  /** Known paymaster address(es) sponsoring THIS chain's Δ stealth payments. When
       set, the scanner filters getLogs by them (indexed field) → it only fetches OUR
       candidate UserOps, not the whole chain's 4337 traffic (~22× fewer tx fetches on
-      Arbitrum). COMPLETE by construction: our app is the only thing that mints Δ1
+      Arbitrum). COMPLETE by construction: our app is the only thing that mints Δ
       payments and sponsors every one via Pimlico, so every scan-recoverable payment
       is an EntryPoint UserOp carrying one of these. Array → a Pimlico paymaster
       rotation just appends the new address (keep old ones for history). OMIT to

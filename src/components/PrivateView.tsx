@@ -168,7 +168,7 @@ export default function PrivateView({
   const [shieldExact, setShieldExact] = useState(false);
   const [unshieldExact, setUnshieldExact] = useState(false);
   // Privacy-mode unshield destination: a fresh one-time stealth address we own.
-  // `unshieldAnnounce` ON = emit the Δ1 blob on-chain (recoverable by scan, any
+  // `unshieldAnnounce` ON = emit the Δ blob on-chain (recoverable by scan, any
   // device); OFF = ghost (no blob → max privacy, but spendable from this device
   // only via the local note).
   const [unshieldStealth, setUnshieldStealth] = useState<StealthPayment | null>(null);
@@ -658,77 +658,61 @@ export default function PrivateView({
       const proveUnshield = (addr: string, amt: bigint) =>
         mod.populateUnshieldTx(addr, amt, (p) => setUnshieldProgress(p), tokenAddress);
       console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
+      const token = isToken ? (unshieldAsset.address as `0x${string}`) : null;
       let txHash: string;
+      let toastMsg = "Unshielded — your funds are in your address now (POI finalizing in background)";
+
       if (!isPrivacy) {
-        // PUBLIC (ERC20 or native ETH) → skim the R1DO operator fee via the batch:
-        // unshield the full amount to our Safe, then fan out net + fee in one UserOp.
-        const res = await deploy.unshieldPublicWithFee(
-          wallet, unshieldAsset, isToken ? (unshieldAsset.address as `0x${string}`) : null, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield,
-        );
+        // PUBLIC (ERC20 or native ETH) → skim the fee via the batch: unshield the full
+        // amount to our Safe, then fan out net + fee in one UserOp.
+        const res = await deploy.unshieldPublicWithFee(wallet, unshieldAsset, token, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield);
         if (res.ok) {
           txHash = res.txHash;
           console.log(`[private] ✓ unshield submitted (fee ${fmt(res.fee, unDecimals)} ${unSymbol}) — tx: ${txHash}`);
         } else if (res.reason === "no-recipient") {
-          // no operator to collect → plain unshield, no fee (proof not yet run in
-          // that early-return, so this proves exactly once).
           const tx = await proveUnshield(to, moves);
           setUnshieldStage("submitting");
           txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
           console.log(`[private] ✓ unshield submitted (no fee) — tx: ${txHash}`);
         } else {
-          // too-small: the network fee would eat what you'd receive → block, never
-          // unshield for free (mirror the shield).
           setToast({ msg: "Amount too small — the network fee would eat it. Withdraw more.", sev: "error" });
           return;
         }
       } else {
-        // privacy → plain unshield, relayed from a fresh ephemeral Safe (fee = Fase B).
-        const tx = await proveUnshield(to, moves);
-        setUnshieldStage("submitting");
+        // PRIVACY → ephemeral Safe as repartidor; the fee AND your Δ blob are folded
+        // into ONE batch (proof recipient = the ephemeral Safe, so it's built first).
         const relayKey = mod.getRelayKey();
         if (!relayKey) throw new Error("relay key not available");
-        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `unshield (${unSymbol}, privacy)`);
-        console.log(`[private] ✓ unshield submitted — tx: ${txHash}`);
-      }
+        // Destination is your OWN fresh stealth only when you didn't edit the field.
+        const isSelfStealth = !!unshieldStealth && to.toLowerCase() === unshieldStealth.stealthAddress.toLowerCase();
+        const announce = isSelfStealth && unshieldAnnounce;
+        // Announce → fold your blob so it's recoverable by scan; ghost/external → none.
+        const destBlob = announce ? (unshieldStealth!.calldataBlob as `0x${string}`) : null;
+        const res = await deploy.unshieldPrivacyWithFee(relayKey, unshieldAsset, token, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield, destBlob);
+        if (!res.ok) {
+          setToast({ msg: "Amount too small — the network fee would eat it. Withdraw more.", sev: "error" });
+          return;
+        }
+        txHash = res.txHash;
+        console.log(`[private] ✓ unshield submitted (fee ${fmt(res.fee, unDecimals)} ${unSymbol}) — tx: ${txHash}`);
 
-      // Privacy mode, destination still the fresh stealth we generated (user
-      // didn't edit it): make that one-time address discoverable/spendable.
-      //  · announce ON  → publish the Δ1 blob (value-0 UserOp via ephemeral Safe)
-      //                   → recoverable by scan on any device.
-      //  · ghost (OFF)  → keep a local note (this device only). Also the safe
-      //                   fallback if the announce tx fails (funds never lost).
-      let toastMsg = "Unshielded — your funds are in your address now (POI finalizing in background)";
-      if (isPrivacy && unshieldStealth && to.toLowerCase() === unshieldStealth.stealthAddress.toLowerCase()) {
-        const ghostNote: StealthUTXO = {
-          stealthAddress: unshieldStealth.stealthAddress,
-          ephemeralPubkey: unshieldStealth.ephemeralPubkey,
-          kemCiphertext: unshieldStealth.kemCiphertext,
-          blockNumber: 0,
-          // Ghost notes skip the scanner's asset probe, so tag the token here;
-          // else a ghost ERC20 unshield would read as native (0). Native = undefined.
-          ...(isToken ? { asset: unshieldAsset.address as `0x${string}` } : {}),
-        };
-        if (unshieldAnnounce) {
-          try {
-            const relayKey = mod.getRelayKey();
-            if (!relayKey) throw new Error("relay key not available");
-            const announce = await deploy.relayViaEphemeralSafe(relayKey, {
-              to: unshieldStealth.stealthAddress,
-              data: unshieldStealth.calldataBlob,
-              value: "0",
-            });
-            console.log(`[private] ✓ stealth blob announced — tx: ${announce}`);
+        // Self-stealth: announce → your blob is on-chain (recoverable anywhere). Ghost →
+        // no blob published, so keep a LOCAL note (spendable from this device only).
+        if (isSelfStealth) {
+          if (announce) {
             toastMsg = "Unshielded to a fresh stealth address — yours, recoverable by scan (POI finalizing in background)";
-          } catch (e) {
-            // Announce failed → fall back to a local note so funds stay spendable.
-            console.warn("[private] announce failed — saving ghost note locally:", e);
-            addStealthUTXO(username, ghostNote);
-            toastMsg = "Unshielded to a fresh stealth address — couldn't announce, saved locally (this device only)";
+          } else {
+            addStealthUTXO(username, {
+              stealthAddress: unshieldStealth!.stealthAddress,
+              ephemeralPubkey: unshieldStealth!.ephemeralPubkey,
+              kemCiphertext: unshieldStealth!.kemCiphertext,
+              blockNumber: 0,
+              // tag the token so a ghost ERC20 note doesn't read as native (0)
+              ...(isToken ? { asset: unshieldAsset.address as `0x${string}` } : {}),
+            });
+            console.log(`[private] ghost note saved locally: ${unshieldStealth!.stealthAddress}`);
+            toastMsg = "Unshielded in ghost mode — spendable from this device only (POI finalizing in background)";
           }
-        } else {
-          addStealthUTXO(username, ghostNote);
-          console.log(`[private] ghost note saved locally: ${ghostNote.stealthAddress}`);
-          toastMsg = "Unshielded in ghost mode — spendable from this device only (POI finalizing in background)";
         }
       }
 
@@ -970,10 +954,10 @@ export default function PrivateView({
   };
   const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined, shDecimals);
   const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, unSpendable, unDecimals);
-  // Whether this unshield carries the R1DO operator fee — PUBLIC only (ERC20 or
-  // native ETH; privacy = Fase B). The exact amount is gas-based (gas × markup),
-  // only known after proving, so the dialog notes it qualitatively, not as a number.
-  const chargesUnshieldFee = !isPrivacy;
+  // Every unshield now carries the R1DO operator fee — public (batch from your Safe)
+  // AND privacy (batch from the ephemeral Safe). The exact amount is gas-based
+  // (gas × markup), only known after proving, so the dialog notes it qualitatively.
+  const chargesUnshieldFee = true;
 
   // Estimate the operator fee for the PUBLIC shield (deployed main Safe → no tap)
   // so the dialog shows the breakdown and the button blocks "amount too small".
@@ -1490,7 +1474,7 @@ export default function PrivateView({
                           disabled={shielding}
                         />
                       }
-                      label="Receive the exact amount (cover the fee)"
+                      label="Receive the exact amount (before the service fee)"
                       sx={{ ".MuiFormControlLabel-label": { fontSize: "0.62rem", opacity: 0.7 }, mb: 0.5 }}
                     />
 
@@ -1921,7 +1905,7 @@ export default function PrivateView({
                       disabled={unshieldBusy}
                     />
                   }
-                  label="Receive the exact amount (cover the fee)"
+                  label="Receive the exact amount (before the service fee)"
                   sx={{ ".MuiFormControlLabel-label": { fontSize: "0.62rem", opacity: 0.7 }, mb: 0.5 }}
                 />
 

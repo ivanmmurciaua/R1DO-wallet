@@ -7,7 +7,7 @@
   operator's revenue is private (each fee lands in a one-time stealth/0zk output).
 
   DUAL-RAIL: charged in the world where the op happens, never crossing worlds.
-    - LIGHT world  → metaAddress (Δ1 stealth payment)
+    - LIGHT world  → metaAddress (Δ stealth payment)
     - SHADOW world → zkAddress   (Railgun 0zk transfer)
 
   Cached: the entry is static once registered, so we avoid repeating readDirectory's
@@ -26,7 +26,7 @@ export const FEE_RECIPIENT_NICK = "r1do-wallet";
 export type FeeWorld = "light" | "shadow";
 
 export type FeeRecipient = {
-  /** LIGHT rail — Δ1 meta-address (stealth pay-by-nick). */
+  /** LIGHT rail — Δ meta-address (stealth pay-by-nick). */
   metaAddress: `0x${string}`;
   /** SHADOW rail — Railgun 0zk (shielded transfer). null if it has no privacy. */
   zkAddress: string | null;

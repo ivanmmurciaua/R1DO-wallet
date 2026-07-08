@@ -12,7 +12,11 @@ import {
   getUtxoCleanup,
   DEFAULT_SYMBOL,
   DEFAULT_DECIMALS,
+  getWalletMetas,
+  removeWalletMeta,
 } from "@/lib/localstorage";
+import { deleteWalletCredential } from "@/lib/credstore";
+import { LOCAL_LAST_USER } from "@/app/constants";
 import { NETWORKS, activeNetwork, setActiveNetwork } from "@/lib/networks";
 
 // R1DO's standard info indicator: click-to-open Popover (mobile-friendly), same
@@ -169,6 +173,24 @@ export function Settings({
     window.location.reload();
   };
 
+  // Wallet management (login-screen Settings). "Show wallets" reveals the device's
+  // wallet(s); deleting wipes ALL local access to that account — it's destructive
+  // and irreversible without re-registering the same passkey, hence the confirm.
+  const [showWallets, setShowWallets] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [walletList, setWalletList] = useState<{ username: string }[]>([]);
+
+  const handleDeleteWallet = async (username: string) => {
+    // Full local wipe: wallet meta + per-account record + scan state + UTXOs
+    // (removeWalletMeta), the passkey credential mapping, and the last-user pointer.
+    removeWalletMeta(username);
+    await deleteWalletCredential(username).catch(() => {});
+    if ((localStorage.getItem(LOCAL_LAST_USER) ?? "").toLowerCase() === username.toLowerCase()) {
+      localStorage.removeItem(LOCAL_LAST_USER);
+    }
+    window.location.reload(); // clean slate → login re-reads the (now shorter) list
+  };
+
   const handleOpen = () => {
     setSymbol(getSymbol());
     setDecimals(getDecimals());
@@ -177,6 +199,9 @@ export function Settings({
     setConfirmResync(false);
     setSeedPhrase(null);
     setSeedErr(null);
+    setShowWallets(false);
+    setConfirmDelete(null);
+    setWalletList(getWalletMetas());
     setOpen(true);
   };
 
@@ -290,6 +315,114 @@ export function Settings({
                   <MenuItem key={n.id} value={n.id}>{n.chain.name}</MenuItem>
                 ))}
               </TextField>
+
+              {/* Wallets — reveal the device's account(s), with a destructive delete. */}
+              <p style={{ fontSize: "0.8rem", margin: "18px 0 10px" }}>Wallets</p>
+              {!showWallets ? (
+                <button
+                  onClick={() => setShowWallets(true)}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid currentColor",
+                    color: "inherit",
+                    fontFamily: "var(--font-geist-mono), monospace",
+                    fontSize: "0.75rem",
+                    letterSpacing: "0.08em",
+                    padding: "6px 12px",
+                    cursor: "pointer",
+                    width: "100%",
+                  }}
+                >
+                  [SHOW WALLETS]
+                </button>
+              ) : (
+                <div>
+                  {walletList.length === 0 ? (
+                    <p style={{ fontSize: "0.75rem", opacity: 0.55 }}>No wallets on this device.</p>
+                  ) : (
+                    walletList.map((w) => (
+                      <div
+                        key={w.username}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginBottom: "8px" }}
+                      >
+                        <span
+                          style={{
+                            fontFamily: "var(--font-geist-mono), monospace",
+                            fontSize: "0.8rem",
+                            opacity: 0.85,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {w.username}
+                        </span>
+                        <button
+                          onClick={() => setConfirmDelete(w.username)}
+                          style={{
+                            background: "transparent",
+                            border: "1px solid #e05252",
+                            color: "#e05252",
+                            fontFamily: "var(--font-geist-mono), monospace",
+                            fontSize: "0.7rem",
+                            letterSpacing: "0.06em",
+                            padding: "4px 10px",
+                            cursor: "pointer",
+                            flexShrink: 0,
+                          }}
+                        >
+                          [DELETE]
+                        </button>
+                      </div>
+                    ))
+                  )}
+
+                  {confirmDelete && (
+                    <div style={{ border: "1px solid #e05252", borderRadius: "2px", padding: "10px 12px", marginTop: "4px" }}>
+                      <p style={{ fontSize: "0.72rem", lineHeight: 1.55, marginBottom: "10px" }}>
+                        ⚠ Delete <b>{confirmDelete}</b>? This <b>permanently wipes all access</b> to
+                        this wallet from this device — keys, funds, and history. There is <b>no undo</b>,
+                        and no one (not even us) can restore it. Make sure you have your passkey if you
+                        ever want to re-create it.
+                      </p>
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <button
+                          onClick={() => handleDeleteWallet(confirmDelete)}
+                          style={{
+                            background: "#e05252",
+                            border: "1px solid #e05252",
+                            color: "#fff",
+                            fontFamily: "var(--font-geist-mono), monospace",
+                            fontSize: "0.7rem",
+                            letterSpacing: "0.06em",
+                            padding: "6px 10px",
+                            cursor: "pointer",
+                            flex: 1,
+                          }}
+                        >
+                          [YES, DELETE FOREVER]
+                        </button>
+                        <button
+                          onClick={() => setConfirmDelete(null)}
+                          style={{
+                            background: "transparent",
+                            border: "1px solid currentColor",
+                            color: "inherit",
+                            fontFamily: "var(--font-geist-mono), monospace",
+                            fontSize: "0.7rem",
+                            letterSpacing: "0.06em",
+                            padding: "6px 10px",
+                            cursor: "pointer",
+                            flex: 1,
+                          }}
+                        >
+                          [CANCEL]
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             )}
 

@@ -14,7 +14,7 @@
                padded to PAYLOAD_SIZE so every entry is the same length.
 
    Three pay-by-name rails resolve from one entry: public (safeAddress),
-   stealth Δ1 (metaAddress), and RAILGUN shielded (zkAddress) — all optional
+   stealth Δ (metaAddress), and RAILGUN shielded (zkAddress) — all optional
    except safeAddress.
 
    What this buys: nothing quantum-harvestable at rest (symmetric only),
@@ -61,7 +61,7 @@ export const PAYLOAD_SIZE = OFF_ZK + ZK_MAX; // 1502
 export type DirectoryEntry = {
   rawId: string; // hex (no 0x), as used by loadFromDevice
   safeAddress: `0x${string}`;
-  metaAddress: `0x${string}` | null; // PQ meta-address → private pay-by-name (stealth Δ1)
+  metaAddress: `0x${string}` | null; // PQ meta-address → private pay-by-name (stealth Δ)
   zkAddress?: string | null; // 0zk bech32 → Railgun shielded pay-by-name (v3)
 };
 

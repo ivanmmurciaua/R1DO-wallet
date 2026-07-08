@@ -7,7 +7,7 @@
   permissionless / safe-deployments update can never silently move the address.
 
   Values are the canonical Safe 1.4.1 + Safe4337Module 0.3.0 deployments,
-  cross-checked against ~/Escritorio/the-great-dev/src/lib/aa-config.ts AND delta1's
+  cross-checked against ~/Escritorio/the-great-dev/src/lib/aa-config.ts AND Δ's
   own src/app/constants.tsx (ENTRYPOINT + SAFE_4337_MODULE match). Frozen from here.
 
   ── L1 vs L2 SINGLETON (the footgun) ──────────────────────────────────────────

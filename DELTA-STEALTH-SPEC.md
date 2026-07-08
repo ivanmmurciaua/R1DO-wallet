@@ -1,6 +1,6 @@
-# Δ1 Stealth Payments — Interop Spec
+# Δ Stealth Payments — Interop Spec
 
-> How a third party (any individual or app), given only a Δ1 **meta-address**,
+> How a third party (any individual or app), given only a Δ **meta-address**,
 > can derive a fresh stealth address, pay it, and have the recipient's R1DO
 > wallet discover the resulting UTXO — **without importing any R1DO code**.
 
@@ -32,7 +32,7 @@ one Safe-address step. Wire formats and domain choices are normative.
 
 ## 1. The meta-address
 
-A Δ1 meta-address is **1251 bytes**, distributed off-chain (QR, profile, DM):
+A Δ meta-address is **1251 bytes**, distributed off-chain (QR, profile, DM):
 
 ```
 0x00 ‖ pk_spend(33) ‖ pk_view(33) ‖ ek(1184)
@@ -377,7 +377,7 @@ the note travels* change.
 The leading `0x00` of the meta-address and the `"spe1"` magic are the version
 anchors. Any change to the combine function (`keccak256(sharedX ‖ kemShared)`),
 the salt encoding, the Safe parameters, or the blob layout is a **breaking**
-change and must bump these. Current scheme: **Δ1 / spe1**.
+change and must bump these. Current scheme: **Δ / spe1**.
 ```
 References (R1DO impl., for cross-checking only):
   src/lib/stealth.ts   — generateStealthPayment / extractStealthBlobs / scanStealthPayments / checkPQPayment

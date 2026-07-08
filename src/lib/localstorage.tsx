@@ -95,7 +95,7 @@ export const removeWalletMeta = (username: string): void => {
 
 interface Account {
   zk?: string;                 // cached 0zk (public, deterministic) — instant "Unlock"
-  metaAddress?: `0x${string}`; // Δ1 stealth meta-address (public, off-chain shareable)
+  metaAddress?: `0x${string}`; // Δ stealth meta-address (public, off-chain shareable)
   directory?: string;          // directory contract address this user is published to
   findableNudgeDismissed?: boolean; // user dismissed the "make me findable" banner
 }
@@ -120,7 +120,7 @@ export const getCachedPoolZk = (username: string): string | null =>
 export const setCachedPoolZk = (username: string, zkAddress: string): void =>
   patchAccount(username, { zk: zkAddress });
 
-// Δ1: no on-chain registry — the meta-address is public data distributed
+// Δ: no on-chain registry — the meta-address is public data distributed
 // off-chain. Cached locally so the UI can offer it for sharing without
 // touching the passkey (it re-derives deterministically from the PRF anyway).
 export const saveMetaAddress = (username: string, metaAddress: `0x${string}`): void =>

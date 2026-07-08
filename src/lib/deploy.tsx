@@ -344,7 +344,7 @@ export const setDirectoryEntry = async (
   return "";
 };
 
-// Δ1: single tx — the value transfer to the (codeless) stealth Safe carries
+// Δ: single tx — the value transfer to the (codeless) stealth Safe carries
 // the delivery blob as calldata. No announcer contract, no extra call.
 export const sendStealth = async (
   wallet: SafeWallet,
@@ -401,7 +401,7 @@ const deriveStealthPack = async (
 };
 
 /** The calls for a UTXO spend that carves the operator fee: recipient gets
- *  `gross − fee`, r1do gets `fee`. Native or token, optional recipient blob (Δ1
+ *  `gross − fee`, r1do gets `fee`. Native or token, optional recipient blob (Δ
  *  chained private). Shared by the spend and the gas-estimate so both build the
  *  exact same op. */
 const buildUTXOSpendCalls = (
@@ -467,7 +467,7 @@ export const quoteStealthUTXOFee = async (
 // Safe (deploying it on first spend if needed) and sends a sponsored UserOp.
 // No native ETH required in the stealth address — the paymaster covers gas.
 // If `calldataBlob` is set, the recipient is itself a stealth address and the
-// transfer carries the delivery blob (Δ1 — no announcer).
+// transfer carries the delivery blob (Δ — no announcer).
 export const spendStealthUTXO = async (
   utxo:               StealthUTXO,
   amount:             string,
@@ -552,7 +552,7 @@ export const spendStealthUTXO = async (
     return await makeTx(stealthPack, recipient, amount);
   }
 
-  // Chained private spend (blob rides the transfer, Δ1) and/or extra calls (e.g.
+  // Chained private spend (blob rides the transfer, Δ) and/or extra calls (e.g.
   // the batched operator fee) → one UserOp from this UTXO's Safe.
   try {
     const transactions = [
@@ -631,7 +631,7 @@ export const getStealthTotal = async (username: string): Promise<bigint> => {
    `value` being shielded, which is part of its own balance). */
 // Shield ONE stealth UTXO into the pool from its OWN one-time Safe, skimming the
 // R1DO operator fee (gas × 1.15) off-the-top in the SAME UserOp: shields
-// `amount − fee` and sends `fee` to a fresh Δ1 stealth of r1do (native: value+blob;
+// `amount − fee` and sends `fee` to a fresh Δ stealth of r1do (native: value+blob;
 // ERC20: transfer+blob). The fee is based on the REAL gas of THIS op — which
 // includes the stealth Safe's deploy on its first spend, so privacy covers it.
 // Common neck for BOTH shield modes (smartShield + shieldCoins). Fail-open: no fee
@@ -825,7 +825,7 @@ export const shieldCoins = async (
  * the SDK. Returns null (fail-open → caller does a plain shield) when r1do is
  * unresolvable or the amount can't cover the fee.
  *
- * NOTE (delta1): only the PUBLIC path is fee'd for now. The privacy multi-chunk
+ * NOTE (Δ): only the PUBLIC path is fee'd for now. The privacy multi-chunk
  * shield and the unshield fee are a later step (magnitudes set on Arbitrum).
  */
 export type ShieldFeeResult =
@@ -879,7 +879,7 @@ export type UnshieldFeeResult =
  * ("addUnshieldData once per token"), so the fee can't be a second proof output.
  * Instead we unshield the FULL amount to our OWN Safe (one legal output) and, in the
  * SAME UserOp, the Safe distributes: `net` to the user's destination + `fee` to a
- * fresh Δ1 stealth of r1do-wallet (blob announced so r1do can detect+spend it).
+ * fresh Δ stealth of r1do-wallet (blob announced so r1do can detect+spend it).
  * The batch also unlocks the NATIVE fee in ETH: the base-token unshield unwraps
  * WETH→ETH into the Safe, so the fee leg is a plain ETH transfer (no WETH detour).
  * Gas-based fee = gas × markup (op "unshield" → ×1.30). PUBLIC only (privacy = later).
@@ -920,7 +920,7 @@ export const unshieldPublicWithFee = async (
     // net → user's destination (skip when they withdrew to their own Safe: the net
     // just stays there, and we only move the fee out).
     ...(isExternal ? [transfer(destination, received - fee)] : []),
-    // fee → r1do's fresh Δ1 stealth. Native: ONE call carries the fee (value) AND
+    // fee → r1do's fresh Δ stealth. Native: ONE call carries the fee (value) AND
     // the blob. ERC20: a token transfer + a 0-value blob announce.
     ...(isNative
       ? [{ to: feePay.stealthAddress, data: feePay.calldataBlob, value: fee.toString() }]
@@ -933,6 +933,80 @@ export const unshieldPublicWithFee = async (
   const { fee } = await quoteFee({ op: "unshield", asset, amount: moves, gasWei });
   if (fee <= 0n || received - fee <= 0n) return { ok: false, reason: "too-small" };
   const txHash = await sendTxsViaSafe(wallet, buildCalls(fee), label);
+  return txHash ? { ok: true, txHash, fee } : { ok: false, reason: "no-recipient" };
+};
+
+/**
+ * PRIVACY unshield (ERC20 or native ETH) WITH the R1DO operator fee. Same batch idea
+ * as the public one, but the "repartidor" is a FRESH EPHEMERAL Safe (throwaway,
+ * unlinkable to your identity) instead of your main Safe — so the withdrawal isn't
+ * linked to you. Because the unshield is proof-bound (the recipient lives INSIDE the
+ * proof), the ephemeral Safe's address must exist BEFORE proving: we build it first,
+ * prove the unshield → it, then it fans out in the SAME UserOp:
+ *   net → your destination (+ your Δ blob folded in, when `destBlob` is set = your
+ *         own fresh stealth + announce), and fee → a fresh Δ stealth of r1do.
+ * The r1do blob is ALWAYS included (r1do needs it on-chain to detect+spend its fee).
+ * No fee recipient → still routes through the ephemeral Safe (privacy), just with no
+ * fee legs (net = full received). Gas (incl. the ephemeral deploy) × 1.30.
+ */
+export const unshieldPrivacyWithFee = async (
+  relayOwnerKey: `0x${string}`,
+  asset: Asset,
+  token: `0x${string}` | null, // null = native ETH
+  moves: bigint, // total leaving the pool (gross, before Railgun's own fee)
+  destination: `0x${string}`, // your fresh stealth OR an external address
+  railgunBps: number,
+  proveUnshield: (toAddress: string, amount: bigint) => Promise<{ to: string; data: string; value: string }>,
+  destBlob: `0x${string}` | null, // your OWN stealth's Δ blob to announce in-batch (announce), or null (ghost/external)
+): Promise<UnshieldFeeResult> => {
+  const recipient = await getFeeRecipient();
+  const feePay = recipient ? await generateStealthPayment(recipient.metaAddress) : null;
+
+  // Ephemeral repartidor Safe FIRST — its address is the unshield's proof recipient.
+  const rand = crypto.getRandomValues(new Uint8Array(16));
+  const saltNonce = BigInt("0x" + Array.from(rand).map((b) => b.toString(16).padStart(2, "0")).join(""));
+  const relayPack = await buildSafeWallet(relayOwnerKey, saltNonce);
+  const ephemeralAddr = (await relayPack.protocolKit.getAddress()) as `0x${string}`;
+  const label = `unshield (${asset.symbol}, privacy${feePay ? " + fee" : ""})`;
+  console.log(`[relay] ephemeral repartidor Safe ${ephemeralAddr} (unlinkable)`);
+
+  // Prove the unshield → the ephemeral Safe (heavy, once, fee-independent).
+  const proven = await proveUnshield(ephemeralAddr, moves);
+  const received = moves - (moves * BigInt(railgunBps)) / 10_000n; // ephemeral Safe gets this
+  const isNative = token === null;
+  const transfer = (to: string, amt: bigint) =>
+    isNative
+      ? { to, data: "0x", value: amt.toString() }
+      : {
+          to: token as string,
+          data: encodeFunctionData({ abi: ERC20_TRANSFER_ABI, functionName: "transfer", args: [to as `0x${string}`, amt] }),
+          value: "0",
+        };
+  // net → destination (+ your blob if announce). Native folds value+blob into one call.
+  const destLegs = (net: bigint) =>
+    isNative
+      ? [{ to: destination, data: destBlob ?? "0x", value: net.toString() }]
+      : [transfer(destination, net), ...(destBlob ? [{ to: destination, data: destBlob, value: "0" }] : [])];
+  // fee → r1do (only when there's a recipient). Native: value+blob; ERC20: transfer+blob.
+  const feeLegs = (fee: bigint) =>
+    !feePay
+      ? []
+      : isNative
+        ? [{ to: feePay.stealthAddress, data: feePay.calldataBlob, value: fee.toString() }]
+        : [transfer(feePay.stealthAddress, fee), { to: feePay.stealthAddress, data: feePay.calldataBlob, value: "0" }];
+  const buildCalls = (fee: bigint) => [proven, ...destLegs(received - fee), ...feeLegs(fee)];
+
+  // No operator fee → net = full received, relay as-is (still via the ephemeral Safe).
+  if (!feePay) {
+    const txHash = await sendTxsViaSafe(relayPack, buildCalls(0n), label);
+    return { ok: true, txHash, fee: 0n };
+  }
+  // Gas-based cost-plus: read the batch's REAL gas (incl. the ephemeral deploy) → ×1.30.
+  const probe = await relayPack.createTransaction({ transactions: buildCalls(0n) });
+  const gasWei = gasWeiOf(probe, label);
+  const { fee } = await quoteFee({ op: "unshield", asset, amount: moves, gasWei });
+  if (fee <= 0n || received - fee <= 0n) return { ok: false, reason: "too-small" };
+  const txHash = await sendTxsViaSafe(relayPack, buildCalls(fee), label);
   return txHash ? { ok: true, txHash, fee } : { ok: false, reason: "no-recipient" };
 };
 
@@ -1589,7 +1663,7 @@ export const smartSendToken = async (
         const recipientCalls = blob
           ? [
               { to: token, data: transferData, value: "0" }, // private: token → stealth Safe
-              { to: destination, data: blob, value: "0" }, //   + blob delivery (Δ1)
+              { to: destination, data: blob, value: "0" }, //   + blob delivery (Δ)
             ]
           : [{ to: token, data: transferData, value: "0" }]; // public: plain token transfer
         const feeTransfer = encodeFunctionData({

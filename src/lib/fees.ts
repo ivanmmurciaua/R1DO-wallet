@@ -1,5 +1,5 @@
 /*
-  fees.ts — operator fee model (R1DO/delta1), single source of truth.
+  fees.ts — operator fee model (R1DO/Δ), single source of truth.
 
   Key separation: the UserOp gas is sponsored by Pimlico (gasless for the user).
   This is NOT the gas — it's what the operator charges (its revenue), collected
