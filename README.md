@@ -158,6 +158,8 @@ npm run start
 - [ ] Auto-shield of incoming funds
 - [ ] Key rotation & recovery flows
 - [ ] Second privacy protocol (reduce third-party dependency)
+- [ ] **R1DO SDK** — expose the wallet primitives (stealth payments, private pool, pay-by-username) as an embeddable library for third-party apps
+- [ ] Explore [libcrux](https://github.com/celabshq/libcrux) as an alternative to `@noble` for the post-quantum primitives (formally verified ML-KEM)
 - [ ] **Security audit** (before any non-beta / wide release)
 
 ---

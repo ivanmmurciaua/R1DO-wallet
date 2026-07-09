@@ -26,8 +26,8 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState("");
   const [external, setExternal] = useState(true);
-  // New wallets are PUBLIC by default; privacy is an explicit opt-in.
-  const [privacy, setPrivacy] = useState(false);
+  // New wallets are PRIVATE by default; users can opt out to a public account.
+  const [privacy, setPrivacy] = useState(true);
   const [privacyInfoAnchor, setPrivacyInfoAnchor] = useState<HTMLElement | null>(null);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
@@ -291,7 +291,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             const priv = privacy;
             setUsername("");
             setExternal(true);
-            setPrivacy(false);
+            setPrivacy(true);
             createOrLoad(user.toLowerCase(), ext, priv);
           }}
           variant="contained"
