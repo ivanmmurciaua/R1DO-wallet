@@ -4,21 +4,28 @@ import { ThemeProvider, CssBaseline } from "@mui/material";
 import { publicTheme, privateTheme } from "@/app/theme";
 
 export type WalletView = "public" | "private";
+export type ThemeMode = "light" | "dark";
 
 type ViewContextType = {
   view: WalletView;
   isPrivate: boolean;
+  themeMode: ThemeMode;
+  isDark: boolean;
   enterPrivate: () => void;
   exitPublic: () => void;
   toggleView: () => void;
+  toggleTheme: () => void;
 };
 
 const ViewContext = createContext<ViewContextType>({
   view: "public",
   isPrivate: false,
+  themeMode: "light",
+  isDark: false,
   enterPrivate: () => {},
   exitPublic: () => {},
   toggleView: () => {},
+  toggleTheme: () => {},
 });
 
 // Keep the hook name so existing consumers don't break.
@@ -29,19 +36,35 @@ const VEIL_BG: Record<WalletView, string> = {
   private: "#0C0D0F",
 };
 
+const THEME_KEY = "LOCAL_THEME_MODE";
+
 export function ThemeRegistry({ children }: { children: React.ReactNode }) {
   const [view, setView] = useState<WalletView>("public");
+  // Illumination is its own axis now. Each world sets a DEFAULT on entry
+  // (public → light, private → dark, so crossing into Railgun still "dims"),
+  // but the light/dark button overrides it freely — you can be private-in-light.
+  const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [veil, setVeil] = useState(false);
   const firstRender = useRef(true);
 
-  // Allowed cleanup: dark/light is gone, so we wipe its leftover key.
+  // Restore the last illumination preference (independent of the world).
   useEffect(() => {
     try {
-      localStorage.removeItem("LOCAL_THEME_MODE");
+      const saved = localStorage.getItem(THEME_KEY);
+      if (saved === "light" || saved === "dark") setThemeMode(saved);
     } catch {
       /* SSR / storage unavailable */
     }
   }, []);
+
+  const applyTheme = (m: ThemeMode) => {
+    setThemeMode(m);
+    try {
+      localStorage.setItem(THEME_KEY, m);
+    } catch {
+      /* SSR / storage unavailable */
+    }
+  };
 
   // The threshold: on a world change, a veil of the incoming color "ink-dims".
   useEffect(() => {
@@ -58,19 +81,29 @@ export function ThemeRegistry({ children }: { children: React.ReactNode }) {
     return () => clearTimeout(t);
   }, [view]);
 
-  const enterPrivate = () => setView("private");
-  const exitPublic = () => setView("public");
-  const toggleView = () =>
-    setView((v) => (v === "private" ? "public" : "private"));
+  // Entering a world applies its default illumination; leaving it restores light.
+  const enterPrivate = () => {
+    setView("private");
+    applyTheme("dark");
+  };
+  const exitPublic = () => {
+    setView("public");
+    applyTheme("light");
+  };
+  const toggleView = () => (view === "private" ? exitPublic() : enterPrivate());
+  const toggleTheme = () => applyTheme(themeMode === "dark" ? "light" : "dark");
 
   const isPrivate = view === "private";
-  const theme = isPrivate ? privateTheme : publicTheme;
+  const isDark = themeMode === "dark";
+  const theme = isDark ? privateTheme : publicTheme;
 
   return (
-    <ViewContext.Provider value={{ view, isPrivate, enterPrivate, exitPublic, toggleView }}>
+    <ViewContext.Provider
+      value={{ view, isPrivate, themeMode, isDark, enterPrivate, exitPublic, toggleView, toggleTheme }}
+    >
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <style>{`::placeholder { color: ${isPrivate ? "#8A9099" : "#6E665A"}; opacity: 0.7; }`}</style>
+        <style>{`::placeholder { color: ${isDark ? "#8A9099" : "#6E665A"}; opacity: 0.7; }`}</style>
         {children}
         {/* Threshold veil: covers the world change and fades out. */}
         <div

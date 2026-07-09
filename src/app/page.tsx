@@ -47,7 +47,7 @@ import { useThemeMode } from "@/components/ThemeRegistry";
 import PrivateView from "@/components/PrivateView";
 
 export default function Home() {
-  const { isPrivate, toggleView, exitPublic } = useThemeMode();
+  const { isPrivate, isDark, toggleView, exitPublic, toggleTheme } = useThemeMode();
   const [username, setUsername] = useState("");
   const [deployed, setDeployed] = useState(false);
   const [address, setAddress] = useState<Address | null>(null);
@@ -479,28 +479,71 @@ export default function Home() {
 
   return (
     <div className={`${styles.page} ${inWallet ? styles.inWallet : styles.onLogin}`}>
-      {/* Threshold: cross into the private world (shadow) or back to the
-          public one (light). Only visible inside the wallet — the private
-          world belongs to your account. (This step only changes the look;
-          Railgun is not started yet.) */}
+      {/* Illumination — pure light/dark toggle for the whole app. Independent of
+          the world; it just paints. Each world still sets a default on entry
+          (public → light, private → dark), and this button overrides it. */}
+      {deployed && address && (
+        <button
+          onClick={toggleTheme}
+          title={isDark ? "Switch to light" : "Switch to dark"}
+          aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
+          style={{
+            position: "fixed",
+            top: 16,
+            right: 16,
+            zIndex: 999,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "transparent",
+            border: "1px solid currentColor",
+            color: "currentColor",
+            padding: 8,
+            lineHeight: 0,
+            borderRadius: 10,
+            cursor: "pointer",
+            opacity: 0.65,
+            transition: "opacity 0.15s",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+          onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.65")}
+        >
+          {isDark ? (
+            // sun → switch to light
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+            </svg>
+          ) : (
+            // moon → switch to dark
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+              <path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" />
+            </svg>
+          )}
+        </button>
+      )}
+
+      {/* Private pool (Railgun) — the ONLY control that moves funds/context into
+          the pool. Δ enters, ∇ (inverted delta) exits. Crossing into the pool
+          also defaults the look to dark, but that's cosmetic (see illumination). */}
       {deployed && address && (
         <button
           onClick={handleShadowToggle}
           title={
             isPrivate
-              ? "Back to public"
+              ? "Leave the private pool"
               : scanning
                 ? "Scanning your private payments — hold on"
                 : shadowAvailable
-                  ? "Go private"
-                  : "Private mode isn't available on this network yet"
+                  ? "Enter the private pool"
+                  : "The private pool isn't available on this network yet"
           }
-          aria-label={isPrivate ? "Exit private mode" : "Enter private mode"}
+          aria-label={isPrivate ? "Leave the private pool" : "Enter the private pool"}
           aria-disabled={shadowEnterBlocked}
           style={{
             position: "fixed",
             top: 16,
-            right: 16,
+            right: 56,
             zIndex: 999,
             display: "flex",
             alignItems: "center",
@@ -518,18 +561,22 @@ export default function Home() {
           onMouseEnter={(e) => (e.currentTarget.style.opacity = shadowEnterBlocked ? "0.45" : "1")}
           onMouseLeave={(e) => (e.currentTarget.style.opacity = shadowEnterBlocked ? "0.3" : "0.65")}
         >
-          {isPrivate ? (
-            // sun → back to the light
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
-              <circle cx="12" cy="12" r="4" />
-              <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
-            </svg>
-          ) : (
-            // moon → enter the shadow
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-              <path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" />
-            </svg>
-          )}
+          {/* Δ enter · ∇ exit — a glyph and its mirror, like shield/unshield. */}
+          <span
+            aria-hidden
+            style={{
+              fontSize: 15,
+              fontWeight: 600,
+              lineHeight: 1,
+              width: 15,
+              height: 15,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {isPrivate ? "∇" : "Δ"}
+          </span>
         </button>
       )}
 

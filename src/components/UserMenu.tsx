@@ -573,7 +573,7 @@ const handleBackToMenu = (message: string = "") => {
             )}
           </Typography>
           <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.7rem", opacity: 0.6, mt: 0.75, letterSpacing: "0.04em" }}>
-            {username} · {privacy ? "private" : "public"} · light
+            {username} · {privacy ? "private" : "public"} · {networkName()}
           </Typography>
 
           {/* Token list — expands on balance click; lazy Multicall3 fetch (Fase 1). */}
