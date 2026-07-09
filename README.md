@@ -1,12 +1,16 @@
-# R1DO Wallet — Δ (Delta)
+# R1DO Wallet — Δ
 
 > A self-custody wallet you open with your fingerprint. No seed phrases, no
 > third parties — and now with **two worlds**: a normal, public side, and a
 > private side where your money moves without leaving a trail.
 
 > [!CAUTION]
-> **Testnet only.** Δ runs on Ethereum **Sepolia** (test network, play money).
-> Don't put real savings here. This is experimental software.
+> **Beta · not audited · real funds.** Δ runs on **Arbitrum One** (mainnet, real
+> money) and has **not been security-audited**. Treat it as experimental: use
+> only small amounts you can afford to lose, and read
+> [What privacy Δ gives — and its limits](#what-privacy-δ-gives--and-its-limits)
+> and [What Δ depends on](#what-δ-depends-on-and-how-it-can-break) before putting
+> anything in. (You can still run it against a testnet — see the network switch.)
 
 ---
 
@@ -17,7 +21,7 @@ gesture you use to unlock your phone — your **passkey** (fingerprint / face /
 PIN). There's no seed phrase to write down, no password, and no company in the
 middle holding your keys. You, and only you, control your funds.
 
-**Δ (Delta)** is the version that adds **privacy as a first-class feature**.
+**Δ** is the version that adds **privacy as a first-class feature**.
 Most wallets are a glass house: anyone can follow every payment you make. Δ
 gives you a second, private world where your balance and your payments are
 hidden — while keeping the easy, public wallet for everyday use.
@@ -62,6 +66,45 @@ convenience, private when you want privacy.
   discover this private payment" is protected with **post-quantum**
   cryptography, so it stays private even against the powerful computers of the
   future. (See [TECHSTACK.md](./TECHSTACK.md) for the details.)
+
+## What privacy Δ gives — and its limits
+
+Δ is honest about its boundaries. It gives you:
+
+- **Recipient unlinkability** — payments you receive land at fresh one-time
+  stealth addresses that can't be tied together or back to you.
+- **Sender & amount privacy in the pool** — while funds sit in the private pool
+  (Railgun), zero-knowledge proofs hide amounts and links.
+
+It does **not** make you invisible. Metadata surfaces remain:
+
+- The encrypted **username directory** is a public contract — entries are
+  encrypted, but their existence and timing are on-chain.
+- Moving in/out of the pool (**shield / unshield**) is visible on-chain, and the
+  operator fee produces a small on-chain payment.
+- The **RPC providers** your wallet connects to can see which addresses it
+  queries.
+- A **public-side** withdrawal is linked to your smart account. The private side
+  routes through a throwaway address to avoid this — but the destination you pick
+  is only as private as that address.
+
+Privacy is a spectrum, not a switch. Use it accordingly.
+
+## What Δ depends on (and how it can break)
+
+Δ is self-custodial for your **keys and funds** — no one else can move your
+money. But it leans on a few external services for convenience, and those are
+single points of failure for *availability* (not for custody):
+
+- **Pimlico** sponsors gas so you don't need ETH to start. If it's down or
+  declines, transactions won't send.
+- A **Proof-of-Innocence (POI) aggregator** validates private deposits. If it
+  stalls (it has, for hours), deposits sit in *pending* until it recovers — your
+  funds are safe, just temporarily stuck.
+- **RPC endpoints** read the chain; a flaky one degrades scanning and sending.
+
+These dependencies are something we're actively working to reduce (the
+private-pool layer is protocol-agnostic by design).
 
 ## Why passkeys instead of seed phrases?
 
@@ -109,11 +152,13 @@ npm run start
 - [x] Passkey-derived smart wallet (no seed phrase)
 - [x] Pay by username (encrypted directory)
 - [x] Stealth / private payments (post-quantum hybrid)
-- [x] Private pool: shield · private transfer · unshield
+- [x] Private pool: shield · private transfer · unshield (public + private, ETH + tokens)
+- [x] Operator fee model (gas-based, cost-plus)
+- [x] Arbitrum One — **live, in public beta** (unaudited)
 - [ ] Auto-shield of incoming funds
 - [ ] Key rotation & recovery flows
-- [ ] Security audit
-- [ ] Mainnet (only after audit)
+- [ ] Second privacy protocol (reduce third-party dependency)
+- [ ] **Security audit** (before any non-beta / wide release)
 
 ---
 

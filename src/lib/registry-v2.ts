@@ -14,7 +14,7 @@
                padded to PAYLOAD_SIZE so every entry is the same length.
 
    Three pay-by-name rails resolve from one entry: public (safeAddress),
-   stealth Δ1 (metaAddress), and RAILGUN shielded (zkAddress) — all optional
+   stealth Δ (metaAddress), and RAILGUN shielded (zkAddress) — all optional
    except safeAddress.
 
    What this buys: nothing quantum-harvestable at rest (symmetric only),
@@ -29,7 +29,8 @@ import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 import { argon2id } from "hash-wasm";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
-import type { Safe4337Pack } from "@safe-global/relay-kit";
+import { directoryAddress } from "./networks";
+import type { SafeWallet } from "./aa-client";
 
 export const ARGON2_MEMORY_KIB = 65536; // 64 MiB
 export const ARGON2_ITERATIONS = 3;
@@ -60,7 +61,7 @@ export const PAYLOAD_SIZE = OFF_ZK + ZK_MAX; // 1502
 export type DirectoryEntry = {
   rawId: string; // hex (no 0x), as used by loadFromDevice
   safeAddress: `0x${string}`;
-  metaAddress: `0x${string}` | null; // PQ meta-address → private pay-by-name (stealth Δ1)
+  metaAddress: `0x${string}` | null; // PQ meta-address → private pay-by-name (stealth Δ)
   zkAddress?: string | null; // 0zk bech32 → Railgun shielded pay-by-name (v3)
 };
 
@@ -207,23 +208,26 @@ export const DIRECTORY_ABI = [
   },
 ] as const;
 
+/** Whether the (single, global) directory is configured. Always true in practice —
+    the directory network is pinned in the registry — but kept as the opt-in guard
+    the UI reads. */
 export function directoryEnabled(): boolean {
-  return !!process.env.NEXT_PUBLIC_DIRECTORY_ADDRESS;
+  return !!directoryAddress();
 }
 
-/** Resolve a username: Argon2id → read blob → decrypt. Null if no entry
-    (or no directory deployed). The caller pays the ~1 s Argon2id once. */
+/** Resolve a username: Argon2id → read blob → decrypt. Null if no entry. Reads the
+    ONE global directory (on the directory network) via `directoryClient`, NOT the
+    active chain. The caller pays the ~1 s Argon2id once. */
 export async function readDirectory(
   username: string,
   pin?: string,
 ): Promise<DirectoryEntry | null> {
-  if (!directoryEnabled()) return null;
-  const { DIRECTORY_ADDRESS } = await import("@/app/constants");
-  const { client } = await import("@/lib/client");
+  const dir = directoryAddress();
+  const { directoryClient } = await import("@/lib/client");
 
   const { fp, encKey } = await deriveDirectoryKeys(username, pin);
-  const blob = (await client.readContract({
-    address: DIRECTORY_ADDRESS,
+  const blob = (await directoryClient.readContract({
+    address: dir,
     abi: DIRECTORY_ABI,
     functionName: "getEntry",
     args: [fp],
@@ -237,11 +241,10 @@ export async function readDirectory(
 
 /** Cheap existence check for an already-derived fingerprint (no Argon2id). */
 export async function hasDirectoryEntry(fp: `0x${string}`): Promise<boolean> {
-  if (!directoryEnabled()) return false;
-  const { DIRECTORY_ADDRESS } = await import("@/app/constants");
-  const { client } = await import("@/lib/client");
-  return (await client.readContract({
-    address: DIRECTORY_ADDRESS,
+  const dir = directoryAddress();
+  const { directoryClient } = await import("@/lib/client");
+  return (await directoryClient.readContract({
+    address: dir,
     abi: DIRECTORY_ABI,
     functionName: "hasEntry",
     args: [fp],
@@ -263,10 +266,10 @@ async function readOwnEntry(
   fp: `0x${string}`,
   encKey: Uint8Array,
 ): Promise<DirectoryEntry | null> {
-  const { DIRECTORY_ADDRESS } = await import("@/app/constants");
-  const { client } = await import("@/lib/client");
-  const blob = (await client.readContract({
-    address: DIRECTORY_ADDRESS,
+  const dir = directoryAddress();
+  const { directoryClient } = await import("@/lib/client");
+  const blob = (await directoryClient.readContract({
+    address: dir,
     abi: DIRECTORY_ABI,
     functionName: "getEntry",
     args: [fp],
@@ -284,7 +287,7 @@ async function readOwnEntry(
  * can pay you by nick). Returns what happened.
  */
 export async function ensureZkInDirectory(
-  wallet: Safe4337Pack,
+  wallet: SafeWallet,
   username: string,
   zkAddress: string,
 ): Promise<"published" | "already" | "skipped"> {

@@ -34,7 +34,7 @@ const inputStyle: React.CSSProperties = {
 
 const short = (a: string) => `${a.slice(0, 8)}…${a.slice(-6)}`;
 
-// Pre-minted receive addresses are the StealthUTXOs we created ourselves (Δ1
+// Pre-minted receive addresses are the StealthUTXOs we created ourselves (Δ
 // off-chain Courier flow): tagged with `createdAt`, newest first.
 const loadReceives = (username: string): StealthUTXO[] =>
   getStealthUTXOs(username)

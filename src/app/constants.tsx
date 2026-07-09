@@ -1,5 +1,5 @@
-import { Address, http, fallback } from "viem";
-import { activeRpcUrls } from "@/lib/networks";
+import { http, fallback } from "viem";
+import { activeRpcUrls, directoryAddress } from "@/lib/networks";
 
 // localStorage globals — namespaced under r1do/wallet/v1 (see lib/localstorage.tsx).
 export const LOCAL_WALLET_LIST = "r1do/wallet/v1/wallets";
@@ -33,10 +33,17 @@ const PIMLICO_PROXY_PATH = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/pimli
 const PIMLICO_PROXY_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
 export const BUNDLER_URL = `${PIMLICO_PROXY_ORIGIN}${PIMLICO_PROXY_PATH}`;
 export const PAYMASTER_URL = BUNDLER_URL;
-// v2: encrypted username directory (R1DODirectory.sol). Optional — login
-// never depends on it; it only powers pay-by-username.
-export const DIRECTORY_ADDRESS = process.env
-  .NEXT_PUBLIC_DIRECTORY_ADDRESS as Address;
+// Same proxy, but tells the server which network's Pimlico slug to forward to via
+// `?net=`. The active chain is implicit server-side (activeNetwork), so this is
+// what lets a directory op (pinned to Arbitrum) route to Arbitrum's bundler even
+// while the app runs on another chain. The proxy validates the id against the
+// registry. Bundler + paymaster share this URL, so both route to the same chain.
+export const bundlerUrlFor = (netId: string): string => `${BUNDLER_URL}?net=${netId}`;
+// v2: encrypted username directory (R1DODirectory.sol). Optional — login never
+// depends on it; it only powers pay-by-username. Now a SINGLE global directory
+// pinned in the network registry (not env): one address for the whole app, used
+// both as the on-chain target and as the per-user "published to" mark.
+export const DIRECTORY_ADDRESS = directoryAddress();
 
 // Constants to avoid future Safe default config changes
 // If using Pimlico, see https://docs.pimlico.io/guides/how-to/erc20-paymaster/contract-addresses#erc-20-paymaster-contract-addresses

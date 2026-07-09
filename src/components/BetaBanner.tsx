@@ -3,16 +3,16 @@
 import { useEffect, useState } from "react";
 import Box from "@mui/material/Box";
 
-// Aviso de beta + descargo de responsabilidad. Overlay fijo arriba que TAPA a
-// propósito los controles fijos (logout / switch de mundo): sin pulsar el acuse
-// no puedes operar. Cerrable UNA vez con "I understand" — persistido en
-// localStorage para no volver a molestar, dejando constancia de que el usuario
-// lo ACEPTÓ (no solo lo vio). No reserva espacio en el body adrede.
+// Beta notice + liability disclaimer. Fixed top overlay that DELIBERATELY covers
+// the fixed controls (logout / world switch): without tapping the acknowledgement
+// you can't operate. Dismissible ONCE via "I understand" — persisted in
+// localStorage so it won't nag again, while keeping a record that the user
+// ACCEPTED it (not just saw it). It intentionally reserves no space in the body.
 const LOCAL_BETA_ACK = "r1do/beta-ack";
 
 export function BetaBanner() {
-  // Arranca visible para coincidir con el SSR (sin parpadeo de hidratación);
-  // si ya hay acuse, el effect lo oculta.
+  // Starts visible to match the SSR (no hydration flash); if there's already an
+  // acknowledgement, the effect hides it.
   const [acknowledged, setAcknowledged] = useState(false);
 
   useEffect(() => {

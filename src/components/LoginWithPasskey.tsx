@@ -11,7 +11,6 @@ import {
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import { useEffect, useRef, useState } from "react";
 import { getWalletMetas } from "@/lib/localstorage";
-import { migrateLocalStorageToV1 } from "@/lib/localstorage-migrate"; // TEMP: remove in a future iteration
 import { listWalletCredentials } from "@/lib/credstore";
 import { LOCAL_LAST_USER } from "@/app/constants";
 import { WalletMeta } from "@/types";
@@ -27,8 +26,9 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
   const [loading, setLoading] = useState(true);
   const [username, setUsername] = useState("");
   const [external, setExternal] = useState(true);
-  // New wallets are private by default
-  const [privacy, setPrivacy] = useState(true);
+  // New wallets are PUBLIC by default; privacy is an explicit opt-in.
+  const [privacy, setPrivacy] = useState(false);
+  const [privacyInfoAnchor, setPrivacyInfoAnchor] = useState<HTMLElement | null>(null);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   const handleInfoClick = (event: React.MouseEvent<HTMLElement>) => {
@@ -38,13 +38,13 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
   useEffect(() => {
     if (hasAutoLoaded.current) return;
     hasAutoLoaded.current = true;
-    migrateLocalStorageToV1(); // TEMP one-shot: pre-namespace keys → r1do/wallet/v1
     (async () => {
       // Wallet list = local metadata FIRST (so wallets[0] is THIS device's
       // primary wallet — "the first in the localStorage array"), then any
       // suite-wide credential from the shared store (R1DOToolsDB) not already
-      // present. The Welcome-back card always unlocks wallets[0], even if more
-      // exist; the rest are reachable via "use a different wallet".
+      // present. The Welcome-back card always unlocks the primary wallet
+      // (LOCAL_LAST_USER, else wallets[0]); the rest are reachable via
+      // "use a different wallet".
       const byName = new Map<string, WalletMeta>();
       for (const m of getWalletMetas()) {
         byName.set(m.username.toLowerCase(), m);
@@ -81,6 +81,46 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
 
   return (
     <>
+    {/* Beta notice — honest disclosure before any funds. Full detail (privacy scope,
+        third-party dependencies) lives in the README, linked via the GitHub mark.
+        Pinned near the top (the login form is vertically centered, so an in-flow
+        banner would sit mid-screen next to the title). */}
+    <Box sx={{ position: "fixed", top: 12, left: 0, right: 0, zIndex: 900, maxWidth: 480, mx: "auto", px: 2, pointerEvents: "none" }}>
+      <Box
+        sx={{
+          pointerEvents: "auto",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 1.5,
+          border: "1px solid currentColor",
+          borderRadius: "2px",
+          px: 1.5,
+          py: 0.85,
+          opacity: 0.65,
+          fontFamily: "var(--font-geist-mono), monospace",
+          fontSize: "0.64rem",
+          lineHeight: 1.5,
+          letterSpacing: "0.02em",
+        }}
+      >
+        <span>
+          <b>BETA · not audited.</b> Experimental privacy wallet — use only small amounts you can afford to lose.
+        </span>
+        <a
+          href="https://github.com/ivanmmurciaua/R1DO-wallet"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Source code on GitHub"
+          title="Source & full disclosures on GitHub"
+          style={{ color: "inherit", flexShrink: 0, display: "inline-flex", opacity: 0.9 }}
+        >
+          <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+        </a>
+      </Box>
+    </Box>
     {wallets.length === 0 && !loading ? (
     <div>
       <Stack
@@ -213,6 +253,34 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           >
             Enable privacy
           </label>
+          <IconButton
+            size="small"
+            onClick={(e) => setPrivacyInfoAnchor(e.currentTarget)}
+            sx={{ p: 0.25, color: (theme) => (theme.palette.mode === "dark" ? "#fff" : "inherit") }}
+            aria-label="What is privacy mode?"
+          >
+            <InfoOutlinedIcon fontSize="small" />
+          </IconButton>
+          <Popover
+            open={Boolean(privacyInfoAnchor)}
+            anchorEl={privacyInfoAnchor}
+            onClose={() => setPrivacyInfoAnchor(null)}
+            anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+          >
+            <Box
+              p={2}
+              maxWidth={260}
+              sx={{
+                fontSize: "0.7rem",
+                lineHeight: 1.5,
+                backgroundColor: (theme) => (theme.palette.mode === "dark" ? "#222" : "#3B3B3B"),
+                color: "#fff",
+              }}
+            >
+              Receive each payment at a fresh one-time <b>stealth address</b>, unlinkable to you,
+              instead of a single reusable public address.
+            </Box>
+          </Popover>
         </Box>
 
         <Button
@@ -223,7 +291,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             const priv = privacy;
             setUsername("");
             setExternal(true);
-            setPrivacy(true);
+            setPrivacy(false);
             createOrLoad(user.toLowerCase(), ext, priv);
           }}
           variant="contained"
@@ -299,6 +367,8 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             Unlock
           </Button>
 
+          {/* Hidden for the beta: creating/switching to another wallet from the
+              unlock screen. Wallet management (incl. delete) lives in Settings.
           <Typography
             onClick={() => setWallets([])}
             sx={{
@@ -314,6 +384,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           >
             Use a different wallet
           </Typography>
+          */}
         </Stack>
       )}
     </div>

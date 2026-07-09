@@ -21,11 +21,12 @@ import {
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import { formatUnits, parseUnits, createPublicClient } from "viem";
-import type { Safe4337Pack } from "@safe-global/relay-kit";
+import type { SafeWallet } from "@/lib/aa-client";
 import { activeChain } from "@/lib/networks";
 import { sepoliaTransport } from "@/app/constants";
 import { getTokenBalances } from "@/lib/balances";
@@ -98,7 +99,7 @@ export default function PrivateView({
   wallet,
 }: {
   username: string;
-  wallet: Safe4337Pack;
+  wallet: SafeWallet;
 }) {
   const [engine, setEngine] = useState<EngineStatus>("booting");
   const [zk, setZk] = useState<string | null>(null); // 0zk derived THIS session (unlocked)
@@ -123,6 +124,10 @@ export default function PrivateView({
   const [shieldBalances, setShieldBalances] = useState<Map<string, bigint> | null>(null);
   const [shieldAsset, setShieldAsset] = useState<Asset>(nativeAsset());
   const [shielding, setShielding] = useState(false);
+  // Operator-fee quote for the PUBLIC shield (no submit). Privacy multi-chunk fee
+  // is a later phase, so this only runs in public mode.
+  const [shieldQuote, setShieldQuote] = useState<{ fee: bigint; coversGas: boolean; feeTooBig: boolean } | null>(null);
+  const [shieldQuoting, setShieldQuoting] = useState(false);
   // Selected-asset views. Native stays synced to the live prefs (decimals/symbol
   // state); ERC20 uses its own token metadata.
   const keyOf = (a: Asset) => a.address?.toLowerCase() ?? "native";
@@ -163,7 +168,7 @@ export default function PrivateView({
   const [shieldExact, setShieldExact] = useState(false);
   const [unshieldExact, setUnshieldExact] = useState(false);
   // Privacy-mode unshield destination: a fresh one-time stealth address we own.
-  // `unshieldAnnounce` ON = emit the Δ1 blob on-chain (recoverable by scan, any
+  // `unshieldAnnounce` ON = emit the Δ blob on-chain (recoverable by scan, any
   // device); OFF = ghost (no blob → max privacy, but spendable from this device
   // only via the local note).
   const [unshieldStealth, setUnshieldStealth] = useState<StealthPayment | null>(null);
@@ -183,6 +188,7 @@ export default function PrivateView({
   const [hideBalance, setHide] = useState<boolean>(() => getHideBalance());
   const [zkCopied, setZkCopied] = useState(false); // copy feedback on the 0zk receive card
   const [scanning, setScanning] = useState(false); // QR scanner overlay (private transfer "To")
+  const [refreshing, setRefreshing] = useState(false); // manual balance/POI refresh in flight
 
   const toggleHideBalance = () =>
     setHide((h) => {
@@ -190,6 +196,22 @@ export default function PrivateView({
       setHideBalance(next);
       return next;
     });
+
+  // Force an immediate POI+balance check instead of waiting for the 20s watcher
+  // tick (handy when a shield is stuck pending on a slow PPOI node). Resets the
+  // watcher's countdown so the next auto-tick is a fresh 20s away.
+  const handleRefresh = async () => {
+    if (refreshing || engine !== "up") return;
+    setRefreshing(true);
+    try {
+      const mod = await import("@/lib/pool/railgun");
+      await mod.refreshNow();
+    } catch (e) {
+      console.warn("[private] manual refresh failed:", e);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     setDecimals(getDecimals());
@@ -529,9 +551,9 @@ export default function PrivateView({
         // inlinkable: relay from a fresh ephemeral Safe (personal broadcaster)
         const relayKey = mod.getRelayKey();
         if (!relayKey) throw new Error("relay key not available");
-        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx);
+        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `transfer (${sendSymbol}, privacy)`);
       } else {
-        txHash = await deploy.sendTxViaSafe(wallet, tx);
+        txHash = await deploy.sendTxViaSafe(wallet, tx, `transfer (${sendSymbol}, public)`);
       }
       console.log(`[private] ✓ transfer submitted — tx: ${txHash}`);
       setToast({
@@ -630,61 +652,67 @@ export default function PrivateView({
     try {
       setUnshieldStage("proving");
       setUnshieldProgress(0);
-      console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
+      const deploy = await import("@/lib/deploy");
       const mod = await import("@/lib/pool/railgun");
       const tokenAddress = isToken ? unshieldAsset.address : undefined;
-      const tx = await mod.populateUnshieldTx(to, moves, (p) => setUnshieldProgress(p), tokenAddress);
-      setUnshieldStage("submitting");
-      const deploy = await import("@/lib/deploy");
+      const proveUnshield = (addr: string, amt: bigint) =>
+        mod.populateUnshieldTx(addr, amt, (p) => setUnshieldProgress(p), tokenAddress);
+      console.log(`[private] unshield ${fmt(moves, unDecimals)} ${unSymbol} (net ${amt}) → ${to}`);
+      const token = isToken ? (unshieldAsset.address as `0x${string}`) : null;
       let txHash: string;
-      if (isPrivacy) {
-        // inlinkable submitter: relay from a fresh ephemeral Safe
+      let toastMsg = "Unshielded — your funds are in your address now (POI finalizing in background)";
+
+      if (!isPrivacy) {
+        // PUBLIC (ERC20 or native ETH) → skim the fee via the batch: unshield the full
+        // amount to our Safe, then fan out net + fee in one UserOp.
+        const res = await deploy.unshieldPublicWithFee(wallet, unshieldAsset, token, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield);
+        if (res.ok) {
+          txHash = res.txHash;
+          console.log(`[private] ✓ unshield submitted (fee ${fmt(res.fee, unDecimals)} ${unSymbol}) — tx: ${txHash}`);
+        } else if (res.reason === "no-recipient") {
+          const tx = await proveUnshield(to, moves);
+          setUnshieldStage("submitting");
+          txHash = await deploy.sendTxViaSafe(wallet, tx, `unshield (${unSymbol}, public)`);
+          console.log(`[private] ✓ unshield submitted (no fee) — tx: ${txHash}`);
+        } else {
+          setToast({ msg: "Amount too small — the network fee would eat it. Withdraw more.", sev: "error" });
+          return;
+        }
+      } else {
+        // PRIVACY → ephemeral Safe as repartidor; the fee AND your Δ blob are folded
+        // into ONE batch (proof recipient = the ephemeral Safe, so it's built first).
         const relayKey = mod.getRelayKey();
         if (!relayKey) throw new Error("relay key not available");
-        txHash = await deploy.relayViaEphemeralSafe(relayKey, tx);
-      } else {
-        txHash = await deploy.sendTxViaSafe(wallet, tx);
-      }
-      console.log(`[private] ✓ unshield submitted — tx: ${txHash}`);
+        // Destination is your OWN fresh stealth only when you didn't edit the field.
+        const isSelfStealth = !!unshieldStealth && to.toLowerCase() === unshieldStealth.stealthAddress.toLowerCase();
+        const announce = isSelfStealth && unshieldAnnounce;
+        // Announce → fold your blob so it's recoverable by scan; ghost/external → none.
+        const destBlob = announce ? (unshieldStealth!.calldataBlob as `0x${string}`) : null;
+        const res = await deploy.unshieldPrivacyWithFee(relayKey, unshieldAsset, token, moves, to as `0x${string}`, fees.unshieldBps, proveUnshield, destBlob);
+        if (!res.ok) {
+          setToast({ msg: "Amount too small — the network fee would eat it. Withdraw more.", sev: "error" });
+          return;
+        }
+        txHash = res.txHash;
+        console.log(`[private] ✓ unshield submitted (fee ${fmt(res.fee, unDecimals)} ${unSymbol}) — tx: ${txHash}`);
 
-      // Privacy mode, destination still the fresh stealth we generated (user
-      // didn't edit it): make that one-time address discoverable/spendable.
-      //  · announce ON  → publish the Δ1 blob (value-0 UserOp via ephemeral Safe)
-      //                   → recoverable by scan on any device.
-      //  · ghost (OFF)  → keep a local note (this device only). Also the safe
-      //                   fallback if the announce tx fails (funds never lost).
-      let toastMsg = "Unshielded — your funds are in your address now (POI finalizing in background)";
-      if (isPrivacy && unshieldStealth && to.toLowerCase() === unshieldStealth.stealthAddress.toLowerCase()) {
-        const ghostNote: StealthUTXO = {
-          stealthAddress: unshieldStealth.stealthAddress,
-          ephemeralPubkey: unshieldStealth.ephemeralPubkey,
-          kemCiphertext: unshieldStealth.kemCiphertext,
-          blockNumber: 0,
-          // Ghost notes skip the scanner's asset probe, so tag the token here;
-          // else a ghost ERC20 unshield would read as native (0). Native = undefined.
-          ...(isToken ? { asset: unshieldAsset.address as `0x${string}` } : {}),
-        };
-        if (unshieldAnnounce) {
-          try {
-            const relayKey = mod.getRelayKey();
-            if (!relayKey) throw new Error("relay key not available");
-            const announce = await deploy.relayViaEphemeralSafe(relayKey, {
-              to: unshieldStealth.stealthAddress,
-              data: unshieldStealth.calldataBlob,
-              value: "0",
-            });
-            console.log(`[private] ✓ stealth blob announced — tx: ${announce}`);
+        // Self-stealth: announce → your blob is on-chain (recoverable anywhere). Ghost →
+        // no blob published, so keep a LOCAL note (spendable from this device only).
+        if (isSelfStealth) {
+          if (announce) {
             toastMsg = "Unshielded to a fresh stealth address — yours, recoverable by scan (POI finalizing in background)";
-          } catch (e) {
-            // Announce failed → fall back to a local note so funds stay spendable.
-            console.warn("[private] announce failed — saving ghost note locally:", e);
-            addStealthUTXO(username, ghostNote);
-            toastMsg = "Unshielded to a fresh stealth address — couldn't announce, saved locally (this device only)";
+          } else {
+            addStealthUTXO(username, {
+              stealthAddress: unshieldStealth!.stealthAddress,
+              ephemeralPubkey: unshieldStealth!.ephemeralPubkey,
+              kemCiphertext: unshieldStealth!.kemCiphertext,
+              blockNumber: 0,
+              // tag the token so a ghost ERC20 note doesn't read as native (0)
+              ...(isToken ? { asset: unshieldAsset.address as `0x${string}` } : {}),
+            });
+            console.log(`[private] ghost note saved locally: ${unshieldStealth!.stealthAddress}`);
+            toastMsg = "Unshielded in ghost mode — spendable from this device only (POI finalizing in background)";
           }
-        } else {
-          addStealthUTXO(username, ghostNote);
-          console.log(`[private] ghost note saved locally: ${ghostNote.stealthAddress}`);
-          toastMsg = "Unshielded in ghost mode — spendable from this device only (POI finalizing in background)";
         }
       }
 
@@ -754,11 +782,29 @@ export default function PrivateView({
         if (!res.success) throw new Error(res.error ?? "shield failed");
         console.log(`[private] ✓ smart shield: ${res.txHashes.length} tx(s)`);
       } else {
-        // Public path. Native = 1 call; ERC20 = [approve, shield] in one UserOp.
-        const calls = await mod.populateShieldCalls(isToken ? shieldAsset.address! : null, moves);
-        const { sendTxsViaSafe } = await import("@/lib/deploy");
-        const txHash = await sendTxsViaSafe(wallet, calls);
-        console.log(`[private] ✓ shield submitted — tx: ${txHash}`);
+        // Public path WITH operator fee skim (shield amount − fee; fee → r1do in
+        // the SAME UserOp). Native = 1 call; ERC20 = [approve, shield]. Fail-open
+        // to a plain shield if r1do is unresolvable or the amount can't cover it.
+        const deploy = await import("@/lib/deploy");
+        const res = await deploy.shieldPublicWithFee(
+          wallet,
+          shieldAsset,
+          isToken ? (shieldAsset.address as `0x${string}`) : null,
+          moves,
+          (a, amt) => mod.populateShieldCalls(a, amt),
+        );
+        if (res.ok) {
+          console.log(`[private] ✓ shield submitted (fee ${res.fee}) — tx: ${res.txHash}`);
+        } else if (res.reason === "no-recipient") {
+          // can't collect the fee → plain shield, no fee (never break the deposit)
+          const calls = await mod.populateShieldCalls(isToken ? shieldAsset.address! : null, moves);
+          const txHash = await deploy.sendTxsViaSafe(wallet, calls, `shield (${isToken ? "ERC20" : "native"}, public)`);
+          console.log(`[private] ✓ shield submitted (no fee) — tx: ${txHash}`);
+        } else {
+          // too-small: the fee would eat the deposit → block, never shield for free
+          setToast({ msg: "Amount too small — it doesn't cover the network fee. Deposit more.", sev: "error" });
+          return;
+        }
       }
       setToast({
         msg: "Shielded — validating, your balance updates shortly",
@@ -780,6 +826,15 @@ export default function PrivateView({
     (balances?.missingInternal ?? 0n) +
     (balances?.shieldPending ?? 0n);
   const tokPending = (b: TokenBuckets) => b.missingExternal + b.missingInternal + b.shieldPending;
+  // Distinguish WHY something is pending, to pick an honest badge (across all assets,
+  // since `balances` is only the native/WETH slice):
+  //  · a SHIELD awaiting the external list-provider → slow (mins–~1h on mainnet),
+  //    the user can leave; nothing client-side speeds it up.
+  //  · anything else (a transfer/unshield change, i.e. a spent-POI) → finalized
+  //    CLIENT-side by the watcher → fast, and staying on screen completes it now.
+  const anyShieldPending =
+    (balances?.shieldPending ?? 0n) > 0n ||
+    (tokenBals != null && [...tokenBals.values()].some((b) => b.shieldPending > 0n));
 
   // Shielded ERC20s for the expandable list under the headline. The headline is
   // the native (WETH/⧫) spendable; this lists the curated tokens shielded in the
@@ -816,6 +871,37 @@ export default function PrivateView({
     ...(spendable > 0n ? [nativeAsset()] : []),
     ...shieldedTokens.map((t) => t.asset), // tokens now offered in BOTH worlds
   ];
+
+  // Auto-select a funded asset — mirror the light-side Send (SendEth): the picker
+  // defaults to native, but the selector is hidden when there's a single option,
+  // so if native has no balance the user would be stuck on an empty asset with no
+  // way to switch. When the current pick isn't among the funded/spendable ones,
+  // snap to the first that is (and reset the amount — decimals differ). Applies to
+  // all three shadow flows: shield (source balance), send + unshield (spendable).
+  useEffect(() => {
+    if (!depositOpen || fundedAssets.length === 0) return;
+    if (!fundedAssets.some((a) => keyOf(a) === keyOf(shieldAsset))) {
+      setShieldAsset(fundedAssets[0]);
+      setDepositAmt("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositOpen, fundedAssets]);
+  useEffect(() => {
+    if (!sendOpen || sendAssets.length === 0) return;
+    if (!sendAssets.some((a) => keyOf(a) === keyOf(sendAsset))) {
+      setSendAsset(sendAssets[0]);
+      setSendAmt("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sendOpen, sendAssets]);
+  useEffect(() => {
+    if (!unshieldOpen || unshieldAssets.length === 0) return;
+    if (!unshieldAssets.some((a) => keyOf(a) === keyOf(unshieldAsset))) {
+      setUnshieldAsset(unshieldAssets[0]);
+      setUnshieldAmt("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unshieldOpen, unshieldAssets]);
 
   // Assets with a pending POI (native + tokens) — drives the "validating" /
   // finalizing badges for ANY asset, each shown in its own symbol/decimals (we
@@ -868,6 +954,38 @@ export default function PrivateView({
   };
   const shieldPreview = previewFee(depositAmt, fees.shieldBps, shieldExact, sourceBalance ?? undefined, shDecimals);
   const unshieldPreview = previewFee(unshieldAmt, fees.unshieldBps, unshieldExact, unSpendable, unDecimals);
+  // Every unshield now carries the R1DO operator fee — public (batch from your Safe)
+  // AND privacy (batch from the ephemeral Safe). The exact amount is gas-based
+  // (gas × markup), only known after proving, so the dialog notes it qualitatively.
+  const chargesUnshieldFee = true;
+
+  // Estimate the operator fee for the PUBLIC shield (deployed main Safe → no tap)
+  // so the dialog shows the breakdown and the button blocks "amount too small".
+  const shieldMoves = !isPrivacy ? (shieldPreview?.moves ?? 0n) : 0n;
+  useEffect(() => {
+    if (!depositOpen || isPrivacy || shieldMoves <= 0n) {
+      setShieldQuote(null);
+      return;
+    }
+    let alive = true;
+    setShieldQuoting(true);
+    (async () => {
+      try {
+        const mod = await import("@/lib/pool/railgun");
+        const deploy = await import("@/lib/deploy");
+        const token = shieldAsset.kind !== "native" ? (shieldAsset.address as `0x${string}`) : null;
+        const q = await deploy.quoteShieldFee(wallet, shieldAsset, token, shieldMoves, (a, amt) => mod.populateShieldCalls(a, amt));
+        if (alive) setShieldQuote(q);
+      } catch {
+        if (alive) setShieldQuote(null);
+      } finally {
+        if (alive) setShieldQuoting(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [depositOpen, isPrivacy, shieldAsset, shieldMoves, wallet]);
 
   const registered = !!registeredZk;
   const btnLabel = working
@@ -1036,6 +1154,22 @@ export default function PrivateView({
             >
               {hideBalance ? <VisibilityOffIcon sx={{ fontSize: "0.95rem" }} /> : <VisibilityIcon sx={{ fontSize: "0.95rem" }} />}
             </IconButton>
+            <IconButton
+              onClick={handleRefresh}
+              size="small"
+              disabled={refreshing || engine !== "up"}
+              aria-label="Refresh balance"
+              title="Refresh balance now"
+              sx={{ p: 0.25 }}
+            >
+              <RefreshIcon
+                sx={{
+                  fontSize: "0.95rem",
+                  "@keyframes r1do-spin": { to: { transform: "rotate(360deg)" } },
+                  animation: refreshing ? "r1do-spin 0.8s linear infinite" : "none",
+                }}
+              />
+            </IconButton>
           </Box>
 
           {/* expandable per-token shielded balances (curated ERC20s in the pool) */}
@@ -1092,8 +1226,10 @@ export default function PrivateView({
             </Stack>
           )}
 
-          {/* finalizing: SEPARATE badge — shows "stay on this screen" and switches
-              to "generating proof… %" while a proof is actively generating. */}
+          {/* finalizing: SEPARATE badge. Two honest states: a CLIENT-side proof is
+              generating ("generating proof… %", staying on screen finishes it now)
+              vs EXTERNAL list-provider validation (shield/receive pending POI —
+              staying does nothing, it can take a while, so tell them they can leave). */}
           {(poolActivity.finalizing || anyPending) && (
             <Box
               sx={{
@@ -1123,7 +1259,9 @@ export default function PrivateView({
               <Typography variant="body2" sx={{ fontSize: "0.62rem", letterSpacing: "0.03em", textAlign: "left", lineHeight: 1.5 }}>
                 {poolActivity.generatingProof
                   ? `Generating proof… ${poolActivity.proofProgress}%. Keep this screen open to finish now.`
-                  : "Finalizing your private transfer — stay on this screen so it completes now. If you leave, no worries: it resumes next time you unlock your private balance."}
+                  : anyShieldPending
+                    ? "Validating on the network — this can take a while. You can close this; your balance updates automatically when it's ready."
+                    : "Finalizing privately — stay on this screen so it completes now. If you leave, no worries: it resumes next time you unlock your private balance."}
               </Typography>
             </Box>
           )}
@@ -1336,7 +1474,7 @@ export default function PrivateView({
                           disabled={shielding}
                         />
                       }
-                      label="Receive the exact amount (cover the fee)"
+                      label="Receive the exact amount (before the service fee)"
                       sx={{ ".MuiFormControlLabel-label": { fontSize: "0.62rem", opacity: 0.7 }, mb: 0.5 }}
                     />
 
@@ -1352,15 +1490,51 @@ export default function PrivateView({
                       )}
                     </Typography>
 
+                    {/* Operator fee (public shield only) — separate from the protocol fee above. */}
+                    {!isPrivacy && shieldMoves > 0n && (
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          fontSize: "0.58rem",
+                          mb: 1.25,
+                          lineHeight: 1.5,
+                          color: shieldQuote?.feeTooBig ? "error.main" : "text.secondary",
+                          opacity: shieldQuote?.feeTooBig ? 1 : 0.55,
+                        }}
+                      >
+                        {shieldQuoting || shieldQuote == null ? (
+                          "estimating network fee…"
+                        ) : shieldQuote.feeTooBig ? (
+                          <>Amount too small — service fee ({fmt(shieldQuote.fee, shDecimals)} {shSymbol}) exceeds it.</>
+                        ) : (
+                          <>service fee {fmt(shieldQuote.fee, shDecimals)} {shSymbol}</>
+                        )}
+                      </Typography>
+                    )}
+
+                    {/* Privacy shield: the fee is per-chunk on the stealth Safes (can't
+                        estimate without the passkey), so it's noted qualitatively. */}
+                    {isPrivacy && shieldPreview && (
+                      <Typography variant="body2" sx={{ fontSize: "0.58rem", mb: 1.25, lineHeight: 1.5, color: "text.secondary", opacity: 0.55 }}>
+                        minus a small service fee (network gas)
+                      </Typography>
+                    )}
+
                     <Button
                       variant="contained"
                       color="primary"
                       fullWidth
                       onClick={doShield}
-                      disabled={shielding}
+                      disabled={shielding || (!isPrivacy && (shieldQuoting || !!shieldQuote?.feeTooBig))}
                       startIcon={shielding ? <CircularProgress size={14} /> : undefined}
                     >
-                      {shielding ? "shielding…" : "Confirm shield"}
+                      {shielding
+                        ? "shielding…"
+                        : !isPrivacy && shieldQuoting
+                          ? "estimating fee…"
+                          : !isPrivacy && shieldQuote?.feeTooBig
+                            ? "Amount too small"
+                            : "Confirm shield"}
                     </Button>
                   </>
                 )}
@@ -1617,8 +1791,8 @@ export default function PrivateView({
 
                 <Typography variant="body2" sx={{ fontSize: "0.58rem", opacity: 0.5, mb: unshieldToSelfStealth ? 0.5 : 1.25, lineHeight: 1.5 }}>
                   {isPrivacy
-                    ? "Goes to a brand-new one-time stealth address you own — unlinkable. Edit to send anywhere."
-                    : "Defaults to your own Safe. Sending to a fresh address you control breaks the link to your public identity — better privacy."}
+                    ? "Goes to a brand-new one-time stealth address you own, unlinkable."
+                    : "Defaults to your own Safe. Send it anywhere, but your Safe is the on-chain sender, so a public withdrawal is always linkable to you."}
                 </Typography>
 
                 {unshieldToSelfStealth && (
@@ -1731,7 +1905,7 @@ export default function PrivateView({
                       disabled={unshieldBusy}
                     />
                   }
-                  label="Receive the exact amount (cover the fee)"
+                  label="Receive the exact amount (before the service fee)"
                   sx={{ ".MuiFormControlLabel-label": { fontSize: "0.62rem", opacity: 0.7 }, mb: 0.5 }}
                 />
 
@@ -1740,6 +1914,7 @@ export default function PrivateView({
                     <>
                       {proto} fee {fees.unshieldBps / 100}% · unshields {fmt(unshieldPreview.moves, unDecimals)} {unSymbol} →
                       you receive {fmt(unshieldPreview.receive, unDecimals)} {unSymbol}
+                      {chargesUnshieldFee ? " minus a small service fee (network gas)" : ""}
                       {unshieldExact && unshieldPreview.forcedGross ? " · capped to spendable (fee not covered)" : ""}
                       . Funds land on confirmation; the POI finalizes in the background.
                     </>

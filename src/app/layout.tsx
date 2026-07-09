@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Shippori_Mincho } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
 import { ThemeRegistry } from "@/components/ThemeRegistry";
-// Andamiaje del banner beta listo pero oculto — descomentar import + uso abajo.
+// Beta banner scaffolding ready but hidden — uncomment import + usage below.
 // import { BetaBanner } from "@/components/BetaBanner";
 import "./globals.css";
 
@@ -34,9 +34,9 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // El PWA (manifest + service worker + iconos) se desactiva en el build de
-  // IPFS: un SW sobre un subdomain gateway cachearía contenido ya inmutable
-  // por CID y podría servir versiones viejas. Se mantiene en el build normal.
+  // The PWA (manifest + service worker + icons) is disabled in the IPFS build:
+  // a SW over a subdomain gateway would cache content already immutable by CID
+  // and could serve stale versions. Kept in the normal build.
   const pwaEnabled = process.env.NEXT_PUBLIC_IPFS_BUILD !== "1";
 
   return (
@@ -84,9 +84,8 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${mincho.variable}`}
       >
-        {/* Beta disclaimer banner — andamiaje listo (BetaBanner + clase
-            .onLogin en page.module.css) pero OCULTO por ahora. Descomentar para
-            activarlo. */}
+        {/* Beta disclaimer banner — scaffolding ready (BetaBanner + the .onLogin
+            class in page.module.css) but HIDDEN for now. Uncomment to enable. */}
         {/* <BetaBanner /> */}
         <ThemeRegistry>{children}</ThemeRegistry>
         {/* Vercel Web Analytics — privacy-friendly (no cookies, no PII), served

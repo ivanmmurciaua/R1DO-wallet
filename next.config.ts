@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
 import NodePolyfillPlugin from "node-polyfill-webpack-plugin";
 
-// Build para IPFS: `IPFS_BUILD=1 next build` → genera ./out estático con rutas
-// relativas (funciona servido desde la raíz de un CID en cualquier gateway).
-// Sin la variable, el dev/build normal queda intacto.
+// IPFS build: `IPFS_BUILD=1 next build` → produces a static ./out with relative
+// paths (works served from the root of a CID on any gateway). Without the env
+// var, the normal dev/build is left untouched.
 const ipfs = process.env.IPFS_BUILD === "1";
 const basePath = ipfs ? "/wallet" : "";
 
@@ -37,8 +37,25 @@ const CSP = [
     "https://rpc.sepolia.ethpandaops.io",
     "https://sepolia.rpc.sentio.xyz",
     "https://sepolia.gateway.tenderly.co",
+    // Arbitrum One public RPCs (networks.ts, curated via rpc-bench.sh). Needed even
+    // while Sepolia is the active chain: the pay-by-name directory is PINNED to
+    // Arbitrum, so directory reads (directoryClient) hit these regardless of the
+    // active network.
+    "https://arb1.lava.build",
+    "https://arb-one.api.pocket.network",
+    "https://arbitrum-one.rpc.sentio.xyz",
+    "https://arb1.arbitrum.io",
+    "https://arbitrum.gateway.tenderly.co",
     // Etherscan v2 API — public-world transaction history (light side)
     "https://api.etherscan.io",
+    // Chainlink ETH/USD on Ethereum mainnet (lib/oracle.ts) — price is a GLOBAL
+    // fact, always read from mainnet regardless of the active chain (fee gas-floor).
+    "https://ethereum-rpc.publicnode.com",
+    "https://rpc.mevblocker.io",
+    "https://eth.drpc.org",
+    "https://eth.api.pocket.network",
+    "https://rpc.nodeflare.app",
+    "https://eth.rpc.blxrbdn.com",
     // Railgun POI aggregator (railgun.ts)
     "https://ppoi.fdi.network",
     // Railgun zk artifacts + txid quick-sync (SDK internals)
@@ -68,9 +85,9 @@ const SECURITY_HEADERS = [
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["effervescent-ana-unsystematically.ngrok-free.dev"],
-  // Railgun SDK necesita polyfills de Node en el navegador (crypto/stream/
-  // buffer…), igual que el spike con vite-plugin-node-polyfills. Solo en el
-  // bundle de cliente; en server no hace falta. (Verificamos con build, no dev.)
+  // The Railgun SDK needs Node polyfills in the browser (crypto/stream/buffer…),
+  // same as the vite-plugin-node-polyfills spike. Client bundle only; not needed
+  // on the server. (We verify with build, not dev.)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   webpack: (config: any, { isServer }: { isServer: boolean }) => {
     if (!isServer) {
@@ -80,8 +97,8 @@ const nextConfig: NextConfig = {
     }
     return config;
   },
-  // Expuesto al cliente para prefijar manualmente los assets de public/ que
-  // Next NO prefija solo (badge, manifest…) y para desactivar el PWA en IPFS.
+  // Exposed to the client to manually prefix the public/ assets that Next does
+  // NOT prefix on its own (badge, manifest…) and to disable the PWA on IPFS.
   env: {
     NEXT_PUBLIC_BASE_PATH: basePath,
     NEXT_PUBLIC_IPFS_BUILD: ipfs ? "1" : "",
@@ -93,10 +110,10 @@ const nextConfig: NextConfig = {
       return [{ source: "/:path*", headers: SECURITY_HEADERS }];
     },
   }),
-  // Se sirve como subcarpeta /wallet/ dentro del CID de R1DO-tools, en un
-  // subdomain gateway (<CID>.ipfs.dweb.link/wallet/). `basePath` empieza con "/"
-  // → no rompe next/font (a diferencia de un assetPrefix relativo) y hace que
-  // todas las rutas sean /wallet/_next/… → resuelven bajo la subcarpeta.
+  // Served as a /wallet/ subfolder inside the R1DO-tools CID, on a subdomain
+  // gateway (<CID>.ipfs.dweb.link/wallet/). `basePath` starts with "/" → it
+  // doesn't break next/font (unlike a relative assetPrefix) and makes every route
+  // /wallet/_next/… → resolving under the subfolder.
   ...(ipfs && {
     output: "export",
     images: { unoptimized: true },

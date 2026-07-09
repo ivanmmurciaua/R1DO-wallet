@@ -23,20 +23,21 @@ import { ReceivePrivate } from "./ReceivePrivate";
 import { QrCode } from "./QrCode";
 import { GlitchText } from "./GlitchText";
 import Popup from "./Popup";
-import { Safe4337Pack } from "@safe-global/relay-kit";
+import type { SafeWallet } from "@/lib/aa-client";
 import { formatUnits, createPublicClient } from "viem";
 import { sepoliaTransport } from "@/app/constants";
-import { activeChain, activeChainId, networkName, explorerTxUrl } from "@/lib/networks";
+import { activeChain, activeChainId, networkName, explorerTxUrl, explorerAddressUrl } from "@/lib/networks";
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { activeTokens, assetByAddress, formatAsset, type Asset } from "@/lib/assets";
 import { getLastBlock } from "@/lib/client";
-import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealthCleanup, getWalletMeta, saveStealthScan, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
+import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealthCleanup, getWalletMeta, saveStealthScanDurable, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 import { derivePQKeysFromPRF, scanStealthPayments, type StealthUTXO } from "@/lib/stealth";
+import { useScanning } from "@/lib/scanState";
 
 type UserMenuProps = {
-  wallet: Safe4337Pack;
+  wallet: SafeWallet;
   username: string;
   balance: number;
   address: string; // public Safe address — shown/copied in public Receive
@@ -102,6 +103,10 @@ const compactFmt = new Intl.NumberFormat("en-US", { notation: "compact", maximum
 const fmtAmount = (n: number) => compactFmt.format(n);
 
 export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, address }) => {
+  // A running stealth (sUTXO) scan means the balance/UTXO view is still
+  // incomplete → disable Send so we never spend from a partial set. Receive is
+  // always safe (no state dependency), so it stays enabled.
+  const scanning = useScanning();
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
   const [currentView, setCurrentView] = useState<"menu" | "sendEth" | "spendUtxo" | "receivePrivate" | "receivePublic">("menu");
@@ -387,18 +392,22 @@ const handleBackToMenu = (message: string = "") => {
       const lastBlock = getLastScannedBlock(username);
       const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
       const fromBlock = lastBlock ?? (await pub.getBlockNumber() - 21600n);
-      const { utxos: newUtxos, latestBlock } = await scanStealthPayments(
+      // Windowed scan: each window persists to idb and only THEN advances the
+      // cursor → resumable, never skips a UTXO (see saveStealthScanDurable).
+      let merged = [...getStealthUTXOs(username)];
+      await scanStealthPayments(
         keys.spendingPrivateKey,
         keys.viewingPrivateKey,
         keys.mlkemDecapsKey,
         fromBlock,
+        async (windowUtxos, windowEnd) => {
+          merged = [
+            ...merged,
+            ...windowUtxos.filter((u) => !merged.some((e) => e.stealthAddress === u.stealthAddress)),
+          ];
+          await saveStealthScanDurable(username, merged, windowEnd);
+        },
       );
-      const existing = getStealthUTXOs(username);
-      const merged = [
-        ...existing,
-        ...newUtxos.filter(u => !existing.some(e => e.stealthAddress === u.stealthAddress)),
-      ];
-      saveStealthScan(username, merged, latestBlock);
       await fetchStealthBalances();
     } catch (e) {
       console.error("[refreshPrivate] error:", e);
@@ -606,7 +615,8 @@ const handleBackToMenu = (message: string = "") => {
                 fontWeight: 500,
               }}
             >
-              Recent Transactions
+              {/* Private wallets list stealth UTXOs, not txs — be honest about it. */}
+              {privacy ? "Stealth UTXOs" : "Recent Transactions"}
             </Typography>
             <IconButton
               onClick={privacy ? refreshPrivate : fetchTransactions}
@@ -658,7 +668,18 @@ const handleBackToMenu = (message: string = "") => {
                   )}
                   <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flex: 1, gap: 1, minWidth: 0, fontFamily: "var(--font-geist-mono), monospace" }}>
                     {transaction.type === "private" && (
-                      <Typography variant="caption" sx={{ fontFamily: "inherit", letterSpacing: "0.04em", opacity: 0.7 }}>
+                      // Clickable → explorer for the ACTIVE network. stopPropagation so
+                      // it opens the address page instead of triggering the row's spend.
+                      <Typography
+                        component="a"
+                        href={explorerAddressUrl(transaction.stealthAddress ?? "") ?? undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        title="View this stealth address on the explorer"
+                        variant="caption"
+                        sx={{ fontFamily: "inherit", letterSpacing: "0.04em", opacity: 0.7, color: "inherit", textDecoration: "none", "&:hover": { textDecoration: "underline", opacity: 1 } }}
+                      >
                         {transaction.stealthAddress?.slice(0, 6)}…{transaction.stealthAddress?.slice(-4)}
                       </Typography>
                     )}
@@ -691,7 +712,7 @@ const handleBackToMenu = (message: string = "") => {
       >
         <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
           {[
-            { key: "send", label: "Send", icon: <ArrowUpwardIcon fontSize="small" />, onClick: handleSendEth, disabled: false },
+            { key: "send", label: scanning ? "Scanning…" : "Send", icon: <ArrowUpwardIcon fontSize="small" />, onClick: handleSendEth, disabled: scanning },
             { key: "receive", label: "Receive", icon: <ArrowDownwardIcon fontSize="small" />, onClick: handleReceive, disabled: false },
             { key: "soon", label: "soon", icon: <AddIcon fontSize="small" />, onClick: undefined, disabled: true },
           ].map((slot) => (

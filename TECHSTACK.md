@@ -5,8 +5,10 @@ the cryptography**. App-framework and infra choices are summarized at the end;
 the bulk of this document is about keys, hashes, KDFs, AEADs, the post-quantum
 hybrid, and the zero-knowledge layer.
 
-> Scope: Ethereum **Sepolia** testnet. Contract addresses, the Pimlico key and
-> deployment specifics live in `.env` / `src/app/constants.tsx`, not here.
+> Scope: **Arbitrum One** mainnet by default (multi-network — a network switch
+> exists, Sepolia included). **Beta, unaudited.** Contract addresses, the Pimlico
+> key and deployment specifics live in `.env` / `src/app/constants.tsx` /
+> `aa-config.ts`, not here.
 
 ---
 
@@ -58,7 +60,7 @@ the resulting key signs Safe operations with ordinary `ecrecover`.
 
 ---
 
-## 2. Stealth payments (Δ1) — a post-quantum **hybrid** scheme
+## 2. Stealth payments (Δ) — a post-quantum **hybrid** scheme
 
 This is the heart of Δ's privacy and the most interesting cryptography in the
 project. It is an **announcer-less, PQ-hybrid stealth-address scheme**.
@@ -102,7 +104,7 @@ For each payment the sender:
 > survives Shor's algorithm. (Custody of the landed funds is the Safe owner key
 > from §1 — classical today, migratable per §7.)
 
-### 2.3 Announcer-less delivery (the "Δ1" part)
+### 2.3 Announcer-less delivery (the "Δ" part)
 
 There is **no ERC-5564 announcer and no ERC-6538 registry**. The delivery blob
 rides as the **calldata of the value transfer itself**:
@@ -285,10 +287,15 @@ The non-cryptographic scaffolding, briefly:
 - **Framework:** Next.js (App Router) + React, MUI for UI, **webpack** build
   (not Turbopack — the Railgun engine needs Node polyfills applied at build).
 - **EVM client:** viem; ethers v6 inside the Railgun adapter.
-- **Smart accounts:** Safe (`@safe-global/relay-kit`, Safe 4337 module) on
-  **ERC-4337**; EntryPoint v0.7.
+- **Smart accounts:** Safe smart accounts via **permissionless**
+  (`toSafeSmartAccount`, Safe 1.4.1 + 4337 module 0.3.0) on **ERC-4337**;
+  EntryPoint v0.7. Every contract address is **pinned** (`aa-config.ts`) so a
+  dependency upgrade can never silently move a user's counterfactual address.
+  (Migrated off `@safe-global/relay-kit`'s `Safe4337Pack`; `SafeWallet` wraps the
+  permissionless client behind the old relay-kit-shaped surface.)
 - **Bundler / paymaster:** Pimlico (gas sponsorship, so users need no ETH).
-- **RPC:** PublicNode (Sepolia) primary, with a multi-RPC failover list.
+- **RPC:** curated per-network public RPCs with viem failover (Arbitrum One by
+  default; Sepolia available), plus a separate ops RPC for sponsored writes.
 - **Privacy engine:** `@railgun-community/wallet` — LevelDB→IndexedDB storage,
   artifacts in localforage, snarkjs Groth16 prover, lazily imported only when
   entering the private world (kept out of the login bundle).
@@ -297,5 +304,5 @@ The non-cryptographic scaffolding, briefly:
 
 ---
 
-*Δ is the experimental privacy fork of R1DO Wallet — Sepolia testnet only.*
+*Δ is the experimental privacy fork of R1DO Wallet — Arbitrum One mainnet, in unaudited beta.*
 *MIT License. © 2025–2026 Iván M.M*

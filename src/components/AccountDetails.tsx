@@ -1,4 +1,4 @@
-import { Safe4337Pack } from "@safe-global/relay-kit";
+import type { SafeWallet } from "@/lib/aa-client";
 import { useEffect, useState } from "react";
 import { CircularProgress } from "@mui/material";
 import { formatUnits, createPublicClient } from "viem";
@@ -9,11 +9,12 @@ import { directoryEnabled } from "@/lib/registry-v2";
 import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
 import { getDecimals, getWalletMeta, getSpendableUTXOs, applyStealthCleanup, getDirectoryMark, getFindableNudgeDismissed, setFindableNudgeDismissed, DEFAULT_DECIMALS } from "@/lib/localstorage";
-import { useScanning } from "@/lib/scanState";
+import { useScanning, useScanProgress } from "@/lib/scanState";
+import { ProgressBar } from "./ProgressBar";
 
 type props = {
   username: string;
-  wallet: Safe4337Pack;
+  wallet: SafeWallet;
   address: string;
   // Opt-in publish to the encrypted directory (pay-by-username). The only
   // sponsored on-chain action of a fresh wallet — deliberately user-triggered.
@@ -41,6 +42,7 @@ export default function AccountDetails({ username, wallet, address, makeFindable
   );
   const privacy = getWalletMeta(username)?.privacy ?? false;
   const scanning = useScanning();
+  const scanProgress = useScanProgress();
 
   const handleMakeFindable = async () => {
     setPublishing(true);
@@ -138,20 +140,13 @@ export default function AccountDetails({ username, wallet, address, makeFindable
   return isLoaded && decimals > 0 ? (
     <div>
       {scanning && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-            fontFamily: "var(--font-geist-mono), monospace",
-            fontSize: "0.72rem",
-            opacity: 0.7,
-            marginBottom: 16,
-          }}
-        >
-          <CircularProgress size={12} />
-          <span>Scanning the chain for your private payments…</span>
+        <div style={{ marginBottom: 16 }}>
+          <ProgressBar
+            done={scanProgress?.done ?? 0}
+            total={scanProgress?.total ?? 0}
+            label="Scanning the chain for your private payments…"
+            showCount={false}
+          />
         </div>
       )}
       {/* Findable nudge — opt-in & non-blocking. Becoming findable is the only

@@ -52,14 +52,17 @@ const REGISTRY: Record<NetworkId, NetworkAssets> = {
       { kind: "erc20", symbol: "USDC", decimals: 18, address: "0x8267cF9254734C6Eb452a7bb9AAF97B392258b21", name: "USD Coin" },
     ],
   },
-  // ── Multi-network prepared (activate in Fase 5: add to networks.ts NETWORKS +
-  //    a switcher; this Record will then REQUIRE the new key) ──
-  // arbitrum: {
-  //   wrappedNative: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", // WETH
-  //   tokens: [
-  //     { kind: "erc20", symbol: "USDC", decimals: 6, address: "0xaf88d065e77c8cc2239327c5edb3a432268e5831" },
-  //   ],
-  // },
+  // ── Arbitrum One (activated: added to networks.ts NETWORKS) ──
+  // Canonical Arbitrum One addresses (decimals verified on-chain): WETH base
+  // token + the stablecoins. USDC is Circle's native (not bridged USDC.e).
+  arbitrum: {
+    wrappedNative: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", // WETH on Arbitrum One, 18 dec
+    tokens: [
+      { kind: "erc20", symbol: "DAI", decimals: 18, address: "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1", name: "Dai Stablecoin" },
+      { kind: "erc20", symbol: "USDT", decimals: 6, address: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", name: "Tether USD" },
+      { kind: "erc20", symbol: "USDC", decimals: 6, address: "0xaf88d065e77c8cc2239327c5edb3a432268e5831", name: "USD Coin" },
+    ],
+  },
 };
 
 /** The native asset — themeable ⧫/13 unit from prefs (same source as today). */
