@@ -102,9 +102,8 @@ export const NETWORKS: readonly Network[] = [
     // owner. Sepolia was reset for this migration, so the address change is a
     // non-issue. See the `safeSingleton` field doc for the full rationale.
     safeSingleton: "l2",
-    // Sepolia gas is testnet-inflated and unrepresentative → normally no gas floor.
-    // TEMPORARILY true to TEST the gas-floor path on Sepolia — revert to false.
-    gasFloor: true,
+    // Sepolia gas is testnet-inflated and unrepresentative → no gas floor here.
+    gasFloor: false,
     // Same Pimlico v0.7 singleton paymaster as Arbitrum (confirmed on-chain: deployed
     // + actively sponsoring on Sepolia). ~3.6× fewer tx fetches here (lower total
     // traffic than Arbitrum). scanWindowBlocks omitted → default 1000.
