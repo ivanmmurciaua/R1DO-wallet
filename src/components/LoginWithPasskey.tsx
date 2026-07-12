@@ -368,7 +368,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           </Button>
 
           {/* Hidden for the beta: creating/switching to another wallet from the
-              unlock screen. Wallet management (incl. delete) lives in Settings.
+              unlock screen. Wallet management (incl. delete) lives in Settings.*/}
           <Typography
             onClick={() => setWallets([])}
             sx={{
@@ -384,7 +384,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
           >
             Use a different wallet
           </Typography>
-          */}
+
         </Stack>
       )}
     </div>

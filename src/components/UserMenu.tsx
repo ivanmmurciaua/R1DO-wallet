@@ -26,7 +26,8 @@ import Popup from "./Popup";
 import type { SafeWallet } from "@/lib/aa-client";
 import { formatUnits, createPublicClient } from "viem";
 import { sepoliaTransport } from "@/app/constants";
-import { activeChain, activeChainId, networkName, explorerTxUrl, explorerAddressUrl } from "@/lib/networks";
+import { activeChain, activeChainId, networkName, allNetworkNames, explorerTxUrl, explorerAddressUrl } from "@/lib/networks";
+import { formatList } from "@/lib/common";
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { activeTokens, assetByAddress, formatAsset, type Asset } from "@/lib/assets";
 import { getLastBlock } from "@/lib/client";
@@ -427,24 +428,94 @@ const handleBackToMenu = (message: string = "") => {
     return () => clearInterval(id);
   }, [privacy, fetchStealthBalances]);
 
+  // Persistent bottom action bar — rendered on the menu AND inside every sub-view
+  // (which are early returns), so it never disappears. The active slot is
+  // highlighted and tapping it goes back to the menu; each sub-view keeps its own
+  // back/cancel too.
+  const sendActive = currentView === "sendEth";
+  const receiveActive = currentView === "receivePrivate" || currentView === "receivePublic";
+  const actionBar = (
+    <Box
+      sx={{
+        position: "fixed",
+        bottom: 0,
+        left: 0,
+        right: 0,
+        zIndex: 1100,
+        bgcolor: "background.default",
+        borderTop: "1px solid",
+        borderColor: "divider",
+        pb: "env(safe-area-inset-bottom)",
+      }}
+    >
+      <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
+        {[
+          { key: "send", label: scanning ? "Scanning…" : "Send", icon: <ArrowUpwardIcon fontSize="small" />, active: sendActive, disabled: scanning, onClick: sendActive ? () => setCurrentView("menu") : handleSendEth },
+          { key: "receive", label: "Receive", icon: <ArrowDownwardIcon fontSize="small" />, active: receiveActive, disabled: false, onClick: receiveActive ? () => setCurrentView("menu") : handleReceive },
+          { key: "soon", label: "soon", icon: <AddIcon fontSize="small" />, active: false, disabled: true, onClick: undefined },
+        ].map((slot) => (
+          <Button
+            key={slot.key}
+            onClick={slot.onClick}
+            disabled={slot.disabled}
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              flexDirection: "column",
+              gap: 0.25,
+              py: 1.25,
+              borderRadius: 0,
+              color: slot.active ? "primary.main" : "text.primary",
+              bgcolor: slot.active ? "action.selected" : "transparent",
+            }}
+          >
+            {slot.icon}
+            <Typography sx={{ fontSize: "0.6rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+              {slot.label}
+            </Typography>
+          </Button>
+        ))}
+      </Stack>
+    </Box>
+  );
+
   if (currentView === "sendEth") {
-    return <SendEth wallet={wallet} username={username} balance={balance} onBack={handleBackToMenu} />;
+    return (
+      <>
+        <Box sx={{ pb: "96px" }}>
+          <SendEth wallet={wallet} username={username} balance={balance} onBack={handleBackToMenu} />
+        </Box>
+        {actionBar}
+      </>
+    );
   }
 
   if (currentView === "spendUtxo" && selectedUtxo) {
     return (
-      <SpendStealthUTXO
-        utxo={selectedUtxo}
-        balance={selectedBalance}
-        balanceWei={selectedWei}
-        username={username}
-        onBack={handleBackFromSpend}
-      />
+      <>
+        <Box sx={{ pb: "96px" }}>
+          <SpendStealthUTXO
+            utxo={selectedUtxo}
+            balance={selectedBalance}
+            balanceWei={selectedWei}
+            username={username}
+            onBack={handleBackFromSpend}
+          />
+        </Box>
+        {actionBar}
+      </>
     );
   }
 
   if (currentView === "receivePrivate") {
-    return <ReceivePrivate username={username} onBack={handleBackFromSpend} />;
+    return (
+      <>
+        <Box sx={{ pb: "96px" }}>
+          <ReceivePrivate username={username} onBack={handleBackFromSpend} />
+        </Box>
+        {actionBar}
+      </>
+    );
   }
 
   if (currentView === "receivePublic") {
@@ -454,7 +525,8 @@ const handleBackToMenu = (message: string = "") => {
       setTimeout(() => setCopied(false), 1600);
     };
     return (
-      <Box sx={{ pb: 4 }}>
+      <>
+      <Box sx={{ pb: "96px" }}>
         {/* Header */}
         <Box sx={{ display: "flex", alignItems: "center", maxWidth: 400, mx: "auto", mb: 1 }}>
           <IconButton onClick={() => setCurrentView("menu")} size="small" aria-label="Back">
@@ -472,7 +544,7 @@ const handleBackToMenu = (message: string = "") => {
           </Box>
 
           <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, maxWidth: 300 }}>
-            Scan to send {symbol}, or copy your address below.
+            Scan to send, or copy your address below.
           </Typography>
 
           {/* Address card — whole row copies */}
@@ -508,10 +580,12 @@ const handleBackToMenu = (message: string = "") => {
           </Box>
 
           <Typography sx={{ fontFamily: "var(--font-geist-mono), monospace", fontSize: "0.62rem", opacity: 0.5, letterSpacing: "0.06em", textAlign: "center" }}>
-            {networkName()}
+            Receives {[symbol, ...activeTokens().map((t) => t.symbol)].join(" · ")}<br />on {formatList(allNetworkNames())}
           </Typography>
         </Stack>
       </Box>
+      {actionBar}
+      </>
     );
   }
 
@@ -695,49 +769,7 @@ const handleBackToMenu = (message: string = "") => {
         {showPopup && popupMessage && <Popup popupMessage={popupMessage} />}
       </Stack>
 
-      {/* Fixed bottom action bar (wallet-home). Renders only on the menu view
-          since the sub-views return earlier. Sits at the bottom over the footer. */}
-      <Box
-        sx={{
-          position: "fixed",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          zIndex: 1100,
-          bgcolor: "background.default",
-          borderTop: "1px solid",
-          borderColor: "divider",
-          pb: "env(safe-area-inset-bottom)",
-        }}
-      >
-        <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
-          {[
-            { key: "send", label: scanning ? "Scanning…" : "Send", icon: <ArrowUpwardIcon fontSize="small" />, onClick: handleSendEth, disabled: scanning },
-            { key: "receive", label: "Receive", icon: <ArrowDownwardIcon fontSize="small" />, onClick: handleReceive, disabled: false },
-            { key: "soon", label: "soon", icon: <AddIcon fontSize="small" />, onClick: undefined, disabled: true },
-          ].map((slot) => (
-            <Button
-              key={slot.key}
-              onClick={slot.onClick}
-              disabled={slot.disabled}
-              sx={{
-                flex: 1,
-                minWidth: 0,
-                flexDirection: "column",
-                gap: 0.25,
-                py: 1.25,
-                borderRadius: 0,
-                color: "text.primary",
-              }}
-            >
-              {slot.icon}
-              <Typography sx={{ fontSize: "0.6rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                {slot.label}
-              </Typography>
-            </Button>
-          ))}
-        </Stack>
-      </Box>
+      {actionBar}
     </Box>
   );
 };

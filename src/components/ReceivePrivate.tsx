@@ -5,7 +5,9 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import { QrCode } from "./QrCode";
 import { generateStealthPayment, derivePQKeysFromPRF, buildStealthTicket, extractStealthBlobs, checkPQPayment, type StealthUTXO } from "@/lib/stealth";
-import { getMetaAddress, saveMetaAddress, addStealthUTXO, getStealthUTXOs, patchStealthUTXO, getSymbol } from "@/lib/localstorage";
+import { getMetaAddress, saveMetaAddress, addStealthUTXO, getStealthUTXOs, patchStealthUTXO, receivableChainNames } from "@/lib/localstorage";
+import { nativeAsset, activeTokens } from "@/lib/assets";
+import { formatList } from "@/lib/common";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
 
@@ -189,7 +191,11 @@ export const ReceivePrivate: React.FC<ReceivePrivateProps> = ({ username, onBack
   const hiddenCount = receives.filter((u) => u.hidden).length;
   const visible = receives.filter((u) => (showHidden ? true : !u.hidden));
   const activeCount = receives.filter((u) => !u.hidden).length;
-  const symbol = getSymbol();
+  // What this address can receive, and WHERE it's safe to receive it: assets from
+  // the active network's registry; networks = those with a scan cursor (payments
+  // there won't be missed) — a cursor-less chain is deliberately left out.
+  const assetLine = [nativeAsset().symbol, ...activeTokens().map((t) => t.symbol)].join(" · ");
+  const networkLine = formatList(receivableChainNames(username));
 
   return (
     <Box sx={{ pb: 4 }}>
@@ -237,16 +243,22 @@ export const ReceivePrivate: React.FC<ReceivePrivateProps> = ({ username, onBack
           </Button>
         </Stack>
 
-        <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, fontSize: "0.7rem", opacity: 0.7 }}>
-          A one-time address — share it to receive a private payment from any wallet.
-        </Typography>
+        <Stack spacing={0.75} sx={{ px: 1 }}>
+          <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, fontSize: "0.7rem", opacity: 0.7 }}>
+            A one-time address. Share it with the sender — they send to it, and the
+            payment lands here privately.
+          </Typography>
+          <Typography sx={{ textAlign: "center", fontSize: "0.66rem", opacity: 0.6, letterSpacing: "0.02em", lineHeight: 1.5 }}>
+            Receives {assetLine}<br />on {networkLine}
+          </Typography>
+        </Stack>
 
         {/* Detail — QR + address (freshly created OR opened from the list) */}
         {detail && (
           <Stack spacing={2} alignItems="center" sx={{ mt: 0.5 }}>
             <QrCode value={detail.address} size={232} />
             <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center", lineHeight: 1.6, maxWidth: 300 }}>
-              Scan to send {symbol}, or copy the address below.
+              Scan to send, or copy the address below.
             </Typography>
 
             {/* Address card — whole row copies */}

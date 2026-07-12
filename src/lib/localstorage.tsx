@@ -2,7 +2,7 @@ import localforage from "localforage";
 import { LOCAL_WALLET_LIST } from "@/app/constants";
 import { WalletMeta } from "@/types";
 import type { StealthUTXO } from "@/lib/stealth";
-import { activeChainId } from "@/lib/networks";
+import { activeChainId, NETWORKS } from "@/lib/networks";
 
 // ── localStorage layout (r1do/wallet/v1) ─────────────────────────────────────
 // Everything the wallet keeps locally lives under one versioned namespace, so
@@ -248,6 +248,32 @@ export const getSpendableUTXOs = (username: string): StealthUTXO[] =>
 export const getLastScannedBlock = (username: string): bigint | null => {
   const { block } = readCursor(username);
   return block ? BigInt(block) : null;
+};
+
+// Does this user have a stealth scan cursor for `chainId`? A cursor is a resume
+// point: a payment on that chain is caught the next time the user scans it (the
+// scanner picks up from the cursor). WITHOUT one, a fresh scan would start "from
+// now" and silently skip anything already received — so a cursor-less chain must
+// NEVER be advertised as receivable (the late-scan hazard the feedback flagged).
+export const hasScanCursor = (username: string, chainId: number): boolean => {
+  try {
+    const raw = localStorage.getItem(`${NS}/scan/${username.toLowerCase()}/${chainId}/cursor`);
+    if (!raw) return false;
+    const c = JSON.parse(raw) as ScanCursor;
+    return typeof c.block === "string" && c.block.length > 0;
+  } catch {
+    return false;
+  }
+};
+
+// Chains it's SAFE to receive on: any with a cursor, plus the active one (it's
+// being scanned right now). Names are chain.name, active first. Used by the
+// Receive screens to tell the user exactly where a payment won't be missed.
+export const receivableChainNames = (username: string): string[] => {
+  const active = activeChainId();
+  return NETWORKS.filter((n) => n.chain.id === active || hasScanCursor(username, n.chain.id))
+    .sort((a, b) => (a.chain.id === active ? -1 : b.chain.id === active ? 1 : 0))
+    .map((n) => n.chain.name);
 };
 
 // Persists a scan pass. The upstream merge is append-only/deduped, so the UTXO

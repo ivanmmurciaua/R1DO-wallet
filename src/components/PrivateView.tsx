@@ -27,7 +27,8 @@ import CheckIcon from "@mui/icons-material/Check";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import { formatUnits, parseUnits, createPublicClient } from "viem";
 import type { SafeWallet } from "@/lib/aa-client";
-import { activeChain } from "@/lib/networks";
+import { activeChain, railgunNetworkNames } from "@/lib/networks";
+import { formatList } from "@/lib/common";
 import { sepoliaTransport } from "@/app/constants";
 import { getTokenBalances } from "@/lib/balances";
 import { nativeAsset, activeTokens, assetByAddress, type Asset } from "@/lib/assets";
@@ -381,6 +382,14 @@ export default function PrivateView({
     setSelectedCoins(new Set());
     setDepositOpen(true);
     fetchShieldBalances();
+  };
+
+  // Tap-the-active-slot to close: returns to the idle (Receive) view. The forms'
+  // own cancel/back buttons still work — this is an extra affordance on the bar.
+  const closeForms = () => {
+    setDepositOpen(false);
+    setSendOpen(false);
+    setUnshieldOpen(false);
   };
 
   // Switch to coin-control: load the user's stealth UTXOs as selectable coins.
@@ -1266,8 +1275,9 @@ export default function PrivateView({
             </Box>
           )}
 
-          {/* actions — Deposit (shield) is live; Send/Withdraw still mockup */}
-          <Stack spacing={1.25} sx={{ mt: 3, maxWidth: 360, mx: "auto" }}>
+          {/* actions — Deposit (shield) is live; Send/Withdraw still mockup.
+              pb clears the always-visible fixed action bar below. */}
+          <Stack spacing={1.25} sx={{ mt: 3, pb: "88px", maxWidth: 360, mx: "auto" }}>
             {depositOpen ? (
               /* Deposit = pick a source coin (here: your public balance) → amount in {symbol} */
               <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: "2px", p: 1.5, textAlign: "left" }}>
@@ -1944,8 +1954,13 @@ export default function PrivateView({
                 <Box sx={{ display: "flex", justifyContent: "center", mb: 1.5 }}>
                   <QrCode value={zk} size={196} />
                 </Box>
-                <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.55, lineHeight: 1.6, mb: 1.25 }}>
+                <Typography variant="body2" sx={{ fontSize: "0.62rem", opacity: 0.55, lineHeight: 1.6, mb: 0.5 }}>
                   Share your 0zk to receive a private transfer.
+                </Typography>
+                {/* The 0zk address is the same on every Railgun-wired chain, so it can
+                    receive on any of them (no cursor dependency — list them all). */}
+                <Typography sx={{ fontSize: "0.6rem", opacity: 0.5, letterSpacing: "0.02em", lineHeight: 1.5, mb: 1.25 }}>
+                  Receives {[nativeAsset().symbol, ...activeTokens().map((t) => t.symbol)].join(" · ")}<br />on {formatList(railgunNetworkNames())}
                 </Typography>
                 <Box
                   onClick={copyZk}
@@ -1980,50 +1995,50 @@ export default function PrivateView({
             )}
           </Stack>
 
-          {/* Fixed bottom action bar (shadow world). Hidden while a form is open
-              so the form has full room — mirrors the public side's sub-views. */}
-          {!(depositOpen || sendOpen || unshieldOpen) && (
-            <Box
-              sx={{
-                position: "fixed",
-                bottom: 0,
-                left: 0,
-                right: 0,
-                zIndex: 1100,
-                bgcolor: "background.default",
-                borderTop: "1px solid",
-                borderColor: "divider",
-                pb: "env(safe-area-inset-bottom)",
-              }}
-            >
-              <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
-                {[
-                  { key: "shield", glyph: "☗", label: "Shield", onClick: openDeposit },
-                  { key: "transfer", glyph: "⇄", label: "Transfer", onClick: openSend },
-                  { key: "unshield", glyph: "☖", label: "Unshield", onClick: openUnshield },
-                ].map((slot) => (
-                  <Button
-                    key={slot.key}
-                    onClick={slot.onClick}
-                    sx={{
-                      flex: 1,
-                      minWidth: 0,
-                      flexDirection: "column",
-                      gap: 0.25,
-                      py: 1.25,
-                      borderRadius: 0,
-                      color: "text.primary",
-                    }}
-                  >
-                    <Box component="span" sx={{ fontSize: "1.2rem", lineHeight: 1 }}>{slot.glyph}</Box>
-                    <Typography sx={{ fontSize: "0.6rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                      {slot.label}
-                    </Typography>
-                  </Button>
-                ))}
-              </Stack>
-            </Box>
-          )}
+          {/* Fixed bottom action bar (shadow world). Always visible: the open form
+              highlights its slot, and tapping the active slot closes it. The forms'
+              own cancel/back buttons still work too. */}
+          <Box
+            sx={{
+              position: "fixed",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              zIndex: 1100,
+              bgcolor: "background.default",
+              borderTop: "1px solid",
+              borderColor: "divider",
+              pb: "env(safe-area-inset-bottom)",
+            }}
+          >
+            <Stack direction="row" sx={{ width: "100%", maxWidth: 460, mx: "auto" }}>
+              {[
+                { key: "shield", glyph: "☗", label: "Shield", open: depositOpen, onOpen: openDeposit },
+                { key: "transfer", glyph: "⇄", label: "Transfer", open: sendOpen, onOpen: openSend },
+                { key: "unshield", glyph: "☖", label: "Unshield", open: unshieldOpen, onOpen: openUnshield },
+              ].map((slot) => (
+                <Button
+                  key={slot.key}
+                  onClick={slot.open ? closeForms : slot.onOpen}
+                  sx={{
+                    flex: 1,
+                    minWidth: 0,
+                    flexDirection: "column",
+                    gap: 0.25,
+                    py: 1.25,
+                    borderRadius: 0,
+                    color: slot.open ? "primary.main" : "text.primary",
+                    bgcolor: slot.open ? "action.selected" : "transparent",
+                  }}
+                >
+                  <Box component="span" sx={{ fontSize: "1.2rem", lineHeight: 1 }}>{slot.glyph}</Box>
+                  <Typography sx={{ fontSize: "0.6rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                    {slot.label}
+                  </Typography>
+                </Button>
+              ))}
+            </Stack>
+          </Box>
         </>
       )}
 

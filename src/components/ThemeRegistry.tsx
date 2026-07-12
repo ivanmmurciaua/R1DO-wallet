@@ -31,19 +31,23 @@ const ViewContext = createContext<ViewContextType>({
 // Keep the hook name so existing consumers don't break.
 export const useThemeMode = () => useContext(ViewContext);
 
-const VEIL_BG: Record<WalletView, string> = {
-  public: "#F4F0E6",
-  private: "#0C0D0F",
-};
+// Veil colours by EFFECTIVE theme (not world): exiting into a dark public account
+// must ink-dim to dark, never flash light.
+const VEIL_DARK = "#0C0D0F";
+const VEIL_LIGHT = "#F4F0E6";
 
 const THEME_KEY = "LOCAL_THEME_MODE";
 
 export function ThemeRegistry({ children }: { children: React.ReactNode }) {
   const [view, setView] = useState<WalletView>("public");
-  // Illumination is its own axis now. Each world sets a DEFAULT on entry
-  // (public → light, private → dark, so crossing into Railgun still "dims"),
-  // but the light/dark button overrides it freely — you can be private-in-light.
+  // Your SAVED illumination preference — the public world's look, persisted. It's
+  // never overwritten by entering/leaving private (see privateOverride), so a dark
+  // lover stays dark across worlds; the private "dims to dark" is a display default.
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
+  // Private-scoped override: null → the world default (dark) shows; set by tapping
+  // illumination while private. Never persisted, and cleared on every world cross,
+  // so entering the pool always defaults to dark WITHOUT touching your public pref.
+  const [privateOverride, setPrivateOverride] = useState<ThemeMode | null>(null);
   const [veil, setVeil] = useState(false);
   const firstRender = useRef(true);
 
@@ -81,20 +85,28 @@ export function ThemeRegistry({ children }: { children: React.ReactNode }) {
     return () => clearTimeout(t);
   }, [view]);
 
-  // Entering a world applies its default illumination; leaving it restores light.
+  const isPrivate = view === "private";
+  // Effective illumination: public follows your saved preference; private defaults
+  // to dark (the "descent" effect) unless you overrode it this visit.
+  const isDark = isPrivate ? (privateOverride ?? "dark") === "dark" : themeMode === "dark";
+
+  // Crossing a world boundary just clears the private override — it never writes
+  // your public preference, so a dark lover stays dark on the way out.
   const enterPrivate = () => {
+    setPrivateOverride(null);
     setView("private");
-    applyTheme("dark");
   };
   const exitPublic = () => {
+    setPrivateOverride(null);
     setView("public");
-    applyTheme("light");
   };
   const toggleView = () => (view === "private" ? exitPublic() : enterPrivate());
-  const toggleTheme = () => applyTheme(themeMode === "dark" ? "light" : "dark");
+  // In private the toggle is a scoped override; in public it sets your saved pref.
+  const toggleTheme = () =>
+    isPrivate
+      ? setPrivateOverride(isDark ? "light" : "dark")
+      : applyTheme(themeMode === "dark" ? "light" : "dark");
 
-  const isPrivate = view === "private";
-  const isDark = themeMode === "dark";
   const theme = isDark ? privateTheme : publicTheme;
 
   return (
@@ -114,7 +126,7 @@ export function ThemeRegistry({ children }: { children: React.ReactNode }) {
             inset: 0,
             zIndex: 2000,
             pointerEvents: "none",
-            backgroundColor: VEIL_BG[view],
+            backgroundColor: isDark ? VEIL_DARK : VEIL_LIGHT,
             opacity: 0,
             animation: veil ? "r1doVeil 520ms ease" : "none",
           }}

@@ -219,6 +219,18 @@ export function poolSupported(): boolean {
   return RAILGUN_SUPPORTED_IDS.includes(activeNetwork().id);
 }
 
+/** Every network the wallet supports (display names). The public Safe address is
+    the same on all of them, so a public payment can land on any — no cursor needed. */
+export function allNetworkNames(): string[] {
+  return NETWORKS.map((n) => n.chain.name);
+}
+
+/** Networks where the shielded pool (0zk) lives. The 0zk address is the same on
+    each, so a private transfer can be received on any Railgun-wired chain. */
+export function railgunNetworkNames(): string[] {
+  return NETWORKS.filter((n) => RAILGUN_SUPPORTED_IDS.includes(n.id)).map((n) => n.chain.name);
+}
+
 /** The network that hosts the ONE global directory. All pay-by-name reads/writes
     are pinned here regardless of the active chain — SafeL2-everywhere guarantees the
     user's Safe address is identical on this chain, so writing here is coherent. */
