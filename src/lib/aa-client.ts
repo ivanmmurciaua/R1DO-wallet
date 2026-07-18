@@ -58,6 +58,26 @@ import {
 import { activeNetwork, type Network } from "./networks";
 import { bundlerUrlFor } from "@/app/constants";
 
+/** A keyless "paymaster service" pointing at OUR OWN paymaster contract. Unlike the
+ *  Pimlico client (which RPCs its service for a signed sponsorship), this just hands
+ *  viem a STATIC address + empty data: our R1DOPaymaster sponsors unconditionally, so
+ *  no signature is needed. That is the whole point — no off-chain signer sees the op.
+ *  The gas limits are generous fixed values (our validate reads one immutable and
+ *  returns; postOp is empty), used as-is since there is no service to estimate them.
+ *  Same object for stub (estimation) and final (send). */
+function ownPaymasterActions(address: Address) {
+  const fields = {
+    paymaster: address,
+    paymasterData: "0x" as Hex,
+    paymasterVerificationGasLimit: 100_000n,
+    paymasterPostOpGasLimit: 40_000n,
+  };
+  return {
+    getPaymasterStubData: async () => fields,
+    getPaymasterData: async () => fields,
+  };
+}
+
 /** The Safe singleton for a network — L1 (`Safe`) vs L2 (`SafeL2`), chosen
     STATICALLY from networks.ts. It enters the CREATE2 initcode, so this choice is
     address-critical: never detect it at runtime. See aa-config.ts (the footgun).
@@ -181,11 +201,19 @@ export async function buildSafeClient(
     transport: http(bundlerUrl),
     entryPoint: { address: ENTRYPOINT_ADDRESS, version: ENTRYPOINT_VERSION },
   });
+  // Sponsor via OUR paymaster when this chain declares one (deltaPaymaster) — so Δ
+  // sends carry an address only we use and the scanner's getLogs filter stays clean;
+  // otherwise fall back to Pimlico's sponsoring service (the pre-own-paymaster path).
+  // The bundler is Pimlico either way; only the paymaster differs. Gas price still
+  // comes from Pimlico's estimator (independent of who sponsors).
+  const paymaster = net.deltaPaymaster
+    ? ownPaymasterActions(net.deltaPaymaster)
+    : pimlicoClient;
   return createSmartAccountClient({
     account,
     chain: net.chain as Chain,
     bundlerTransport: http(bundlerUrl),
-    paymaster: pimlicoClient,
+    paymaster,
     userOperation: {
       estimateFeesPerGas: async () =>
         (await pimlicoClient.getUserOperationGasPrice()).fast,

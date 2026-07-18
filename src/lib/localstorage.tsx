@@ -323,6 +323,49 @@ export const addStealthUTXO = (username: string, utxo: StealthUTXO): void => {
   writeCursor(username, { block: cur.block, count: next.length });
 };
 
+// Merge a window's worth of SCANNED UTXOs, deduped, WITHOUT moving the cursor's
+// block — the calendar deep-scan's persistence seam.
+//
+// The deep-scan sweeps a range BELOW the cursor, so it must never touch `block`:
+// that field means "scanned forward up to here" and nothing else. Letting a
+// backfill write it would drag the resume point backwards and re-scan (or worse,
+// skip) live payments. So the cursor keeps its exact meaning, and the deep-scan
+// contributes only UTXOs.
+//
+// Unlike addStealthUTXO this does NOT mark `localOnly`: these ARE backed by an
+// on-chain blob (that is how the scanner found them), so purge may treat them as
+// re-discoverable, exactly like the ones the forward scan stores.
+//
+// Durable (awaits the idb commit) so leaving mid-deep-scan still keeps whatever
+// it already found. The deep-scan's own progress is in-memory and dies with the
+// page — the money it turned up does not.
+// Returns how many were actually NEW, so a caller can report "found 3" and mean
+// it rather than counting re-reads of UTXOs it already had.
+export const mergeStealthUTXOsDurable = async (
+  username: string,
+  utxos: StealthUTXO[],
+): Promise<number> => {
+  if (utxos.length === 0) return 0;
+  const existing = readUtxos(username);
+  const seen = new Set(existing.map((u) => u.stealthAddress.toLowerCase()));
+  const fresh = utxos.filter((u) => {
+    const a = u.stealthAddress.toLowerCase();
+    if (seen.has(a)) return false; // dedups against tombstones too — a spent UTXO
+    seen.add(a); //                   re-found by a backfill must NOT resurrect
+    return true;
+  });
+  if (fresh.length === 0) return 0;
+
+  const next = [...existing, ...fresh];
+  const k = ukey(username);
+  utxoCache.set(k, next);
+  hookFlush();
+  await utxoDB().setItem(k, next);
+  const cur = readCursor(username);
+  writeCursor(username, { block: cur.block, count: next.length });
+  return fresh.length;
+};
+
 // Patches fields of one stored UTXO (matched by address) WITHOUT changing the
 // set's length — so the scan cursor's count stays valid. Used to flip `hidden`
 // (never delete: the local note is the only way to spend a Courier payment) and

@@ -304,14 +304,56 @@ export async function checkPQPayment(
 // per-network time-based lookback rather than reuse this raw count as-is.
 export const STEALTH_SCAN_DEFAULT_BLOCKS = 21600n;
 
-// How many candidate txs to fetch concurrently
-const TX_FETCH_BATCH = 20;
-// Throttle the scan so the per-window getTransaction fan-out doesn't flood a
-// public RPC into rate-limiting. A short pause between waves (and windows) spaces
-// the requests out; the scan is checkpointed/resumable so a little slower is fine.
-const WAVE_DELAY_MS = 90;
+// viem coalesces same-tick requests to the SAME url into one POST per this many.
+// The scheduler is global and keyed by url (viem's createBatchScheduler), so it
+// still batches even though a client is built per rotation below.
+const RPC_BATCH_SIZE = 17;
+// One slice = one tick = exactly ONE POST. Keeping these equal is what lets the
+// pacer below count POSTs instead of guessing at them.
+const TX_SLICE_PER_RPC = RPC_BATCH_SIZE;
+// Sustained POSTs per second, PER rpc, for the fan-out.
+//
+// This brake used to exist by accident: a 10k window held ~190 candidates, and
+// WINDOW_DELAY_MS paused between windows, so the request rate was a side effect of
+// the window size. Widening the window to 200k removed the brake without replacing
+// it — 4900 candidates went out back to back and the public nodes answered with a
+// wall of 429s (tenderly) and 500s (pocket). So: the brake is explicit now, and it
+// is per NODE and independent of the window, because those are different concerns.
+//
+// 2/s is close to what the old serial-wave code aimed at its single primary (~12
+// POSTs across a ~6.6s window) and was never rate-limited for, so it is a rate this
+// fleet is known to tolerate rather than one that seemed fine in a benchmark. Node
+// CANNOT measure the real ceiling here — no CORS, no Origin, no preflight, and it
+// has already reported "0 errors" for a fleet that was half on fire in the browser.
+// Raise it only against numbers taken from the app's own console.
+const FANOUT_POSTS_PER_SEC = 2;
 const WINDOW_DELAY_MS = 200;
+// Backoff between retries of a single failed candidate. Linear, so five attempts
+// span ~6s — a 429 wants seconds, not the ~100ms that a transport hiccup wants.
+const RETRY_DELAY_MS = 400;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Per-url pacer for the fan-out. Hands out monotonically spaced departure slots, so
+// however many shards, windows or concurrent scans are in flight, two POSTs to the
+// same node can never leave closer than 1/FANOUT_POSTS_PER_SEC apart. Module-level
+// on purpose: overlapping scans (login + a manual refresh) share one node's budget
+// rather than each helping themselves to a full one.
+const pacers = new Map<string, () => Promise<void>>();
+const pacer = (url: string) => {
+  let p = pacers.get(url);
+  if (!p) {
+    let next = 0;
+    const gap = 1000 / FANOUT_POSTS_PER_SEC;
+    p = async () => {
+      const now = Date.now();
+      const at = Math.max(now, next);
+      next = at + gap;
+      if (at > now) await sleep(at - now);
+    };
+    pacers.set(url, p);
+  }
+  return p;
+};
 
 // Scans for incoming stealth payments without any announcer: uses the
 // EntryPoint's UserOperationEvent as a free index (every 4337 tx emits it,
@@ -330,76 +372,139 @@ export async function scanStealthPayments(
   // cursor here; the scan AWAITS it before the next window, so the cursor can
   // never outrun the persisted UTXOs (resumable, no UTXO ever skipped).
   onWindow?: (windowUtxos: StealthUTXO[], windowEnd: bigint) => Promise<void>,
-  // Called with (windowsDone, totalWindows) at the start (0/total) and after each
-  // window, so the UI can draw a determinate progress bar. Total is known upfront
-  // from the block range ÷ CHUNK.
+  // Called with (blocksCovered, totalBlocks) at the start (0/total) and after each
+  // window, so the UI can draw a determinate bar. Block-based (not window count)
+  // because windows are variable-width now (each RPC serves its own range).
   onProgress?: (done: number, total: number) => void,
+  // Optional CEILING for the scan (default: the chain tip). Only the calendar
+  // deep-scan passes it — a bounded window anywhere in the past, so a user who
+  // was paid a month ago doesn't have to sweep the whole month to find it. Last
+  // param on purpose: the forward scan always runs to the tip and must stay
+  // untouched. Treated as a ceiling only, never a floor — a value past the tip
+  // clamps back to it rather than scanning blocks that don't exist yet.
+  toBlock?: bigint,
 ): Promise<{ utxos: StealthUTXO[]; latestBlock: bigint }> {
   const { createPublicClient, http, fallback, parseAbiItem } = await import("viem");
-  const { activeChain, scanWindowBlocks, scanPaymasters } = await import("@/lib/networks");
+  const { activeChain, activeLogsRpcs, activeScanRpcUrls, scanPaymasters } =
+    await import("@/lib/networks");
   const { RPC_URLS } = await import("@/app/constants");
 
-  // JSON-RPC batching: the getTransaction fan-out (Promise.all below) fires many
-  // node calls in one tick — coalesce them into a single POST per 17 instead of
-  // N round-trips. Conservative batchSize so picky public RPCs accept it; if one
-  // rejects a batch, the fallback transport rotates to the next.
-  const batchHttp = (u: string) => http(u, { batch: { batchSize: 17, wait: 16 } });
-  // Round-robin the PRIMARY RPC per window. viem's fallback always hits
-  // transport[0] first on every request → without rotation the primary eats ALL
-  // the scan load and chokes while the others idle (it's failover, not load
-  // spreading). Rotating the order per window distributes the fan-out across all
-  // RPCs (~1/N each) while keeping full fallback within each window.
-  const makeClient = (rot: number) => {
-    const r = ((rot % RPC_URLS.length) + RPC_URLS.length) % RPC_URLS.length;
-    const rotated = [...RPC_URLS.slice(r), ...RPC_URLS.slice(0, r)];
+  // JSON-RPC batching: the getTransaction fan-out fires many node calls in one tick
+  // — coalesce them into one POST per RPC_BATCH_SIZE instead of N round-trips.
+  // Conservative size so picky public RPCs accept it; if one rejects a batch, the
+  // fallback transport rotates to the next.
+  const batchHttp = (u: string) => http(u, { batch: { batchSize: RPC_BATCH_SIZE, wait: 16 } });
+  // Round-robin the PRIMARY rpc. viem's fallback always hits transport[0] first on
+  // every request → without rotation the primary eats ALL the fan-out and chokes
+  // while the others idle (it's failover, not load spreading). Rotating the order
+  // hands each shard a different primary while keeping full fallback inside it.
+  // Memoised: a fresh client per candidate churned hundreds of objects per window
+  // (harmless for batching — viem keys its scheduler by url, not by client — but
+  // pure waste).
+  const buildClient = (urls: readonly string[], rot: number) => {
+    const r = ((rot % urls.length) + urls.length) % urls.length;
+    const rotated = [...urls.slice(r), ...urls.slice(0, r)];
     return createPublicClient({ chain: activeChain(), transport: fallback(rotated.map(batchHttp)) });
   };
-  const latestBlock = await makeClient(0).getBlockNumber();
-
-  // Per-network window size (Arbitrum 10k, Sepolia 1k) — fast chains would otherwise
-  // explode into hundreds of windows. All the chain's RPCs are known to serve it.
-  const CHUNK = BigInt(scanWindowBlocks());
-
+  const clientCache = new Map<number, ReturnType<typeof buildClient>>();
+  const makeClient = (rot: number) => {
+    const r = ((rot % RPC_URLS.length) + RPC_URLS.length) % RPC_URLS.length;
+    let c = clientCache.get(r);
+    if (!c) { c = buildClient(RPC_URLS, r); clientCache.set(r, c); }
+    return c;
+  };
   // Paymaster filter (indexed): only OUR sponsored UserOps, not the whole chain's
-  // 4337 traffic → ~22× fewer txs to fetch. Complete by construction (every Δ
-  // payment is a Pimlico-sponsored EntryPoint op). undefined → scan all (Sepolia).
+  // 4337 traffic. Complete by construction (every Δ payment is an EntryPoint op we
+  // sponsor). undefined → no filter, scan all EntryPoint ops (Sepolia).
   const paymasters = scanPaymasters();
-  console.log(
-    `[scanStealthPayments] Scanning blocks ${fromBlock} → ${latestBlock} in ${CHUNK}-block windows` +
-      `${paymasters ? ` (paymaster-filtered ×${paymasters.length})` : ""} (checkpointed)`,
-  );
   const userOpEvent = parseAbiItem(
     "event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)",
   );
 
+  // getLogs endpoints, in order (widest/fastest first), EACH with its own max block
+  // range (window). We rotate by hand instead of viem's fallback() because fallback()
+  // hides which node answered — and the whole point is to ask each node ONLY what it
+  // serves: tenderly a 500k window (a month in ~17s), lava/pocket 50k. A window bigger
+  // than a node's cap fails, sometimes silently ([] with no error → a scan gap), so
+  // never asking past a cap is the safety, not a nicety. One single-transport client
+  // per url (no fallback, no batching — getLogs is one call).
+  const logsRpcs = activeLogsRpcs().map((r) => ({
+    url: r.url,
+    window: BigInt(r.window),
+    client: createPublicClient({ chain: activeChain(), transport: http(r.url) }),
+  }));
+  // tip: one call; a fallback across the same nodes is fine (no window concern here).
+  const tipClient = createPublicClient({
+    chain: activeChain(),
+    transport: fallback(logsRpcs.map((r) => http(r.url))),
+  });
+  const tip = await tipClient.getBlockNumber();
+  const latestBlock = toBlock !== undefined && toBlock < tip ? toBlock : tip;
+
+  // Adaptive getLogs for the range starting at `from`: try each node at ITS window;
+  // the first that answers sets how far this window reached (returned as `to`). If
+  // ALL fail, THROW — the caller aborts before the cursor advances (resumable, no
+  // silent gap). A node that throws for a transient reason just cedes this window to
+  // the next (smaller-range) node; the next loop retries the wide node.
+  const getLogsAdaptive = async (from: bigint) => {
+    let lastErr: unknown;
+    for (const rpc of logsRpcs) {
+      const to = from + rpc.window - 1n < latestBlock ? from + rpc.window - 1n : latestBlock;
+      try {
+        const logs = await rpc.client.getLogs({
+          address: ENTRYPOINT_ADDRESS,
+          event: userOpEvent,
+          ...(paymasters ? { args: { paymaster: [...paymasters] } } : {}),
+          fromBlock: from,
+          toBlock: to,
+        });
+        return { logs, to };
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw new Error(
+      `getLogs failed on all ${logsRpcs.length} logs RPCs at block ${from}: ${(lastErr as Error)?.message ?? lastErr}`,
+    );
+  };
+
+  // Which rpcs the fan-out aims at first, as rotations into RPC_URLS. One shard each,
+  // so the shard count is the number of HEALTHY nodes — sharding across the dead ones
+  // too just routes their share onto the living via fallback, at the price of a failed
+  // round trip each. Empty (a network with no curated list) → aim at all of them.
+  const fanoutRots = activeScanRpcUrls()
+    .map((u) => RPC_URLS.indexOf(u))
+    .filter((i) => i >= 0);
+  const primaries = fanoutRots.length > 0 ? fanoutRots : RPC_URLS.map((_, i) => i);
+
+  console.log(
+    `[scanStealthPayments] Scanning blocks ${fromBlock} → ${latestBlock} in per-RPC windows` +
+      `${paymasters ? ` (paymaster-filtered ×${paymasters.length})` : ""} (checkpointed)`,
+  );
+
   const allUtxos: StealthUTXO[] = [];
   let windowCount = 0;
-  // Total windows in this scan, known upfront → determinate progress bar.
-  const totalWindows = fromBlock > latestBlock ? 0 : Number((latestBlock - fromBlock) / CHUNK) + 1;
-  onProgress?.(0, totalWindows);
+  // Determinate progress by BLOCKS, not window count: windows are variable-width now
+  // (each node serves its own range), so blocks-covered / total-blocks is the honest
+  // fraction. The bar renders done/total as a ratio (showCount=false), so this drives
+  // it unchanged.
+  const totalBlocks = latestBlock >= fromBlock ? Number(latestBlock - fromBlock + 1n) : 0;
+  onProgress?.(0, totalBlocks);
 
-  // Window by window (one 1000-block chunk each): getLogs → getTransaction fan-out
-  // → trial-decrypt → tag assets → hand the window's UTXOs to onWindow (which
-  // persists them + advances the cursor) BEFORE moving on. Small bursts per window
-  // (instead of one giant fan-out over the whole range) keep any RPC happy, and the
-  // per-window cursor makes a 20+ day backlog resumable: if it stops mid-way it
-  // resumes from the last persisted window, never re-scanning what's already in idb.
-  for (let from = fromBlock; from <= latestBlock; from += CHUNK) {
-    const to = from + CHUNK - 1n < latestBlock ? from + CHUNK - 1n : latestBlock;
+  // Window by window: getLogsAdaptive picks a node + a range it can serve → returns
+  // the logs AND how far it reached (`to`) → getTransaction fan-out → trial-decrypt →
+  // tag assets → hand the window's UTXOs to onWindow (which persists them + advances
+  // the cursor) BEFORE moving on. The window WIDTH is variable now (whatever node
+  // served it), so `to` drives the advance. The per-window cursor keeps a long backlog
+  // resumable: if it stops mid-way it resumes from the last persisted window, never
+  // re-scanning what's already in idb.
+  for (let from = fromBlock; from <= latestBlock; ) {
+    const { logs, to } = await getLogsAdaptive(from);
     windowCount++;
 
-    // Rotate the primary RPC for this window → spread the load across all nodes.
+    // Rotated client for this window's non-getLogs work (asset tagging below).
     const client = makeClient(windowCount);
 
-    const logs = await client.getLogs({
-      address: ENTRYPOINT_ADDRESS,
-      event: userOpEvent,
-      // OUR sponsored ops only (indexed paymaster OR-filter) → ~22× fewer tx fetches.
-      // Omitted where the chain has no confirmed paymaster (scans all — Sepolia).
-      ...(paymasters ? { args: { paymaster: [...paymasters] } } : {}),
-      fromBlock: from,
-      toBlock: to,
-    });
     const txBlocks = new Map<`0x${string}`, bigint>();
     for (const log of logs) {
       if (log.transactionHash) txBlocks.set(log.transactionHash, log.blockNumber ?? 0n);
@@ -407,42 +512,66 @@ export async function scanStealthPayments(
 
     const windowUtxos: StealthUTXO[] = [];
     const txEntries = Array.from(txBlocks.entries());
-    for (let i = 0; i < txEntries.length; i += TX_FETCH_BATCH) {
-      if (i > 0) await sleep(WAVE_DELAY_MS); // space the waves so the RPC doesn't choke
-      const slice = txEntries.slice(i, i + TX_FETCH_BATCH);
-      const results = await Promise.all(
-        slice.map(async ([hash, blockNumber]) => {
-          // Retry across ROTATED RPCs with linear backoff. A tx we can't fetch must
-          // NEVER be silently skipped — it could carry a stealth payment. If it still
-          // fails after retries, THROW: that aborts the window BEFORE the cursor
-          // advances (onWindow), so a later scan re-covers this range (resumable)
-          // instead of losing funds. Transient 429s recover within the retries.
-          let lastErr: unknown;
-          for (let attempt = 0; attempt < 5; attempt++) {
-            try {
-              const tx = await makeClient(windowCount + attempt).getTransaction({ hash });
-              return { input: tx.input as `0x${string}`, blockNumber };
-            } catch (e) {
-              lastErr = e;
-              await sleep(WAVE_DELAY_MS * (attempt + 1));
-            }
+
+    // Fetch ONE candidate, retrying across ROTATED rpcs with linear backoff. A tx we
+    // can't fetch must NEVER be silently skipped — it could carry a stealth payment.
+    // If it still fails after retries, THROW: that aborts the window BEFORE the cursor
+    // advances (onWindow), so a later scan re-covers this range (resumable) instead of
+    // losing funds. Transient 429s recover within the retries.
+    const fetchCandidate = async (hash: `0x${string}`, blockNumber: bigint, rot: number) => {
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const tx = await makeClient(rot + attempt).getTransaction({ hash });
+          return { input: tx.input as `0x${string}`, blockNumber };
+        } catch (e) {
+          lastErr = e;
+          await sleep(RETRY_DELAY_MS * (attempt + 1));
+        }
+      }
+      throw new Error(`getTransaction ${hash} failed after retries: ${(lastErr as Error)?.message ?? lastErr}`);
+    };
+
+    // Shard the window's candidates across the healthy primaries and fetch the shards
+    // CONCURRENTLY, each paced to FANOUT_POSTS_PER_SEC. The old code sent a whole
+    // window to ONE primary in serial waves while the others idled: same work, N× the
+    // wall clock. Sharding buys that N× — but only if every shard has a live node to
+    // land on, and only if something still caps the rate each node sees, which is why
+    // the pacer exists.
+    const shards: [`0x${string}`, bigint][][] = primaries.map(() => []);
+    txEntries.forEach((entry, i) => shards[i % shards.length].push(entry));
+
+    const results = (
+      await Promise.all(
+        shards.map(async (shard, s) => {
+          const rot = primaries[s];
+          const waitTurn = pacer(RPC_URLS[rot]);
+          const out: { input: `0x${string}`; blockNumber: bigint }[] = [];
+          for (let i = 0; i < shard.length; i += TX_SLICE_PER_RPC) {
+            await waitTurn();
+            // A slice goes out in ONE tick so viem's batcher coalesces it into a
+            // single POST. Feeding it one request at a time would defeat batching:
+            // each would wait out its 16ms window alone and go as its own request.
+            const slice = shard.slice(i, i + TX_SLICE_PER_RPC);
+            out.push(...(await Promise.all(slice.map(([hash, b]) => fetchCandidate(hash, b, rot)))));
           }
-          throw new Error(`getTransaction ${hash} failed after retries: ${(lastErr as Error)?.message ?? lastErr}`);
+          return out;
         }),
-      );
-      for (const result of results) {
-        const blobs = extractStealthBlobs(result.input);
-        for (const blob of blobs) {
-          const match = await checkPQPayment(spendingPrivateKey, viewingPrivateKey, mlkemDecapsKey, blob);
-          if (match) {
-            console.log(`[scanStealthPayments] ✓ UTXO detected: ${match} (block ${result.blockNumber})`);
-            windowUtxos.push({
-              stealthAddress:  match,
-              ephemeralPubkey: blob.ephemeralPubkey,
-              kemCiphertext:   blob.kemCiphertext,
-              blockNumber:     Number(result.blockNumber),
-            });
-          }
+      )
+    ).flat();
+
+    for (const result of results) {
+      const blobs = extractStealthBlobs(result.input);
+      for (const blob of blobs) {
+        const match = await checkPQPayment(spendingPrivateKey, viewingPrivateKey, mlkemDecapsKey, blob);
+        if (match) {
+          console.log(`[scanStealthPayments] ✓ UTXO detected: ${match} (block ${result.blockNumber})`);
+          windowUtxos.push({
+            stealthAddress:  match,
+            ephemeralPubkey: blob.ephemeralPubkey,
+            kemCiphertext:   blob.kemCiphertext,
+            blockNumber:     Number(result.blockNumber),
+          });
         }
       }
     }
@@ -473,9 +602,10 @@ export async function scanStealthPayments(
     // Persist this window + advance the cursor BEFORE the next window. AWAITED so
     // the cursor never moves past UTXOs not yet in idb (resumable, nothing skipped).
     if (onWindow) await onWindow(windowUtxos, to);
-    onProgress?.(windowCount, totalWindows);
+    onProgress?.(Number(to - fromBlock + 1n), totalBlocks);
 
     if (to < latestBlock) await sleep(WINDOW_DELAY_MS); // breathe between windows
+    from = to + 1n; // advance by what the serving node actually covered
   }
 
   console.log(`[scanStealthPayments] Done — ${allUtxos.length} UTXOs over ${windowCount} windows`);

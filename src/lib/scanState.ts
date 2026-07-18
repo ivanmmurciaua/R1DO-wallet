@@ -29,6 +29,13 @@ export const setScanProgress = (done: number, total: number): void => {
   emit();
 };
 
+/** Imperative "is a scan running?" — for GUARDS, outside React (the hook below is
+    for rendering). The calendar deep-scan refuses to start while any scan is in
+    flight: two scans would fight over setScanProgress and double the RPC fan-out
+    the throttling is calibrated for. Disabling the button is the UI half of that;
+    this is the half that survives a double-click. */
+export const isScanning = (): boolean => active > 0;
+
 export const useScanning = (): boolean =>
   useSyncExternalStore(
     subscribe,

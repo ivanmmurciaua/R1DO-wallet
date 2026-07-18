@@ -21,12 +21,56 @@ import { sepolia, arbitrum } from "viem/chains";
 
 export type NetworkId = "sepolia" | "arbitrum";
 
+/** A getLogs endpoint paired with the max block range it reliably serves in the
+    browser. See the `logsRpcUrls` field for why the window is per-RPC. */
+export type LogsRpc = { url: string; window: number };
+
 export type Network = {
   id: NetworkId;
   /** viem chain object — source of truth for chainId, display name, explorers. */
   chain: Chain;
   /** RPC failover list, tried in order (PublicNode first — handles big scans). */
   rpcUrls: readonly string[];
+  /** RPC subset the scanner uses for getLogs, tried IN ORDER (fastest/widest first),
+      each paired with the max block range it reliably serves IN THE BROWSER (its
+      `window`). Separate from `rpcUrls` because the two jobs want opposite things:
+      the getTransaction fan-out is real load, sharded across every node; getLogs is
+      one request per window, so order (not rotation) is what matters.
+
+      Why a PER-RPC window (not one global size): each provider caps getLogs at a
+      different range, and a window bigger than a node's cap fails — sometimes loudly
+      (pocket 500s at 500k, PROVEN in-browser), sometimes SILENTLY ([] with no error,
+      which pocket does on Sepolia) → a silent scan gap. So the scanner asks each node
+      only what it serves: tenderly does 500k in one shot (a month in ~17s), and when
+      it is down it falls to lava/pocket at 50k (slower but safe). No node is ever
+      asked past its cap, so neither a 500 nor a silent truncation can happen.
+
+        rpc        50k      200k        1M       browser cap (real)
+        lava      1307ms   91146ms   14311ms     < 500k (didn't serve it)
+        pocket    1284ms   13866ms      CAP      < 500k (500'd at 500k)
+        sentio     CAP       CAP       CAP       < 50k → excluded, fan-out only
+        tenderly   722ms    1521ms    8197ms     ≥ 500k (served a month fine)
+
+      (The ms are Node/isolated — good for RELATIVE range capability, NOT for health;
+      the browser caps on the right are what the scanner actually trusts.) Omit to
+      fall back to `rpcUrls` at the default window. Every url must also be in `rpcUrls`
+      so the CSP connect-src already covers it. */
+  logsRpcUrls?: readonly LogsRpc[];
+  /** RPCs the scanner's getTransaction fan-out aims at FIRST, one shard each.
+      Subset of `rpcUrls`; fallback still covers the whole fleet, so this only
+      decides who is asked first, never who can answer.
+
+      Exists because sharding across every url was WORSE than not sharding: a dead
+      node's shard fails, viem's fallback rotates it onto a live node anyway, and the
+      live ones end up eating the dead ones' load PLUS a wasted round trip each. The
+      shard count has to be the number of HEALTHY nodes, not the number of nodes.
+
+      Health here means health IN A BROWSER, which is the only place that counts and
+      the one place a Node bench can't see (no CORS, no Origin, no preflight — it has
+      already lied about this fleet twice). Observed in the app's console under a real
+      scan: pocket 500s almost everything, tenderly serves but rate-limits, lava 500s
+      occasionally, sentio was the only one that never erred. Omit to use `rpcUrls`. */
+  scanRpcUrls?: readonly string[];
   /** URL-path slug used by infra providers (Pimlico bundler/paymaster). */
   bundlerSlug: string;
   /** Which Safe singleton this chain uses: `Safe` (L1) vs `SafeL2` (L2). STATIC,
@@ -50,10 +94,15 @@ export type Network = {
   gasFloor?: boolean;
   /** getLogs window (blocks) for the stealth scanner. Fast chains mint blocks so
       quickly that a fixed 1000-block window explodes into hundreds of windows
-      (Arbitrum ~0.25s/block → 336 windows). Sized to the LARGEST range ALL of this
-      chain's RPCs serve cleanly (probed): Arbitrum = 10000 (all 5 RPCs return
-      identical full results → 10× fewer windows). Defaults to 1000 (Sepolia's
-      benched size) when omitted. */
+      (Arbitrum ~0.25s/block → 336 windows). Sized to the largest range every node
+      in `logsRpcUrls` serves cleanly (probed) — NOT every node in `rpcUrls`, which
+      is what held this at 10000 while sentio (the only one that caps under 50k) was
+      still in the getLogs path. Defaults to 1000 (Sepolia's benched size).
+
+      Also the scan's CHECKPOINT granularity: the cursor advances once per window,
+      so an interrupted scan re-does at most one. That bounds it by WALL CLOCK, not
+      by blocks — measured, a 200k window costs ~12.7s, about what a 10k window cost
+      before the fan-out was sharded (~9.8s). Same work at risk, 20× the coverage. */
   scanWindowBlocks?: number;
   /** Known paymaster address(es) sponsoring THIS chain's Δ stealth payments. When
       set, the scanner filters getLogs by them (indexed field) → it only fetches OUR
@@ -65,6 +114,18 @@ export type Network = {
       disable (scan all EntryPoint ops) until the chain's paymaster is CONFIRMED
       on-chain — a wrong address would silently hide funds. */
   scanPaymasters?: readonly `0x${string}`[];
+  /** OUR OWN paymaster (R1DOPaymaster) that sponsors THIS chain's Δ stealth sends,
+      when set. This is the lever that makes the scan cheap: with it, buildSafeClient
+      routes ops through our paymaster instead of Pimlico's SHARED one, so every Δ
+      payment's UserOperationEvent carries an address that belongs ONLY to us. The
+      scanner then filters getLogs by it (via scanPaymasters, which MUST also list
+      it) and every hit is already a Δ payment — the fan-out of downloading the whole
+      chain's 4337 traffic just to trial-decrypt it disappears. OMIT to keep
+      sponsoring via Pimlico (the pre-own-paymaster behaviour). Per-chain by nature:
+      a fresh deploy per network (Sepolia's ≠ Arbitrum's), unlike the cross-chain
+      pinned set in aa-config.ts — which is why it lives here, not there. Contained
+      blast radius: only chains that set this route through the own paymaster. */
+  deltaPaymaster?: `0x${string}`;
   /** R1DODirectory (pay-by-name) contract, PINNED in code (not env). There is ONE
       global directory for the whole app, hosted on the canonical directory network
       (DIRECTORY_NETWORK_ID) — NOT one per chain. So this is set ONLY on that one
@@ -104,10 +165,15 @@ export const NETWORKS: readonly Network[] = [
     safeSingleton: "l2",
     // Sepolia gas is testnet-inflated and unrepresentative → no gas floor here.
     gasFloor: false,
-    // Same Pimlico v0.7 singleton paymaster as Arbitrum (confirmed on-chain: deployed
-    // + actively sponsoring on Sepolia). ~3.6× fewer tx fetches here (lower total
-    // traffic than Arbitrum). scanWindowBlocks omitted → default 1000.
-    scanPaymasters: ["0x777777777777AeC03fd955926DbF81597e66834C"],
+    // Δ scanning fix (2026-07-18): route Δ sends through OUR OWN paymaster
+    // (R1DOPaymaster, inheriting the audited eth-infinitism BasePaymaster v0.7.0,
+    // deployed on Sepolia) instead of Pimlico's shared one, so the scanner filters
+    // getLogs by an address that is ONLY ours → every hit is already a Δ payment, no
+    // fan-out. Sepolia was reset for the migration, so there is no pre-cutover history
+    // to keep: the filter is our paymaster alone. (A first permissive build lived at
+    // 0x89f7B1…9f7A; superseded by this audited-base one.)
+    deltaPaymaster: "0xf3741d1732c0d55d6E6f527654bc2cdcF3eC3236",
+    scanPaymasters: ["0xf3741d1732c0d55d6E6f527654bc2cdcF3eC3236"],
     // No directory here — the single global directory lives on Arbitrum
     // (DIRECTORY_NETWORK_ID). The old Sepolia directory (0x72587C42…) is abandoned.
   },
@@ -134,21 +200,75 @@ export const NETWORKS: readonly Network[] = [
     // `Access-Control-Allow-Origin: *,*` (duplicated) → the browser rejects EVERY
     // request to it, so it was pure dead weight that failed each getTransaction and
     // flooded the console. Re-add only if it fixes its CORS header.
+    // tenderly history: commented out 2026-07-16 because, promoted to getLogs primary
+    // AND a fan-out shard, it answered with a wall of 429s under the sustained volume
+    // the fan-out generated. RESTORED 2026-07-18: the own paymaster (deltaPaymaster)
+    // removed the fan-out entirely — a month is now ~11 wide getLogs, not thousands of
+    // tx fetches — so the sustained-volume trigger is gone. It is the only node that
+    // serves a WIDE getLogs fast (464ms at 10k, 1.5s at 200k vs lava's 67s/91s), which
+    // is exactly the deep-scan bottleneck now. So: FIRST in logsRpcUrls (the single-
+    // request path where it shines), LAST in rpcUrls, and still NOT a scanRpcUrls shard
+    // primary (the one place its rate limit bit).
     rpcUrls: [
       "https://arb1.lava.build",
       "https://arb-one.api.pocket.network",
       "https://arbitrum-one.rpc.sentio.xyz",
       "https://arbitrum.gateway.tenderly.co",
     ],
+    // getLogs only, fastest-first. tenderly leads: it serves wide ranges far faster
+    // than lava/pocket and, with the fan-out gone, no longer 429s. lava/pocket follow
+    // as fallback. sentio is absent (caps under 50k) — it stays in rpcUrls for fan-out.
+    // Per-RPC windows (2026-07-18), from a browser fallback test: with tenderly
+    // removed, a 500k getLogs FAILED — pocket 500'd in a loop, lava didn't save it,
+    // the scan aborted. So lava/pocket's real browser cap is < 500k; 50k is known-good
+    // (the earlier 2-min run). The scanner asks each node only its window: tenderly
+    // serves 500k (a month in ~17s), and if it is down, lava/pocket serve 50k (slower
+    // but safe) — no node is ever asked past its cap, so no 500 and no silent [] gap.
+    logsRpcUrls: [
+      // tenderly at 1M — a month in ~7s (11 windows). Canary passed (2026-07-18): the
+      // scan found both known test UTXOs, which sit near the tail of their window, so
+      // 1M is not tail-truncated; tenderly served a full 1M in the Node bench too. The
+      // residual (an EMPTY older window can't prove it wasn't silently truncated) is
+      // accepted because tenderly ERRORS on an over-range request rather than truncating
+      // silently (silent [] is a cheap-node behaviour — pocket on Sepolia). lava/pocket
+      // stay at their 50k browser cap, so getLogsAdaptive degrades to them on any error.
+      { url: "https://arbitrum.gateway.tenderly.co", window: 1000000 },
+      { url: "https://arb1.lava.build", window: 50000 },
+      { url: "https://arb-one.api.pocket.network", window: 50000 },
+    ],
+    // Fan-out primaries, one shard each. pocket is deliberately NOT here: it is
+    // RPC_URLS[1] = OPS_RPC_URL, and the whole point of that index is that a heavy
+    // scan and a wallet op don't fight over the same node. It stays reachable as
+    // fallback. So the scan aims at RPC_URLS[0] (the designated scanner primary) and
+    // sentio, which was the one node that never erred in a real browser scan.
+    scanRpcUrls: [
+      "https://arb1.lava.build",
+      "https://arbitrum-one.rpc.sentio.xyz",
+    ],
     bundlerSlug: "arbitrum", // Pimlico v2 slug for Arbitrum One (verify: also accepts "42161").
     safeSingleton: "l2", // SafeL2 (as everywhere) → the one global address.
     gasFloor: true, // Real L2 gas → the floor is meaningful (unlike Sepolia).
-    // ~0.25s/block → 1000-block windows explode (336+). All 5 RPCs above serve a
-    // 10k getLogs cleanly (probed: identical 4039 logs) → 10× fewer scan windows.
-    scanWindowBlocks: 10000,
-    // Pimlico verifying paymaster on Arbitrum, CONFIRMED on-chain from our own ops.
-    // Filtering getLogs by it drops ~22× of the tx fan-out (3933 → 176 per 10k window).
-    scanPaymasters: ["0x777777777777AeC03fd955926DbF81597e66834C"],
+    // ~0.25s/block → 1000-block windows explode (336+). Was 10000, which was sentio's
+    // getLogs cap leaking into a global constant; sentio no longer answers getLogs, so
+    // the cap is gone.
+    //
+    // SUPERSEDED by per-RPC windows (see logsRpcUrls above): the getLogs range is now
+    // set per node (tenderly 500k, lava/pocket 50k), not by one global size. This field
+    // survives only as the fallback window for a chain with NO logsRpcUrls list; Arbitrum
+    // has one, so this value is unused here. Left at 50k (the known-safe floor) in case
+    // the per-RPC list is ever dropped.
+    scanWindowBlocks: 50000,
+    // Δ scanning fix (2026-07-18): route Δ sends through OUR OWN paymaster
+    // (R1DOPaymaster, audited BasePaymaster v0.7.0 base, deployed on Arbitrum One)
+    // and filter the scan by it ALONE. Filtering by Pimlico's SHARED paymaster only
+    // dropped ~22× of the fan-out (3933 → 176 per 10k window) because that paymaster
+    // keeps sponsoring the whole chain; filtering by an address that is ONLY ours
+    // removes the fan-out entirely (every hit is already a Δ payment → a month scans
+    // in ~1s, proven on Sepolia). NO block-cutover (deliberate): pre-cutover Δ
+    // payments sponsored by Pimlico that are not already cached in a device's
+    // IndexedDB stop being re-discoverable — accepted at beta scale.
+    deltaPaymaster: "0xAFcEBfF70C1B1D87B8dF4eA5bDbbf2b45A9d947E",
+    scanPaymasters: ["0xAFcEBfF70C1B1D87B8dF4eA5bDbbf2b45A9d947E"],
     // Arbitrum One hosts the ONE global directory (DIRECTORY_NETWORK_ID). Every
     // directory read/write is routed here regardless of the active chain.
     directoryAddress: "0x2269f1f40b3A46fBB55bCa8F38Ad136532276F44",
@@ -271,6 +391,24 @@ export function activeRpcUrls(): string[] {
   return [...activeNetwork().rpcUrls];
 }
 
+/** getLogs endpoints for the active chain, in order, each with its per-RPC window
+    (see the `logsRpcUrls` field). Where no curated list exists, synthesizes one from
+    `rpcUrls` at the default window (scanWindowBlocks) — so the scanner always has a
+    windowed list to rotate through. */
+export function activeLogsRpcs(): LogsRpc[] {
+  const n = activeNetwork();
+  if (n.logsRpcUrls) return [...n.logsRpcUrls];
+  const window = scanWindowBlocks();
+  return n.rpcUrls.map((url) => ({ url, window }));
+}
+
+/** RPCs the scanner's fan-out shards across on the active chain (see `scanRpcUrls`).
+    Falls back to the full list where none is curated. */
+export function activeScanRpcUrls(): string[] {
+  const n = activeNetwork();
+  return [...(n.scanRpcUrls ?? n.rpcUrls)];
+}
+
 /** Whether to apply the operator-fee gas floor on the active chain (default true). */
 export function gasFloorEnabled(): boolean {
   return activeNetwork().gasFloor ?? true;
@@ -286,6 +424,13 @@ export function scanWindowBlocks(): number {
     invariant (only set where the address is confirmed). */
 export function scanPaymasters(): readonly `0x${string}`[] | undefined {
   return activeNetwork().scanPaymasters;
+}
+
+/** OUR own paymaster address for the active chain's Δ sends, or undefined (sponsor
+    via Pimlico). See the `deltaPaymaster` field — when set, buildSafeClient routes
+    ops through it so the scanner can filter on an address that is only ours. */
+export function deltaPaymaster(): `0x${string}` | undefined {
+  return activeNetwork().deltaPaymaster;
 }
 
 /** Explorer tx URL for a hash, or null if the active chain has no explorer. */
