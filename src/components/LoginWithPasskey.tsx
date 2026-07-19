@@ -369,7 +369,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
 
           {/* Hidden for the beta: creating/switching to another wallet from the
               unlock screen. Wallet management (incl. delete) lives in Settings.*/}
-          <Typography
+          {/*<Typography
             onClick={() => setWallets([])}
             sx={{
               cursor: "pointer",
@@ -383,7 +383,7 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
             }}
           >
             Use a different wallet
-          </Typography>
+          </Typography>*/}
 
         </Stack>
       )}

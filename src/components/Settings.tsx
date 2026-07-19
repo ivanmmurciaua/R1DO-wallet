@@ -18,6 +18,21 @@ import {
 import { deleteWalletCredential } from "@/lib/credstore";
 import { LOCAL_LAST_USER } from "@/app/constants";
 import { NETWORKS, activeNetwork, setActiveNetwork } from "@/lib/networks";
+import { MAX_DEEP_SCAN_DAYS, defaultScanDay, latestScannableDay, scanWindowFor } from "@/lib/deepScan";
+
+// <input type="date"> speaks "YYYY-MM-DD" in LOCAL time, but `new Date(str)` on
+// that shape parses it as UTC — which for anyone west of Greenwich lands on the
+// PREVIOUS day. These two convert explicitly rather than letting that silently
+// shift the day the user picked.
+const toInputValue = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const fromInputValue = (v: string): Date => {
+  const [y, m, d] = v.split("-").map(Number);
+  return new Date(y, m - 1, d); // local midnight
+};
+// A cleared picker hands back "", which the above turns into an Invalid Date.
+const isValidDay = (d: Date): boolean => !Number.isNaN(d.getTime());
+const dayLabel = (d: Date): string => d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 
 // R1DO's standard info indicator: click-to-open Popover (mobile-friendly), same
 // look as the Announce/Ghost explainer — NOT a hover Tooltip.
@@ -142,6 +157,49 @@ export function Settings({
   const [confirmResync, setConfirmResync] = useState(false);
   const [resyncing, setResyncing] = useState(false);
   const [resyncMsg, setResyncMsg] = useState<string | null>(null);
+  // Calendar deep-scan (light world, private wallets). A sweep is a fixed-span
+  // window the user drags anywhere into the past; the default lands it on the last
+  // few days, which is the common case (a cursor that started at "now" on this
+  // device). Digging further back is aimed by hand.
+  const [scanDay, setScanDay] = useState<string>(() => toInputValue(defaultScanDay()));
+  const [deepScanning, setDeepScanning] = useState(false);
+  const [deepMsg, setDeepMsg] = useState<string | null>(null);
+  const pickedDay = fromInputValue(scanDay);
+  const scanWindow = isValidDay(pickedDay) ? scanWindowFor(pickedDay) : null;
+  // `scanning` covers the forward scan too: two scans would fight over the same
+  // progress bar and double the RPC fan-out. runCalendarDeepScan refuses anyway —
+  // this is just the half of that guard the user can see.
+  const deepDisabled = deepScanning || scanning || !scanWindow;
+
+  // Sweep for stealth payments that landed before this device started watching.
+  // Needs the PRF (it re-derives the viewing/spending keys to trial-decrypt), so
+  // it asks for the passkey exactly like the seed reveal does, and zeroes it after.
+  const handleDeepScan = async () => {
+    if (!username || !scanWindow) return;
+    setDeepMsg(null);
+    setDeepScanning(true);
+    let prf: Uint8Array | null = null;
+    try {
+      const { getWalletCredential } = await import("@/lib/credstore");
+      const { loadFromDevice } = await import("@/lib/passkeys");
+      const { runCalendarDeepScan } = await import("@/lib/deepScan");
+      const cred = await getWalletCredential(username).catch(() => null);
+      if (!cred?.rawId) throw new Error("no credential found for this account");
+      prf = await loadFromDevice(cred.rawId);
+      if (!prf || prf.length === 0) throw new Error("passkey/PRF unavailable on this device");
+      const { found } = await runCalendarDeepScan(username, prf, pickedDay);
+      setDeepMsg(
+        found > 0
+          ? `Found ${found} earlier payment${found === 1 ? "" : "s"}.`
+          : "No earlier payments found.",
+      );
+    } catch (e) {
+      setDeepMsg("Scan failed: " + ((e as Error)?.message ?? String(e)));
+    } finally {
+      if (prf) prf.fill(0);
+      setDeepScanning(false);
+    }
+  };
 
   const handleResync = async () => {
     setConfirmResync(false);
@@ -485,6 +543,74 @@ export function Settings({
                 <MenuItem value="tombstone">Keep spent records</MenuItem>
                 <MenuItem value="purge">Purge spent records</MenuItem>
               </TextField>
+            </div>
+            )}
+
+            {!minimal && !networkOnly && privacy && username && (
+            <div>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+                Scan by date
+                <InfoDot>
+                  Looks for payments that arrived <b>before this device started
+                  watching</b> — after signing in somewhere new, or if something was
+                  paid to you while you were away. Your funds were never lost, just
+                  unseen here. Pick any day, however far back: each scan covers that
+                  day and the {MAX_DEEP_SCAN_DAYS - 1} after it. Takes a few minutes
+                  per day covered, and can&apos;t be resumed: keep this tab open until
+                  it finishes.
+                </InfoDot>
+              </p>
+              <TextField
+                type="date"
+                size="small"
+                value={scanDay}
+                disabled={deepScanning || scanning}
+                onChange={(e) => setScanDay(e.target.value)}
+                slotProps={{
+                  // No floor: any past day is fair game, because the cost is bounded
+                  // by the WINDOW's span, not by how far back it sits.
+                  htmlInput: { max: toInputValue(latestScannableDay()) },
+                }}
+                sx={{ ...inputSx, width: "100%", mb: 1 }}
+              />
+              <button
+                onClick={handleDeepScan}
+                disabled={deepDisabled}
+                style={{
+                  background: "transparent",
+                  border: "1px solid currentColor",
+                  color: "inherit",
+                  fontFamily: "var(--font-geist-mono), monospace",
+                  fontSize: "0.75rem",
+                  letterSpacing: "0.08em",
+                  padding: "6px 12px",
+                  cursor: deepDisabled ? "default" : "pointer",
+                  opacity: deepDisabled ? 0.5 : 1,
+                  width: "100%",
+                }}
+              >
+                {deepScanning
+                  ? "[SCANNING… keep this tab open]"
+                  : scanning
+                    ? "[FINISHING SCAN…]"
+                    : "[SCAN THIS WINDOW]"}
+              </button>
+              {/* Name the days the sweep will actually cover, before the user
+                  commits ~20 minutes to it — "5 days from the 3rd" is arithmetic
+                  they shouldn't have to do to know whether it includes the day
+                  they were paid. */}
+              <p style={{ fontSize: "0.68rem", opacity: 0.6, marginTop: "8px", lineHeight: 1.5 }}>
+                {scanWindow
+                  ? scanWindow.from.getTime() === scanWindow.to.getTime()
+                    ? `Covers ${dayLabel(scanWindow.from)}.`
+                    : `Covers ${dayLabel(scanWindow.from)} → ${dayLabel(scanWindow.to)}.`
+                  : `Each scan covers ${MAX_DEEP_SCAN_DAYS} days.`}
+              </p>
+              {deepMsg && (
+                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "6px", lineHeight: 1.5 }}>
+                  {deepMsg}
+                </p>
+              )}
             </div>
             )}
 

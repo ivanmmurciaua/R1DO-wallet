@@ -36,7 +36,9 @@
     "viem": "2.44.4"
   },
   "devDependencies": {
+    "@account-abstraction/contracts": "0.7.0",
     "@eslint/eslintrc": "^3",
+    "@openzeppelin/contracts": "5.6.1",
     "@types/node": "^20",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
@@ -44,6 +46,7 @@
     "eslint": "^9",
     "eslint-config-next": "15.5.0",
     "node-polyfill-webpack-plugin": "^4.1.0",
+    "solc": "0.8.28",
     "typescript": "^5"
   }
 }
