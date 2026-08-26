@@ -21,6 +21,7 @@ import {
   getProver,
   ArtifactStore,
   createRailgunWallet,
+  deleteWalletByID,
   refreshBalances,
   rescanFullUTXOMerkletreesAndWallets,
   setOnBalanceUpdateCallback,
@@ -1003,14 +1004,21 @@ export async function resyncPool(): Promise<void> {
   }
 }
 
-/** Recover funds hidden by a too-recent scan-start ("I shielded weeks ago but
-    this device shows nothing"). Does NOT delete or re-create the 0zk: it reuses
-    the already-loaded wallet, pushes its per-network scan-start back to
-    `fromBlock`, clears THIS network's balances for it and rescans the tree from
-    there to 100% — the same path the standalone lab uses. Needs the PRF (a fresh
-    passkey) only to derive the mnemonic createRailgunWallet keys the wallet by.
-    Funds are on-chain; the cleared engine records are a re-derivable cache. */
-export async function recoverPoolBalances(
+/** WALLET-ONLY clear + rescan (shared by recover and the debug button).
+
+    The UTXO merkletree is per-NETWORK and shared by every wallet, so we NEVER
+    touch it — deleting it would force a full `eth_getLogs` re-download (the
+    mobile marathon that hangs). Instead we clear only THIS wallet's decrypted
+    notes + scan cache (`deleteWalletByID`), re-create the same 0zk (idempotent
+    by mnemonic) with its scan-start at `fromBlock`, and re-decrypt against the
+    tree that is ALREADY on the device (`refreshBalances`). That scan is
+    incremental and resumable: if the device stalls or backgrounds, the next run
+    continues instead of restarting from zero. `fromBlock = 0` = the wallet's
+    full history against the existing tree.
+
+    Needs the PRF (a fresh passkey) only to derive the mnemonic that keys the
+    wallet. Funds are on-chain; the cleared records are a re-derivable cache. */
+async function clearWalletAndRescan(
   prf: Uint8Array,
   username: string,
   fromBlock: number,
@@ -1028,6 +1036,8 @@ export async function recoverPoolBalances(
     "[recover] watcher stopped; recoverPending=true (in-flight tick should bail)",
   );
   try {
+    console.log("[recover] DB BEFORE:");
+    await dumpDbState();
     if (onProgress) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       setOnUTXOMerkletreeScanCallback((e: any) =>
@@ -1036,36 +1046,48 @@ export async function recoverPoolBalances(
     }
     const mnemonic = poolMnemonicFromPRF(prf);
 
-    // ── STEP 1: reuse the wallet, set its scan-start to fromBlock ──────────────
-    // The "waited Xs" tells us how long the in-flight watcher tick held the lock;
-    // the "done in Xs" tells us how long the wallet update itself took.
-    console.log(
-      `[recover] STEP 1: set creationBlock=${fromBlock} — waiting for engine lock…`,
-    );
+    // ── STEP 1: drop this wallet's notes/scan cache (the shared tree stays) ────
+    console.log("[recover] STEP 1: deleteWalletByID — waiting for engine lock…");
     let t0 = performance.now();
     await withEngineLock(async () => {
       console.log(
-        `[recover] STEP 1: lock acquired (waited ${secs(t0)}) — createRailgunWallet…`,
+        `[recover] STEP 1: lock acquired (waited ${secs(t0)}) — deleteWalletByID…`,
+      );
+      const s = performance.now();
+      await deleteWalletByID(wallet.id);
+      console.log(`[recover] STEP 1: deleteWalletByID done in ${secs(s)}`);
+    });
+
+    // ── STEP 2: re-create the SAME 0zk with its scan-start at fromBlock ────────
+    console.log(
+      `[recover] STEP 2: recreate wallet at block=${fromBlock} — waiting for engine lock…`,
+    );
+    t0 = performance.now();
+    await withEngineLock(async () => {
+      console.log(
+        `[recover] STEP 2: lock acquired (waited ${secs(t0)}) — createRailgunWallet…`,
       );
       const s = performance.now();
       await createRailgunWallet(walletEncryptionKey!, mnemonic, {
         [POOL_NETWORK]: fromBlock,
       });
-      console.log(`[recover] STEP 1: createRailgunWallet done in ${secs(s)}`);
+      console.log(`[recover] STEP 2: createRailgunWallet done in ${secs(s)}`);
     });
 
-    // ── STEP 2: clear this network's balances + rescan from the new start ─────
-    console.log("[recover] STEP 2: clear + rescan — waiting for engine lock…");
+    // ── STEP 3: decrypt the wallet against the EXISTING tree (no re-download) ──
+    console.log("[recover] STEP 3: refreshBalances — waiting for engine lock…");
     t0 = performance.now();
     await withEngineLock(async () => {
       console.log(
-        `[recover] STEP 2: lock acquired (waited ${secs(t0)}) — rescanFull…`,
+        `[recover] STEP 3: lock acquired (waited ${secs(t0)}) — refreshBalances…`,
       );
       const s = performance.now();
-      await rescanFullUTXOMerkletreesAndWallets(CHAIN, [wallet.id]);
-      console.log(`[recover] STEP 2: rescanFull done in ${secs(s)}`);
+      await refreshBalances(CHAIN, [wallet.id]);
+      console.log(`[recover] STEP 3: refreshBalances done in ${secs(s)}`);
     });
     onProgress?.(100);
+    console.log("[recover] DB AFTER:");
+    await dumpDbState();
     console.log("[recover] ✓ complete");
     return wallet;
   } finally {
@@ -1073,6 +1095,29 @@ export async function recoverPoolBalances(
     if (onProgress) setOnUTXOMerkletreeScanCallback(() => {});
     if (wasWatching) startWatcher();
   }
+}
+
+/** Recover funds hidden by a too-recent scan-start ("I shielded weeks ago but
+    this device shows nothing"): re-scan the wallet from the picked day's block
+    against the existing tree. See `clearWalletAndRescan`. */
+export function recoverPoolBalances(
+  prf: Uint8Array,
+  username: string,
+  fromBlock: number,
+  onProgress?: (pct: number) => void,
+): Promise<PoolWallet> {
+  return clearWalletAndRescan(prf, username, fromBlock, onProgress);
+}
+
+/** Debug: clear ONLY this wallet's scan cache and re-scan its full history
+    against the existing tree (no date, no tree re-download). See
+    `clearWalletAndRescan`. */
+export function clearWalletScan(
+  prf: Uint8Array,
+  username: string,
+  onProgress?: (pct: number) => void,
+): Promise<PoolWallet> {
+  return clearWalletAndRescan(prf, username, 0, onProgress);
 }
 
 /** Clear ALL account-scoped pool state. Call on logout / account switch so a
@@ -1108,6 +1153,65 @@ export async function resetPool(): Promise<void> {
   console.log("[pool] reset — account state cleared");
 }
 
+// ── DB inspection + manual tree wipe (debugging the recovery scan) ────────────
+// A Web Worker can read IndexedDB directly, so this is the ground truth of what
+// the engine has actually persisted — no Chrome devtools, no guessing. Filter
+// the console by `[db]` to read just these.
+
+/** Log every IndexedDB database with its object stores and record counts.
+    For the engine DB (`r1do-railgun`) the counts are the real state of the tree
+    and the wallet scan cache, so we can watch it fill up (or confirm it's empty
+    after a wipe) at any moment. */
+export async function dumpDbState(): Promise<void> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dbs = (await (indexedDB as any).databases?.()) ?? [];
+    const names: string[] = dbs.map((d: { name?: string }) => d.name).filter(Boolean);
+    console.log(`[db] ${names.length} database(s): ${names.join(", ") || "(none)"}`);
+    for (const name of names) {
+      await new Promise<void>((resolve) => {
+        const req = indexedDB.open(name);
+        req.onerror = () => {
+          console.log(`[db]   ${name}: open ERROR`, req.error);
+          resolve();
+        };
+        req.onblocked = () => {
+          console.log(`[db]   ${name}: open BLOCKED (held open elsewhere)`);
+          resolve();
+        };
+        req.onsuccess = () => {
+          const db = req.result;
+          const stores = Array.from(db.objectStoreNames);
+          if (stores.length === 0) {
+            console.log(`[db]   ${name}: (no object stores)`);
+            db.close();
+            return resolve();
+          }
+          const tx = db.transaction(stores, "readonly");
+          Promise.all(
+            stores.map(
+              (s) =>
+                new Promise<string>((res) => {
+                  const cr = tx.objectStore(s).count();
+                  cr.onsuccess = () => res(`${s}=${cr.result}`);
+                  cr.onerror = () => res(`${s}=ERR`);
+                }),
+            ),
+          )
+            .then((counts) => console.log(`[db]   ${name}: ${counts.join("  ")}`))
+            .catch((e) => console.log(`[db]   ${name}: count failed`, e))
+            .finally(() => {
+              db.close();
+              resolve();
+            });
+        };
+      });
+    }
+  } catch (e) {
+    console.warn("[db] dumpDbState failed", e);
+  }
+}
+
 // ── Web Worker boundary (Comlink) ─────────────────────────────────────────────
 // Everything above runs INSIDE the worker: the engine, scanning, IndexedDB
 // writes and snarkjs proving all happen off the main thread, so the UI never
@@ -1134,7 +1238,9 @@ const workerApi = {
   refreshNow,
   resyncPool,
   recoverPoolBalances,
+  clearWalletScan,
   resetPool,
+  dumpDbState,
 };
 export type PoolWorkerApi = typeof workerApi;
 Comlink.expose(workerApi);
