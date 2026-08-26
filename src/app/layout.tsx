@@ -34,37 +34,9 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // The PWA (manifest + service worker + icons) is disabled in the IPFS build:
-  // a SW over a subdomain gateway would cache content already immutable by CID
-  // and could serve stale versions. Kept in the normal build.
-  const pwaEnabled = process.env.NEXT_PUBLIC_IPFS_BUILD !== "1";
-
   return (
     <html lang="en">
       <head>
-        {pwaEnabled && (
-          <>
-            {/* PWA manifest */}
-            <link rel="manifest" href="/manifest.json" />
-
-            {/* iOS support */}
-            <link rel="apple-touch-icon" href="/icons/icon-192x192.png" />
-
-            {/* PWA registration script */}
-            <script
-              dangerouslySetInnerHTML={{
-                __html: `
-              if ('serviceWorker' in navigator) {
-                window.addEventListener('load', function() {
-                  navigator.serviceWorker.register('/sw.js');
-                });
-              }
-            `,
-              }}
-            />
-          </>
-        )}
-
         {/* PWA theme color: adaptive for light and dark mode */}
         <meta
           name="theme-color"
@@ -91,7 +63,7 @@ export default function RootLayout({
         {/* Vercel Web Analytics — privacy-friendly (no cookies, no PII), served
             same-origin from /_vercel/insights. Skipped on the frozen IPFS export
             (no Vercel backend there). */}
-        {!pwaEnabled ? null : <Analytics />}
+        {process.env.NEXT_PUBLIC_IPFS_BUILD === "1" ? null : <Analytics />}
       </body>
     </html>
   );

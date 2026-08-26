@@ -157,6 +157,14 @@ export function Settings({
   const [confirmResync, setConfirmResync] = useState(false);
   const [resyncing, setResyncing] = useState(false);
   const [resyncMsg, setResyncMsg] = useState<string | null>(null);
+  // Recover (shielded pool): move this 0zk's scan-start back to the picked day
+  // and rescan, to recover funds shielded before this device's creation block.
+  // Re-derives the wallet, so it needs the PRF (a fresh passkey), like deep-scan.
+  const [recoverDay, setRecoverDay] = useState<string>(() => toInputValue(defaultScanDay()));
+  const [confirmRecover, setConfirmRecover] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [recoverPct, setRecoverPct] = useState(0);
+  const [recoverMsg, setRecoverMsg] = useState<string | null>(null);
   // Calendar deep-scan (light world, private wallets). A sweep is a fixed-span
   // window the user drags anywhere into the past; the default lands it on the last
   // few days, which is the common case (a cursor that started at "now" on this
@@ -198,6 +206,40 @@ export function Settings({
     } finally {
       if (prf) prf.fill(0);
       setDeepScanning(false);
+    }
+  };
+
+  const handleRecover = async () => {
+    if (!username) return;
+    setConfirmRecover(false);
+    setRecoverMsg(null);
+    const day = fromInputValue(recoverDay);
+    if (!isValidDay(day)) {
+      setRecoverMsg("Pick a valid date first.");
+      return;
+    }
+    setRecovering(true);
+    setRecoverPct(0);
+    let prf: Uint8Array | null = null;
+    try {
+      // Mirrors the deep-scan / seed-reveal re-auth: a fresh passkey → PRF, since
+      // recovery derives the mnemonic to re-key the wallet. Zeroed in `finally`.
+      const { getWalletCredential } = await import("@/lib/credstore");
+      const { loadFromDevice } = await import("@/lib/passkeys");
+      const { recoverPoolBalances } = await import("@/lib/pool/railgun");
+      const cred = await getWalletCredential(username).catch(() => null);
+      if (!cred?.rawId) throw new Error("no credential found for this account");
+      prf = await loadFromDevice(cred.rawId);
+      if (!prf || prf.length === 0) throw new Error("passkey/PRF unavailable on this device");
+      // The heavy rescan runs in the worker; progress streams back here without
+      // freezing the UI.
+      await recoverPoolBalances(prf, username, day, (pct) => setRecoverPct(pct));
+      setRecoverMsg(`Rescanned from ${recoverDay}. Older funds should now appear.`);
+    } catch (e) {
+      setRecoverMsg("Recovery failed: " + ((e as Error)?.message ?? String(e)));
+    } finally {
+      if (prf) prf.fill(0);
+      setRecovering(false);
     }
   };
 
@@ -614,7 +656,9 @@ export function Settings({
             </div>
             )}
 
-            {minimal && (
+            {/* Hidden: superseded by "Recover older funds" (this respected the old
+                creation block, so it couldn't reach older shields). */}
+            {false && minimal && (
             <div>
               <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
                 Re-sync from chain
@@ -687,6 +731,99 @@ export function Settings({
               )}
               {resyncMsg && (
                 <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{resyncMsg}</p>
+              )}
+            </div>
+            )}
+
+            {minimal && username && (
+            <div>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+                Recover older funds
+                <InfoDot>
+                  If you shielded funds before setting up this device, this wallet can
+                  start scanning too late to see them. Pick the day you first set it up
+                  (or earlier) and it re-scans your shielded balance from that day, so
+                  older deposits reappear. Your funds were never lost, just unseen here.
+                  Takes a few minutes and re-derives your wallet, so it asks for your
+                  passkey.
+                </InfoDot>
+              </p>
+              <TextField
+                type="date"
+                size="small"
+                value={recoverDay}
+                disabled={recovering}
+                onChange={(e) => setRecoverDay(e.target.value)}
+                slotProps={{ htmlInput: { max: toInputValue(latestScannableDay()) } }}
+                sx={{ ...inputSx, width: "100%", mb: 1 }}
+              />
+              {!confirmRecover ? (
+                <button
+                  onClick={() => setConfirmRecover(true)}
+                  disabled={recovering}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid currentColor",
+                    color: "inherit",
+                    fontFamily: "var(--font-geist-mono), monospace",
+                    fontSize: "0.75rem",
+                    letterSpacing: "0.08em",
+                    padding: "6px 12px",
+                    cursor: recovering ? "default" : "pointer",
+                    opacity: recovering ? 0.5 : 1,
+                    width: "100%",
+                  }}
+                >
+                  {recovering
+                    ? recoverPct > 0
+                      ? `[RECOVERING… scanning ${recoverPct}% · keep tab open]`
+                      : "[RECOVERING… preparing, keep tab open]"
+                    : "[RECOVER FUNDS]"}
+                </button>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <span style={{ fontSize: "0.72rem", opacity: 0.8, lineHeight: 1.5 }}>
+                    Re-scan shielded funds from {recoverDay}? This can take a few minutes.
+                  </span>
+                  <div style={{ display: "flex", gap: "0.6rem" }}>
+                    <button
+                      onClick={handleRecover}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid currentColor",
+                        color: "inherit",
+                        fontFamily: "var(--font-geist-mono), monospace",
+                        fontSize: "0.75rem",
+                        letterSpacing: "0.08em",
+                        padding: "6px 12px",
+                        cursor: "pointer",
+                        flex: 1,
+                      }}
+                    >
+                      [CONFIRM]
+                    </button>
+                    <button
+                      onClick={() => setConfirmRecover(false)}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid currentColor",
+                        color: "inherit",
+                        opacity: 0.6,
+                        fontFamily: "var(--font-geist-mono), monospace",
+                        fontSize: "0.75rem",
+                        letterSpacing: "0.08em",
+                        padding: "6px 12px",
+                        cursor: "pointer",
+                        flex: 1,
+                      }}
+                    >
+                      [CANCEL]
+                    </button>
+                  </div>
+                </div>
+              )}
+              {recoverMsg && (
+                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{recoverMsg}</p>
               )}
             </div>
             )}

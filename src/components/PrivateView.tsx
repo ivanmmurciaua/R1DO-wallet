@@ -267,7 +267,7 @@ export default function PrivateView({
         if (!alive) return;
         setEngine("up");
         console.log("[private] engine ready ✓");
-        setFees(mod.getPoolFees()); // live Railgun fees (basis points)
+        setFees(await mod.getPoolFees()); // live Railgun fees (basis points)
         mod.onPoolBalances((b) => {
           if (alive) setBalances(b);
         });
@@ -277,7 +277,7 @@ export default function PrivateView({
         mod.onPoolActivity((a) => {
           if (alive) setPoolActivity(a);
         });
-        const existing = mod.getPoolWallet(username);
+        const existing = await mod.getPoolWallet(username);
         if (existing) {
           setZk(existing.railgunAddress);
           mod.startWatcher();
@@ -558,7 +558,7 @@ export default function PrivateView({
       let txHash: string;
       if (isPrivacy) {
         // inlinkable: relay from a fresh ephemeral Safe (personal broadcaster)
-        const relayKey = mod.getRelayKey();
+        const relayKey = await mod.getRelayKey();
         if (!relayKey) throw new Error("relay key not available");
         txHash = await deploy.relayViaEphemeralSafe(relayKey, tx, `transfer (${sendSymbol}, privacy)`);
       } else {
@@ -690,7 +690,7 @@ export default function PrivateView({
       } else {
         // PRIVACY → ephemeral Safe as repartidor; the fee AND your Δ blob are folded
         // into ONE batch (proof recipient = the ephemeral Safe, so it's built first).
-        const relayKey = mod.getRelayKey();
+        const relayKey = await mod.getRelayKey();
         if (!relayKey) throw new Error("relay key not available");
         // Destination is your OWN fresh stealth only when you didn't edit the field.
         const isSelfStealth = !!unshieldStealth && to.toLowerCase() === unshieldStealth.stealthAddress.toLowerCase();

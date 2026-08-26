@@ -60,8 +60,6 @@ export default function Home() {
   // Gates the wallet render so every sync read of UTXOs is valid (see localstorage).
   const [storeReady, setStoreReady] = useState(false);
 
-  // PWA install prompt state
-  const [showInstall, setShowInstall] = useState(false);
   // Shadow (Railgun) world is per-network: unsupported chains (e.g. Arbitrum) have
   // no pool, and pool/railgun.ts THROWS at boot on them. So we gate the toggle and
   // show a transient message instead of letting the user cross into a broken world.
@@ -92,18 +90,6 @@ export default function Home() {
   }, [isPrivate, shadowAvailable, scanning, toggleView]);
   // Entering the shadow is blocked when the network has no pool OR a scan runs.
   const shadowEnterBlocked = !isPrivate && (!shadowAvailable || scanning);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const deferredPrompt = useRef<any>(null);
-
-  const openInstallOption = () => {
-    setShowInstall(true);
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        setShowInstall(false);
-        resolve();
-      }, 10000);
-    });
-  };
 
   const openPopup = useCallback(
     (message: string) => {
@@ -120,28 +106,7 @@ export default function Home() {
     setPopupMessage("");
   };
 
-  const handleInstallClick = async () => {
-    if (deferredPrompt.current) {
-      deferredPrompt.current.prompt();
-      await deferredPrompt.current.userChoice;
-      deferredPrompt.current = null;
-      setShowInstall(false);
-    }
-  };
 
-  useEffect(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const handler = (e: any) => {
-      e.preventDefault();
-      deferredPrompt.current = e;
-      openInstallOption();
-    };
-    window.addEventListener("beforeinstallprompt", handler);
-
-    return () => {
-      window.removeEventListener("beforeinstallprompt", handler);
-    };
-  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined" && !window.PublicKeyCredential) {
@@ -634,37 +599,6 @@ export default function Home() {
       )}
 
       <main className={styles.main}>
-        {/* Custom PWA Install Button */}
-        {showInstall && (
-          <div
-            style={{
-              position: "fixed",
-              bottom: 24,
-              left: 0,
-              right: 0,
-              display: "flex",
-              justifyContent: "center",
-              zIndex: 1000,
-            }}
-          >
-            <button
-              style={{
-                background: "#1a1a1a",
-                color: "#fff",
-                border: "none",
-                borderRadius: 8,
-                padding: "12px 24px",
-                fontSize: "1rem",
-                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
-                cursor: "pointer",
-              }}
-              onClick={handleInstallClick}
-            >
-              Install R1DO Wallet
-            </button>
-          </div>
-        )}
-
         {!showPopup && userWallet && username && address && deployed ? (
           !storeReady ? (
             <CircularProgress size={50} sx={{ mt: 3 }} />
