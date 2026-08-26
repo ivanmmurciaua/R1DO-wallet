@@ -261,6 +261,49 @@ export function Settings({
     }
   };
 
+  // ── debug: inspect / wipe the engine IndexedDB ────────────────────────────
+  // Output goes to the console (`[db]` prefix); on mobile, read it via remote
+  // debugging (chrome://inspect over USB, or Safari Web Inspector).
+  const [dbBusy, setDbBusy] = useState(false);
+  const [clearPct, setClearPct] = useState(0);
+  const [clearMsg, setClearMsg] = useState<string | null>(null);
+  const handleDumpDb = async () => {
+    setDbBusy(true);
+    try {
+      const { dumpDbState } = await import("@/lib/pool/railgun");
+      await dumpDbState();
+    } catch (e) {
+      console.warn("[db] dump failed", e);
+    } finally {
+      setDbBusy(false);
+    }
+  };
+  const handleClearWalletScan = async () => {
+    if (!username) return;
+    setClearMsg(null);
+    setDbBusy(true);
+    setClearPct(0);
+    let prf: Uint8Array | null = null;
+    try {
+      // Same re-auth as recover: a fresh passkey → PRF re-derives the 0zk that
+      // createRailgunWallet keys by. Zeroed in `finally`.
+      const { getWalletCredential } = await import("@/lib/credstore");
+      const { loadFromDevice } = await import("@/lib/passkeys");
+      const { clearWalletScan } = await import("@/lib/pool/railgun");
+      const cred = await getWalletCredential(username).catch(() => null);
+      if (!cred?.rawId) throw new Error("no credential found for this account");
+      prf = await loadFromDevice(cred.rawId);
+      if (!prf || prf.length === 0) throw new Error("passkey/PRF unavailable on this device");
+      await clearWalletScan(prf, username, (pct) => setClearPct(pct));
+      setClearMsg("Wallet scan rebuilt. Check the console for the DB state.");
+    } catch (e) {
+      setClearMsg("Clear failed: " + ((e as Error)?.message ?? String(e)));
+    } finally {
+      if (prf) prf.fill(0);
+      setDbBusy(false);
+    }
+  };
+
   // Switching network persists the choice and RELOADS: the active network feeds
   // module-level consts (RPC_URLS, BUNDLER_URL…) frozen at import, so a clean
   // reload is the simplest correct way to re-derive them everywhere. The reload
@@ -824,6 +867,67 @@ export function Settings({
               )}
               {recoverMsg && (
                 <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{recoverMsg}</p>
+              )}
+            </div>
+            )}
+
+            {minimal && username && (
+            <div>
+              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+                Engine DB (debug)
+                <InfoDot>
+                  Diagnostics for the shielded scan. DUMP prints every IndexedDB
+                  table and its record count to the console. CLEAR WALLET SCAN
+                  clears ONLY this wallet&apos;s decrypted-notes cache and re-scans
+                  its full history against the tree already on this device (the
+                  shared per-network Merkle tree is kept, so nothing is re-downloaded).
+                  It asks for your passkey and your funds are never at risk.
+                </InfoDot>
+              </p>
+              <div style={{ display: "flex", gap: "0.6rem" }}>
+                <button
+                  onClick={handleDumpDb}
+                  disabled={dbBusy}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid currentColor",
+                    color: "inherit",
+                    fontFamily: "var(--font-geist-mono), monospace",
+                    fontSize: "0.75rem",
+                    letterSpacing: "0.08em",
+                    padding: "6px 12px",
+                    cursor: dbBusy ? "default" : "pointer",
+                    opacity: dbBusy ? 0.5 : 1,
+                    flex: 1,
+                  }}
+                >
+                  [DUMP DB STATE]
+                </button>
+                <button
+                  onClick={handleClearWalletScan}
+                  disabled={dbBusy}
+                  style={{
+                    background: "transparent",
+                    border: "1px solid currentColor",
+                    color: "inherit",
+                    fontFamily: "var(--font-geist-mono), monospace",
+                    fontSize: "0.75rem",
+                    letterSpacing: "0.08em",
+                    padding: "6px 12px",
+                    cursor: dbBusy ? "default" : "pointer",
+                    opacity: dbBusy ? 0.5 : 1,
+                    flex: 1,
+                  }}
+                >
+                  {dbBusy
+                    ? clearPct > 0
+                      ? `[SCANNING ${clearPct}%…]`
+                      : "[WORKING…]"
+                    : "[CLEAR WALLET SCAN]"}
+                </button>
+              </div>
+              {clearMsg && (
+                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{clearMsg}</p>
               )}
             </div>
             )}

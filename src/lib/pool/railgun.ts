@@ -182,3 +182,23 @@ export async function recoverPoolBalances(
 export async function resetPool(): Promise<void> {
   await getApi().resetPool();
 }
+
+// ── debug: inspect the engine IndexedDB / rebuild just this wallet's cache ────
+/** Log every IndexedDB database + object-store record counts to the console. */
+export function dumpDbState(): Promise<void> {
+  return getApi().dumpDbState();
+}
+/** Clear ONLY this wallet's scan cache and re-scan its full history against the
+    existing (shared, per-network) tree — no date, no tree re-download. Needs the
+    PRF to re-derive the 0zk. On-chain funds are untouched. */
+export function clearWalletScan(
+  prf: Uint8Array,
+  username: string,
+  onProgress?: (pct: number) => void,
+): Promise<PoolWallet> {
+  return getApi().clearWalletScan(
+    prf,
+    username,
+    onProgress ? Comlink.proxy(onProgress) : undefined,
+  );
+}
