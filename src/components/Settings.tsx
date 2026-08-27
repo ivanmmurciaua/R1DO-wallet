@@ -212,97 +212,77 @@ export function Settings({
   // The engine store is level-js → IndexedDB database "level-js-r1do-railgun".
   const ENGINE_DB = "level-js-r1do-railgun";
 
-  // Count every record across the engine DB's object stores. Deterministic truth
-  // of whether the wipe fully landed: 0 = empty. Returns -1 if it can't tell
-  // (blocked/held open elsewhere), which we treat as "not empty, retry".
-  const engineDbRecordCount = (): Promise<number> =>
+  // Delete the engine DB. Returns what actually happened so we can tell "deleted"
+  // from "blocked" (a connection still held it open). NEVER open() the DB to
+  // verify: opening a just-deleted IndexedDB RE-CREATES it empty AND WITHOUT its
+  // object store, which then makes level-js fail with "object store not found".
+  const deleteEngineDb = (): Promise<"deleted" | "blocked" | "error"> =>
     new Promise((resolve) => {
       let settled = false;
-      const done = (n: number) => {
+      const done = (r: "deleted" | "blocked" | "error") => {
         if (!settled) {
           settled = true;
-          resolve(n);
+          resolve(r);
         }
       };
       try {
-        const req = indexedDB.open(ENGINE_DB);
-        req.onerror = () => done(-1);
-        req.onblocked = () => done(-1);
-        req.onsuccess = () => {
-          const db = req.result;
-          const stores = Array.from(db.objectStoreNames);
-          if (stores.length === 0) {
-            db.close();
-            return done(0);
-          }
-          const tx = db.transaction(stores, "readonly");
-          let total = 0;
-          let pending = stores.length;
-          for (const s of stores) {
-            const cr = tx.objectStore(s).count();
-            cr.onsuccess = () => {
-              total += cr.result;
-              if (--pending === 0) {
-                db.close();
-                done(total);
-              }
-            };
-            cr.onerror = () => {
-              if (--pending === 0) {
-                db.close();
-                done(total);
-              }
-            };
-          }
-        };
-        setTimeout(() => done(-1), 4000);
+        const req = indexedDB.deleteDatabase(ENGINE_DB);
+        req.onsuccess = () => done("deleted");
+        req.onerror = () => done("error");
+        req.onblocked = () => done("blocked"); // a connection still holds it open
+        setTimeout(() => done("blocked"), 5000);
       } catch {
-        done(-1);
+        done("error");
       }
     });
 
-  const deleteEngineDb = (): Promise<void> =>
-    new Promise((resolve) => {
-      try {
-        const req = indexedDB.deleteDatabase(ENGINE_DB);
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
-        req.onblocked = () => resolve(); // held open; the count check will catch it
-        setTimeout(resolve, 4000);
-      } catch {
-        resolve();
-      }
-    });
+  // Deterministic check WITHOUT opening the DB: is it still registered?
+  // true  = gone (verified empty — it does not exist)
+  // false = still present
+  // null  = can't tell (databases() unsupported) → fall back to the delete signal
+  const engineDbGone = async (): Promise<boolean | null> => {
+    try {
+      if (!indexedDB.databases) return null;
+      const dbs = await indexedDB.databases();
+      return !dbs.some((d) => d.name === ENGINE_DB);
+    } catch {
+      return null;
+    }
+  };
 
   const handleHardReset = async () => {
     setConfirmHardReset(false);
     setHardResetting(true);
     setHardResetMsg("Stopping the engine…");
-    // Kill the worker first so it releases its IndexedDB connection (deleteDatabase
-    // is blocked while the engine holds it open).
+    // Kill the worker first so the engine releases its IndexedDB connection
+    // (deleteDatabase is blocked while a connection holds it open).
     try {
       const mod = await import("@/lib/pool/railgun");
       mod.terminateWorker();
     } catch {
       /* ignore — we still try to delete + verify below */
     }
-    // Delete, then VERIFY the store is truly empty (0 records). Retry until it is
-    // — a lingering connection (another open tab of this app) leaves records and
-    // we surface that instead of pretending it worked.
-    let count = -1;
+    // Delete, then VERIFY the DB is gone from the registry (deterministic, and it
+    // never re-creates the DB). Retry if a lingering tab still holds it open.
+    let ok = false;
     for (let attempt = 1; attempt <= 6; attempt++) {
       setHardResetMsg(`Wiping the private database… (attempt ${attempt})`);
-      await deleteEngineDb();
-      count = await engineDbRecordCount();
-      if (count === 0) break;
+      const res = await deleteEngineDb();
+      const gone = await engineDbGone();
+      // When databases() works, the DB must be absent. When it doesn't, trust
+      // deleteDatabase's own success signal.
+      if (gone === true || (gone === null && res === "deleted")) {
+        ok = true;
+        break;
+      }
       await new Promise((r) => setTimeout(r, 800));
     }
-    if (count === 0) {
-      setHardResetMsg("Database empty (0 records). Reloading…");
+    if (ok) {
+      setHardResetMsg("Database removed. Reloading…");
       window.location.reload();
     } else {
       setHardResetMsg(
-        "Could not fully clear the database. Close any other tabs of this app on this device and try again.",
+        "Could not remove the database — another tab of this app may hold it open. Close other tabs on this device and try again.",
       );
       setHardResetting(false);
     }
