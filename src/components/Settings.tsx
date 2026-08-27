@@ -16,7 +16,7 @@ import {
   removeWalletMeta,
 } from "@/lib/localstorage";
 import { deleteWalletCredential } from "@/lib/credstore";
-import { LOCAL_LAST_USER } from "@/app/constants";
+import { LOCAL_LAST_USER, LOCAL_WIPE_SCAN } from "@/app/constants";
 import { NETWORKS, activeNetwork, setActiveNetwork } from "@/lib/networks";
 import { MAX_DEEP_SCAN_DAYS, defaultScanDay, latestScannableDay, scanWindowFor } from "@/lib/deepScan";
 
@@ -248,24 +248,22 @@ export function Settings({
     }
   };
 
-  const handleDeleteScan = async () => {
+  const handleDeleteScan = () => {
     if (!username) return;
     setConfirmDeleteScan(false);
-    setDeleteScanMsg(null);
+    // Deadlock-proof: do NOT touch the engine here. Clearing a wallet's scan
+    // cache while the engine is live can hang behind an in-flight scan (the
+    // IndexedDB clear waits on the scan's transaction). Instead just mark this
+    // wallet for wipe and reload — the actual per-wallet namespace clear runs on
+    // the next unlock, in a clean engine state with no watcher contending.
     setDeletingScan(true);
+    setDeleteScanMsg("Scan data will be cleared on next unlock. Reloading…");
     try {
-      // Pure delete of this wallet's scan cache (no recreate, no scan). The
-      // wallet must be currently unlocked so the engine knows its id.
-      const { deletePoolWalletData } = await import("@/lib/pool/railgun");
-      await deletePoolWalletData(username);
-      // Reload so the stale unlocked UI drops: the next unlock sees a fresh 0zk
-      // and offers the scan-start date picker.
-      setDeleteScanMsg("Scan data deleted. Reloading…");
-      window.location.reload();
-    } catch (e) {
-      setDeleteScanMsg("Delete failed: " + ((e as Error)?.message ?? String(e)));
-      setDeletingScan(false);
+      localStorage.setItem(LOCAL_WIPE_SCAN, username);
+    } catch {
+      /* private mode / storage disabled — reload still lands on the unlock flow */
     }
+    window.location.reload();
   };
 
   const handleResync = async () => {

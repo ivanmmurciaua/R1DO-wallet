@@ -13,9 +13,19 @@ let _db: IDBDatabase | null = null;
 function openDB(name: string, version?: number, upgrade?: (db: IDBDatabase) => void): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = version !== undefined ? indexedDB.open(name, version) : indexedDB.open(name);
+    // Safety timeout: on mobile, indexedDB.open() can hang indefinitely (a held
+    // connection blocking an upgrade, a stalled backend). Without this the login
+    // screen sits on "Loading wallets..." forever. Reject so callers move on.
+    const timer = setTimeout(() => reject(new Error(`indexedDB.open timeout: ${name}`)), 8000);
+    const done = (fn: () => void) => {
+      clearTimeout(timer);
+      fn();
+    };
     if (upgrade) req.onupgradeneeded = (e) => upgrade((e.target as IDBOpenDBRequest).result);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => done(() => resolve(req.result));
+    req.onerror = () => done(() => reject(req.error));
+    // A concurrent open holding an older version blocks this one — don't hang on it.
+    req.onblocked = () => done(() => reject(new Error(`indexedDB.open blocked: ${name}`)));
   });
 }
 

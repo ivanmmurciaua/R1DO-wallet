@@ -29,7 +29,7 @@ import { formatUnits, parseUnits, createPublicClient } from "viem";
 import type { SafeWallet } from "@/lib/aa-client";
 import { activeChain, railgunNetworkNames } from "@/lib/networks";
 import { formatList } from "@/lib/common";
-import { sepoliaTransport } from "@/app/constants";
+import { sepoliaTransport, LOCAL_WIPE_SCAN } from "@/app/constants";
 import { getTokenBalances } from "@/lib/balances";
 import { nativeAsset, activeTokens, assetByAddress, type Asset } from "@/lib/assets";
 import { getWalletCredential } from "@/lib/credstore";
@@ -316,7 +316,19 @@ export default function PrivateView({
       prf = await loadFromDevice(cred.rawId);
       if (!prf || prf.length === 0) throw new Error("PRF unavailable on this device");
       const mod = await import("@/lib/pool/railgun");
-      const { railgunAddress, fresh } = await mod.createPoolWallet(prf, username);
+      // "Delete scan data" defers its heavy per-wallet namespace clear to here:
+      // the button just set this flag + reloaded, so we wipe now (clean boot, no
+      // watcher contending) as part of loading the wallet, then clear the flag.
+      const wipeFirst =
+        typeof localStorage !== "undefined" &&
+        localStorage.getItem(LOCAL_WIPE_SCAN)?.toLowerCase() === username.toLowerCase();
+      const { railgunAddress, fresh } = await mod.createPoolWallet(
+        prf,
+        username,
+        undefined,
+        wipeFirst,
+      );
+      if (wipeFirst) localStorage.removeItem(LOCAL_WIPE_SCAN);
       setRegisteredZk(railgunAddress);
       setCachedPoolZk(username, railgunAddress);
 
