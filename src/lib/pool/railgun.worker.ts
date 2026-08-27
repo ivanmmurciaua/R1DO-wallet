@@ -205,13 +205,13 @@ export async function bootEngine(cfg: PoolConfig): Promise<void> {
       "r1do",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       new (LevelDB as any)("r1do-railgun"),
-      false, // shouldDebug
+      true, // shouldDebug — TEMP: surface engine-internal sync/getLogs/quickSync logs (diagnosing the ~15% tree-scan stall on Arbitrum mainnet)
       makeArtifactStore(),
       false, // useNativeArtifacts
       false, // skipMerkletreeScans — must be false so balances scan
       POI_NODES,
       [], // customPOILists
-      false, // verboseScanLogs
+      true, // verboseScanLogs — TEMP: see per-batch merkletree scan progress + where it wedges
     );
     console.log("[pool] ✓ engine started");
     installScanProgress(); // visibility into the (heavy, first-run) tree scan
