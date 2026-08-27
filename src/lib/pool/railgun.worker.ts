@@ -203,8 +203,12 @@ export async function bootEngine(cfg: PoolConfig): Promise<void> {
     console.log("[pool] starting engine (level-js → IndexedDB)…");
     await startRailgunEngine(
       "r1do",
+      // version:2 → level-js opens the IndexedDB at v2. This SELF-HEALS a DB that
+      // exists but lost its object store (e.g. from a bad wipe that re-opened it):
+      // the version bump fires onupgradeneeded, which recreates the missing store.
+      // Harmless for healthy DBs (store already exists → no-op, data preserved).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      new (LevelDB as any)("r1do-railgun"),
+      new (LevelDB as any)("r1do-railgun", { version: 2 }),
       true, // shouldDebug — TEMP: surface engine-internal sync/getLogs/quickSync logs (diagnosing the ~15% tree-scan stall on Arbitrum mainnet)
       makeArtifactStore(),
       false, // useNativeArtifacts
