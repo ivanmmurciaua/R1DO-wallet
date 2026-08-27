@@ -135,42 +135,46 @@ function base64url(bytes: number[]): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export async function saveWalletCredential(username: string, rawIdHex: string): Promise<void> {
-  const db = await initDB();
-  const raw = hexToArray(rawIdHex);
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    tx.objectStore(STORE_NAME).put({
-      username,
-      credentialId: base64url(raw),
-      credentialIdRaw: raw,
-      prfSupported: true,
-      createdAt: new Date().toISOString(),
-    });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+// ── localStorage mirror ───────────────────────────────────────────────────────
+// The credential id is a PUBLIC WebAuthn identifier (never the private key), so
+// mirroring it to localStorage is safe. The point: while the Railgun engine is
+// scanning it saturates the per-origin IndexedDB backend, so opening R1DOToolsDB
+// times out for the whole scan — freezing anything that needs a credential.
+// localStorage is synchronous and immune to that, so reads serve from here first
+// and IndexedDB becomes a best-effort source of truth synced in the background.
+const CRED_CACHE_KEY = "r1do/wallet/v1/credCache";
+type Cred = { username: string; rawId: string };
+
+function readCache(): Cred[] | null {
+  try {
+    const raw = localStorage.getItem(CRED_CACHE_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch {
+    return null;
+  }
 }
 
-/** Returns the rawId (hex, as loadFromDevice expects) or null. */
-export async function getWalletCredential(username: string): Promise<{ rawId: string } | null> {
-  const db = await initDB();
-  const rec = await new Promise<{ credentialIdRaw?: number[] } | undefined>((resolve, reject) => {
-    const req = db.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).get(username);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-  if (rec?.credentialIdRaw?.length) return { rawId: arrayToHex(rec.credentialIdRaw) };
-
-  // The tools store usernames verbatim while the wallet lowercases them —
-  // fall back to a case-insensitive match.
-  const all = await listWalletCredentials();
-  const m = all.find((r) => r.username.toLowerCase() === username.toLowerCase());
-  return m ? { rawId: m.rawId } : null;
+function writeCache(list: Cred[]): void {
+  try {
+    localStorage.setItem(CRED_CACHE_KEY, JSON.stringify(list));
+  } catch {
+    /* storage disabled / full — the DB remains the source of truth */
+  }
 }
 
-/** Every credential in the shared store (wallet- and tools-registered alike). */
-export async function listWalletCredentials(): Promise<{ username: string; rawId: string }[]> {
+/** Add/replace one credential in the localStorage mirror (case-insensitive). */
+function upsertCache(cred: Cred): void {
+  const list = readCache() ?? [];
+  const rest = list.filter(
+    (c) => c.username.toLowerCase() !== cred.username.toLowerCase(),
+  );
+  writeCache([...rest, cred]);
+}
+
+/** Read the credential list straight from IndexedDB (no cache). */
+async function listFromDB(): Promise<Cred[]> {
   const db = await initDB();
   const recs = await getAll(db);
   return recs
@@ -186,9 +190,64 @@ export async function listWalletCredentials(): Promise<{ username: string; rawId
     }));
 }
 
+export async function saveWalletCredential(username: string, rawIdHex: string): Promise<void> {
+  const raw = hexToArray(rawIdHex);
+  // Update the localStorage mirror FIRST (synchronous, never blocked) so the
+  // credential is immediately usable even while IndexedDB is saturated by a scan.
+  upsertCache({ username, rawId: arrayToHex(raw) });
+  const db = await initDB(); // may retry under contention; the mirror already has it
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).put({
+      username,
+      credentialId: base64url(raw),
+      credentialIdRaw: raw,
+      prfSupported: true,
+      createdAt: new Date().toISOString(),
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Returns the rawId (hex, as loadFromDevice expects) or null. Cache-first:
+    served from the localStorage mirror when present so it never blocks on the
+    IndexedDB open (which times out for the whole duration of an engine scan). */
+export async function getWalletCredential(username: string): Promise<{ rawId: string } | null> {
+  const all = await listWalletCredentials();
+  const m = all.find((r) => r.username.toLowerCase() === username.toLowerCase());
+  return m ? { rawId: m.rawId } : null;
+}
+
+/** Every credential in the shared store (wallet- and tools-registered alike).
+    Cache-first: if the localStorage mirror has entries, return them immediately
+    and refresh from IndexedDB in the background; otherwise read IndexedDB (with
+    retry) and populate the mirror. This keeps credential access instant and
+    immune to the IndexedDB saturation caused by the engine's tree scan. */
+export async function listWalletCredentials(): Promise<{ username: string; rawId: string }[]> {
+  const cached = readCache();
+  if (cached && cached.length > 0) {
+    // Refresh the mirror in the background — never block the caller on IndexedDB.
+    void listFromDB()
+      .then((fresh) => {
+        if (fresh.length > 0) writeCache(fresh);
+      })
+      .catch(() => {});
+    return cached;
+  }
+  // No usable mirror yet → we must read IndexedDB. Populate the mirror on success.
+  const list = await listFromDB();
+  if (list.length > 0) writeCache(list);
+  return list;
+}
+
 /** Forgets the credential record (case-insensitive). The passkey itself
     survives on the authenticator — a resident-key login re-learns it. */
 export async function deleteWalletCredential(username: string): Promise<void> {
+  // Drop it from the localStorage mirror first (synchronous, never blocked).
+  writeCache((readCache() ?? []).filter(
+    (c) => c.username.toLowerCase() !== username.toLowerCase(),
+  ));
   const db = await initDB();
   const recs = await getAll(db);
   const targets = recs.filter(

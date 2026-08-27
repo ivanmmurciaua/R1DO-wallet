@@ -184,10 +184,12 @@ export default function PrivateView({
   // Info popover (Announce/Ghost explainer) — click-to-open, mobile-friendly.
   const [infoAnchor, setInfoAnchor] = useState<HTMLElement | null>(null);
   // POI activity (finalizing a spent-POI) — surfaced to warn the user
-  const [poolActivity, setPoolActivity] = useState<{ finalizing: boolean; generatingProof: boolean; proofProgress: number }>({
+  const [poolActivity, setPoolActivity] = useState<{ finalizing: boolean; generatingProof: boolean; proofProgress: number; scanning: boolean; scanProgress: number }>({
     finalizing: false,
     generatingProof: false,
     proofProgress: 0,
+    scanning: false,
+    scanProgress: 0,
   });
   const [toast, setToast] = useState<{ msg: string; sev: "success" | "error" | "info" } | null>(null);
   const [bootAttempt, setBootAttempt] = useState(0); // bump → retry the boot
@@ -1306,6 +1308,18 @@ export default function PrivateView({
               />
             </IconButton>
           </Box>
+
+          {/* Building the private history (first run on this device / after a fresh
+              scan-start). Heavy on mobile, so show it explicitly instead of a blank
+              balance so the screen never looks frozen. */}
+          {poolActivity.scanning && (
+            <Box sx={{ display: "inline-flex", alignItems: "center", gap: 1, mt: 0.75, opacity: 0.7 }}>
+              <CircularProgress size={12} />
+              <Typography variant="body2" sx={{ fontSize: "0.66rem", letterSpacing: "0.06em" }}>
+                Building your private history… {poolActivity.scanProgress}% · keep this screen open
+              </Typography>
+            </Box>
+          )}
 
           {/* expandable per-token shielded balances (curated ERC20s in the pool) */}
           {showShielded && shieldedTokens.length > 0 && (
