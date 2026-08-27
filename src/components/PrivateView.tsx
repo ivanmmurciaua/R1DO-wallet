@@ -107,6 +107,13 @@ export default function PrivateView({
   const [registeredZk, setRegisteredZk] = useState<string | null | undefined>(undefined); // undefined=checking
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Fresh-wallet scan-start choice: when unlock finds a 0zk that has NEVER been
+  // scanned on this device/network, we hold its address here and ask "scan from
+  // when?" BEFORE starting the watcher — a clean single scan from the chosen day,
+  // no silent start-near-the-tip and no post-hoc recover. `scanDate` is the
+  // yyyy-mm-dd from the picker ("" = not chosen → the "start from now" default).
+  const [scanChoice, setScanChoice] = useState<string | null>(null);
+  const [scanDate, setScanDate] = useState<string>("");
   const [balances, setBalances] = useState<PoolBalances | null>(null);
   const [tokenBals, setTokenBals] = useState<Map<string, TokenBuckets> | null>(null);
   const [showShielded, setShowShielded] = useState(false); // expand per-token list
@@ -309,23 +316,56 @@ export default function PrivateView({
       prf = await loadFromDevice(cred.rawId);
       if (!prf || prf.length === 0) throw new Error("PRF unavailable on this device");
       const mod = await import("@/lib/pool/railgun");
-      const { railgunAddress } = await mod.createPoolWallet(prf, username);
-      setZk(railgunAddress);
+      const { railgunAddress, fresh } = await mod.createPoolWallet(prf, username);
       setRegisteredZk(railgunAddress);
       setCachedPoolZk(username, railgunAddress);
-      mod.startWatcher();
-      console.log("[private] shielded account ready ✓");
 
       // Publish the 0zk into the directory so others can pay you by nick via
       // RAILGUN. Best-effort: the pool works without it, so never block on it.
       ensureZkInDirectory(wallet, username, railgunAddress)
         .then((r) => console.log(`[private] directory 0zk: ${r}`))
         .catch((e) => console.warn("[private] directory 0zk publish failed (non-fatal):", e));
+
+      if (fresh) {
+        // Never scanned here → don't start the watcher yet. Show the scan-start
+        // picker; confirmScanStart sets the block and starts the scan cleanly.
+        console.log("[private] fresh 0zk on this device — asking for the scan-start date");
+        setScanChoice(railgunAddress);
+        return;
+      }
+      // Already scanned before on this device → resume as usual.
+      setZk(railgunAddress);
+      mod.startWatcher();
+      console.log("[private] shielded account ready ✓");
     } catch (e) {
       console.error("[private] unlock failed:", e);
       setError(e instanceof Error ? e.message : "could not open shielded account");
     } finally {
       prf?.fill(0); // wipe PRF material from memory
+      setWorking(false);
+    }
+  };
+
+  // Confirm the scan-start for a fresh 0zk, then reveal the operational UI and
+  // start the watcher (which runs the first scan). `date` undefined = "start from
+  // now" (keep the default near-tip block createPoolWallet already set); a date
+  // moves the still-unscanned wallet's scan-start to that day before scanning.
+  const confirmScanStart = async (date?: Date) => {
+    if (!scanChoice) return;
+    setError(null);
+    setWorking(true);
+    try {
+      const mod = await import("@/lib/pool/railgun");
+      if (date) await mod.setPoolScanStart(date);
+      setZk(scanChoice);
+      mod.startWatcher();
+      setScanChoice(null);
+      setScanDate("");
+      console.log("[private] shielded account ready ✓ (scan started)");
+    } catch (e) {
+      console.error("[private] scan-start failed:", e);
+      setError(e instanceof Error ? e.message : "could not start the scan");
+    } finally {
       setWorking(false);
     }
   };
@@ -1096,6 +1136,76 @@ export default function PrivateView({
                 {engine === "booting" ? `connecting to ${proto}…` : "checking your account…"}
               </Typography>
             </Box>
+          ) : scanChoice ? (
+            /* fresh 0zk (never scanned on this device/network) → choose the
+               scan-start BEFORE the first scan. A clean single scan from the
+               chosen day; no silent start-near-the-tip, no post-hoc recover. */
+            <>
+              <Typography variant="body2" sx={{ fontSize: "0.78rem", lineHeight: 1.7, opacity: 0.75, mb: 2 }}>
+                First time opening this shielded account on this device. Pick when
+                to start scanning: choose the day of your first deposit to see
+                older funds, or start from now if this account is new.
+              </Typography>
+
+              <input
+                type="date"
+                value={scanDate}
+                max={new Date().toLocaleDateString("en-CA")}
+                disabled={working}
+                onChange={(e) => setScanDate(e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  border: "1px solid currentColor",
+                  borderRadius: "2px",
+                  background: "transparent",
+                  color: "inherit",
+                  fontFamily: "var(--font-geist-mono), monospace",
+                  fontSize: "0.85rem",
+                  letterSpacing: "0.04em",
+                  outline: "none",
+                  boxSizing: "border-box",
+                  opacity: working ? 0.5 : 0.85,
+                  marginBottom: 12,
+                }}
+              />
+
+              <Button
+                variant="contained"
+                color="primary"
+                fullWidth
+                disabled={working || !scanDate}
+                onClick={() => {
+                  const [y, m, d] = scanDate.split("-").map(Number);
+                  confirmScanStart(new Date(y, m - 1, d)); // local midnight
+                }}
+                startIcon={working ? <CircularProgress size={14} /> : undefined}
+              >
+                {working ? "starting scan…" : "Scan from this date"}
+              </Button>
+
+              <Typography
+                onClick={() => !working && confirmScanStart()}
+                sx={{
+                  cursor: working ? "default" : "pointer",
+                  textAlign: "center",
+                  opacity: working ? 0.4 : 0.6,
+                  fontFamily: "var(--font-geist-mono), monospace",
+                  fontSize: "0.75rem",
+                  letterSpacing: "0.04em",
+                  mt: 1.5,
+                  "&:hover": { opacity: working ? 0.4 : 0.9 },
+                }}
+              >
+                This account is new — start from now
+              </Typography>
+
+              {error && (
+                <Typography color="error" sx={{ fontSize: "0.64rem", mt: 1.5, letterSpacing: "0.04em" }}>
+                  {error}
+                </Typography>
+              )}
+            </>
           ) : (
             /* engine is up AND registration resolved → safe to enable/unlock */
             <>

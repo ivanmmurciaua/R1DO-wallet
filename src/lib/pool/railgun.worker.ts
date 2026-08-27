@@ -21,7 +21,7 @@ import {
   getProver,
   ArtifactStore,
   createRailgunWallet,
-  deleteWalletByID,
+  walletForID,
   refreshBalances,
   rescanFullUTXOMerkletreesAndWallets,
   setOnBalanceUpdateCallback,
@@ -279,6 +279,12 @@ export function getPoolFees(): { shieldBps: number; unshieldBps: number } {
    One 0zk per user; the engine must be booted first. */
 
 export type PoolWallet = { id: string; railgunAddress: string; username: string };
+// createPoolWallet also reports whether this 0zk has NEVER been scanned on this
+// device for the active network (`fresh`). A fresh wallet's scan-start block is
+// still settable (see setPoolScanStart) — so the UI can ask "scan from when?"
+// BEFORE the first scan runs, instead of silently starting near the tip and
+// hiding older shields (which the post-hoc recover then had to undo).
+export type OpenedPoolWallet = PoolWallet & { fresh: boolean };
 let poolWallet: PoolWallet | null = null;
 // Per-wallet shield key (deterministic, derived from a PRF branch at unlock).
 // Used to encrypt shield notes; kept in session memory so shielding needs no
@@ -287,6 +293,10 @@ let shieldPrivateKey: string | null = null;
 // The 0zk wallet's encryptionKey — needed by transfer/unshield proving. Kept in
 // session (like shieldPrivateKey) so operations need no extra passkey tap.
 let walletEncryptionKey: string | null = null;
+// The 0zk mnemonic (same sensitivity as walletEncryptionKey). Kept in session so
+// setPoolScanStart can re-write this wallet's creation block (choosing the scan
+// start of a still-unscanned wallet) without a second passkey tap. Cleared on reset.
+let poolMnemonic: string | null = null;
 // Owner key for the ephemeral relay Safe (privacy mode): the proven transact is
 // relayed from a FRESH throwaway Safe (this owner + a random saltNonce per tx)
 // instead of the main Safe → no link between your identity and Railgun activity.
@@ -305,10 +315,11 @@ export async function createPoolWallet(
   prf: Uint8Array,
   username: string,
   creationBlockOverride?: number,
-): Promise<PoolWallet> {
+): Promise<OpenedPoolWallet> {
   if (poolWallet && poolWallet.username === username) {
     console.log("[pool] 0zk wallet already derived — reusing");
-    return poolWallet;
+    // Already opened this session → past the fresh-wallet decision point.
+    return { ...poolWallet, fresh: false };
   }
   if (poolWallet && poolWallet.username !== username) {
     console.log(
@@ -339,6 +350,7 @@ export async function createPoolWallet(
   const encryptionKey = bytesToHex(encKey);
   shieldPrivateKey = "0x" + bytesToHex(shieldKey);
   walletEncryptionKey = encryptionKey;
+  poolMnemonic = mnemonic; // needed by setPoolScanStart (re-write the creation block)
   relayOwnerKey = ("0x" + bytesToHex(relayKey)) as `0x${string}`;
   encKey.fill(0);
   shieldKey.fill(0);
@@ -366,8 +378,53 @@ export async function createPoolWallet(
   });
   poolWallet = { id: info.id, railgunAddress: info.railgunAddress, username };
   wireCallbacks();
-  console.log(`[pool] ✓ 0zk wallet ready: ${info.railgunAddress}`);
-  return poolWallet;
+  // createRailgunWallet loads-or-creates but does NOT scan (the watcher does).
+  // So we can now read whether this wallet has ever been scanned on this device
+  // for the active network. If not (fresh), the caller can still choose the
+  // scan-start block via setPoolScanStart before starting the watcher.
+  const fresh = await isWalletFresh(info.id);
+  console.log(
+    `[pool] ✓ 0zk wallet ready: ${info.railgunAddress} (${fresh ? "FRESH — never scanned on this device/network" : "already scanned — resuming"})`,
+  );
+  return { ...poolWallet, fresh };
+}
+
+/** Has this 0zk NEVER been scanned on this device for the ACTIVE network?
+    The engine only honours a wallet's creation block on its FIRST scan (once
+    `creationTree` is set, it scans forward from the stored high-water-mark), so
+    "fresh" is exactly the window in which the scan-start is still settable.
+    Reads the persisted wallet details — no scan, no network. Any failure errs
+    toward `true` (offer the date picker), never toward silently hiding funds. */
+async function isWalletFresh(id: string): Promise<boolean> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const wallet = walletForID(id) as any;
+    const details = await wallet.getWalletDetails(TXID, CHAIN);
+    const scanned = (details?.treeScannedHeights ?? []).some(
+      (h: number) => h > 0,
+    );
+    return details?.creationTree == null && !scanned;
+  } catch (e) {
+    console.warn("[pool] isWalletFresh: could not read wallet details:", e);
+    return true;
+  }
+}
+
+/** Set the scan-start block of a still-unscanned ("fresh") 0zk, then let the
+    caller start the watcher. Re-writes the creation block via createRailgunWallet
+    (idempotent by mnemonic); because the wallet has never been scanned, this new
+    block IS the one the first scan honours — no delete, no tree re-download, no
+    race with a running watcher (the watcher isn't started until after this). */
+export async function setPoolScanStart(fromBlock: number): Promise<void> {
+  if (!poolWallet || !walletEncryptionKey || !poolMnemonic)
+    throw new Error("no 0zk wallet loaded — unlock first");
+  console.log(`[pool] setting scan-start block = ${fromBlock}`);
+  await withEngineLock(async () => {
+    await createRailgunWallet(walletEncryptionKey!, poolMnemonic!, {
+      [POOL_NETWORK]: fromBlock,
+    });
+  });
+  console.log("[pool] ✓ scan-start block set");
 }
 
 /** Only returns the wallet if it belongs to `username` (no cross-account resume). */
@@ -1004,6 +1061,26 @@ export async function resyncPool(): Promise<void> {
   }
 }
 
+/** TRULY wipe THIS wallet's scan state for the ACTIVE network: the decrypted
+    notes/TXOs AND the walletDetails (creationTree + treeScannedHeights), by
+    clearing the wallet's per-chain DB namespace (`['wallet', id, chain, …]`).
+
+    Why not deleteWalletByID: that only deletes the wallet's ROOT record
+    (`['wallet', id]` — the mnemonic/creationBlock), leaving the entire per-chain
+    scan cache behind, so the wallet still reads as fully scanned (and its creation
+    block stays pinned). Clearing the namespace is exactly what the engine's own
+    clearDecryptedBalances does. The shared per-network Merkle tree lives under a
+    DIFFERENT namespace and is untouched — nothing is re-downloaded, nothing scans
+    here. After this the 0zk is genuinely fresh for this network: the next unlock
+    honours a newly chosen scan-start block. */
+async function clearWalletChainData(id: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wallet = walletForID(id) as any;
+  const namespace = wallet.getWalletDBPrefix(CHAIN);
+  await wallet.db.clearNamespace(namespace);
+  wallet.invalidateCommitmentsCache?.(CHAIN);
+}
+
 /** WALLET-ONLY clear + rescan (shared by recover and the debug button).
 
     The UTXO merkletree is per-NETWORK and shared by every wallet, so we NEVER
@@ -1036,8 +1113,6 @@ async function clearWalletAndRescan(
     "[recover] watcher stopped; recoverPending=true (in-flight tick should bail)",
   );
   try {
-    console.log("[recover] DB BEFORE:");
-    await dumpDbState();
     if (onProgress) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       setOnUTXOMerkletreeScanCallback((e: any) =>
@@ -1047,15 +1122,15 @@ async function clearWalletAndRescan(
     const mnemonic = poolMnemonicFromPRF(prf);
 
     // ── STEP 1: drop this wallet's notes/scan cache (the shared tree stays) ────
-    console.log("[recover] STEP 1: deleteWalletByID — waiting for engine lock…");
+    console.log("[recover] STEP 1: clear wallet scan cache — waiting for engine lock…");
     let t0 = performance.now();
     await withEngineLock(async () => {
       console.log(
-        `[recover] STEP 1: lock acquired (waited ${secs(t0)}) — deleteWalletByID…`,
+        `[recover] STEP 1: lock acquired (waited ${secs(t0)}) — clearWalletChainData…`,
       );
       const s = performance.now();
-      await deleteWalletByID(wallet.id);
-      console.log(`[recover] STEP 1: deleteWalletByID done in ${secs(s)}`);
+      await clearWalletChainData(wallet.id);
+      console.log(`[recover] STEP 1: scan cache cleared in ${secs(s)}`);
     });
 
     // ── STEP 2: re-create the SAME 0zk with its scan-start at fromBlock ────────
@@ -1086,14 +1161,35 @@ async function clearWalletAndRescan(
       console.log(`[recover] STEP 3: refreshBalances done in ${secs(s)}`);
     });
     onProgress?.(100);
-    console.log("[recover] DB AFTER:");
-    await dumpDbState();
     console.log("[recover] ✓ complete");
     return wallet;
   } finally {
     recoverPending = false;
     if (onProgress) setOnUTXOMerkletreeScanCallback(() => {});
     if (wasWatching) startWatcher();
+  }
+}
+
+/** Delete ONLY this wallet's decrypted-notes + scan cache from the engine DB
+    (the shared per-network Merkle tree is kept). Does NOT recreate and does NOT
+    scan — the 0zk simply leaves the engine. The next unlock treats it as fresh,
+    so it lands on the scan-start picker. Funds are on-chain; what's wiped is a
+    re-derivable cache. No passkey: uses the id of the already-loaded wallet. */
+export async function deletePoolWalletData(username: string): Promise<void> {
+  if (!poolWallet || poolWallet.username !== username)
+    throw new Error("no 0zk wallet loaded for this account");
+  const id = poolWallet.id;
+  recoverPending = true; // an in-flight watcher tick bails at its next await
+  stopWatcher();
+  console.log(`[pool] deleting wallet DB for ${id.slice(0, 8)}… (no rescan)`);
+  try {
+    await withEngineLock(async () => {
+      await clearWalletChainData(id);
+    });
+    await resetPool(); // clear in-memory account state (also unloads from engine)
+    console.log("[pool] ✓ wallet DB deleted (no rescan)");
+  } finally {
+    recoverPending = false;
   }
 }
 
@@ -1109,17 +1205,6 @@ export function recoverPoolBalances(
   return clearWalletAndRescan(prf, username, fromBlock, onProgress);
 }
 
-/** Debug: clear ONLY this wallet's scan cache and re-scan its full history
-    against the existing tree (no date, no tree re-download). See
-    `clearWalletAndRescan`. */
-export function clearWalletScan(
-  prf: Uint8Array,
-  username: string,
-  onProgress?: (pct: number) => void,
-): Promise<PoolWallet> {
-  return clearWalletAndRescan(prf, username, 0, onProgress);
-}
-
 /** Clear ALL account-scoped pool state. Call on logout / account switch so a
     new account never inherits the previous 0zk, balances or watcher. The
     engine itself stays up (it's account-agnostic and holds wallets by id). */
@@ -1129,6 +1214,7 @@ export async function resetPool(): Promise<void> {
   poolWallet = null;
   shieldPrivateKey = null;
   walletEncryptionKey = null;
+  poolMnemonic = null;
   relayOwnerKey = null;
   balances.spendable = 0n;
   balances.missingExternal = 0n;
@@ -1151,65 +1237,6 @@ export async function resetPool(): Promise<void> {
     }
   }
   console.log("[pool] reset — account state cleared");
-}
-
-// ── DB inspection + manual tree wipe (debugging the recovery scan) ────────────
-// A Web Worker can read IndexedDB directly, so this is the ground truth of what
-// the engine has actually persisted — no Chrome devtools, no guessing. Filter
-// the console by `[db]` to read just these.
-
-/** Log every IndexedDB database with its object stores and record counts.
-    For the engine DB (`r1do-railgun`) the counts are the real state of the tree
-    and the wallet scan cache, so we can watch it fill up (or confirm it's empty
-    after a wipe) at any moment. */
-export async function dumpDbState(): Promise<void> {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const dbs = (await (indexedDB as any).databases?.()) ?? [];
-    const names: string[] = dbs.map((d: { name?: string }) => d.name).filter(Boolean);
-    console.log(`[db] ${names.length} database(s): ${names.join(", ") || "(none)"}`);
-    for (const name of names) {
-      await new Promise<void>((resolve) => {
-        const req = indexedDB.open(name);
-        req.onerror = () => {
-          console.log(`[db]   ${name}: open ERROR`, req.error);
-          resolve();
-        };
-        req.onblocked = () => {
-          console.log(`[db]   ${name}: open BLOCKED (held open elsewhere)`);
-          resolve();
-        };
-        req.onsuccess = () => {
-          const db = req.result;
-          const stores = Array.from(db.objectStoreNames);
-          if (stores.length === 0) {
-            console.log(`[db]   ${name}: (no object stores)`);
-            db.close();
-            return resolve();
-          }
-          const tx = db.transaction(stores, "readonly");
-          Promise.all(
-            stores.map(
-              (s) =>
-                new Promise<string>((res) => {
-                  const cr = tx.objectStore(s).count();
-                  cr.onsuccess = () => res(`${s}=${cr.result}`);
-                  cr.onerror = () => res(`${s}=ERR`);
-                }),
-            ),
-          )
-            .then((counts) => console.log(`[db]   ${name}: ${counts.join("  ")}`))
-            .catch((e) => console.log(`[db]   ${name}: count failed`, e))
-            .finally(() => {
-              db.close();
-              resolve();
-            });
-        };
-      });
-    }
-  } catch (e) {
-    console.warn("[db] dumpDbState failed", e);
-  }
 }
 
 // ── Web Worker boundary (Comlink) ─────────────────────────────────────────────
@@ -1238,9 +1265,9 @@ const workerApi = {
   refreshNow,
   resyncPool,
   recoverPoolBalances,
-  clearWalletScan,
+  deletePoolWalletData,
+  setPoolScanStart,
   resetPool,
-  dumpDbState,
 };
 export type PoolWorkerApi = typeof workerApi;
 Comlink.expose(workerApi);

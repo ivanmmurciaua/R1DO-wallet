@@ -165,6 +165,11 @@ export function Settings({
   const [recovering, setRecovering] = useState(false);
   const [recoverPct, setRecoverPct] = useState(0);
   const [recoverMsg, setRecoverMsg] = useState<string | null>(null);
+  // Delete-only: wipe THIS wallet's Railgun scan cache (no rescan). Reloads after,
+  // so the next unlock treats the 0zk as fresh (the scan-start picker).
+  const [confirmDeleteScan, setConfirmDeleteScan] = useState(false);
+  const [deletingScan, setDeletingScan] = useState(false);
+  const [deleteScanMsg, setDeleteScanMsg] = useState<string | null>(null);
   // Calendar deep-scan (light world, private wallets). A sweep is a fixed-span
   // window the user drags anywhere into the past; the default lands it on the last
   // few days, which is the common case (a cursor that started at "now" on this
@@ -243,6 +248,26 @@ export function Settings({
     }
   };
 
+  const handleDeleteScan = async () => {
+    if (!username) return;
+    setConfirmDeleteScan(false);
+    setDeleteScanMsg(null);
+    setDeletingScan(true);
+    try {
+      // Pure delete of this wallet's scan cache (no recreate, no scan). The
+      // wallet must be currently unlocked so the engine knows its id.
+      const { deletePoolWalletData } = await import("@/lib/pool/railgun");
+      await deletePoolWalletData(username);
+      // Reload so the stale unlocked UI drops: the next unlock sees a fresh 0zk
+      // and offers the scan-start date picker.
+      setDeleteScanMsg("Scan data deleted. Reloading…");
+      window.location.reload();
+    } catch (e) {
+      setDeleteScanMsg("Delete failed: " + ((e as Error)?.message ?? String(e)));
+      setDeletingScan(false);
+    }
+  };
+
   const handleResync = async () => {
     setConfirmResync(false);
     setResyncMsg(null);
@@ -258,49 +283,6 @@ export function Settings({
       setResyncMsg("Re-sync failed: " + ((e as Error)?.message ?? String(e)));
     } finally {
       setResyncing(false);
-    }
-  };
-
-  // ── debug: inspect / wipe the engine IndexedDB ────────────────────────────
-  // Output goes to the console (`[db]` prefix); on mobile, read it via remote
-  // debugging (chrome://inspect over USB, or Safari Web Inspector).
-  const [dbBusy, setDbBusy] = useState(false);
-  const [clearPct, setClearPct] = useState(0);
-  const [clearMsg, setClearMsg] = useState<string | null>(null);
-  const handleDumpDb = async () => {
-    setDbBusy(true);
-    try {
-      const { dumpDbState } = await import("@/lib/pool/railgun");
-      await dumpDbState();
-    } catch (e) {
-      console.warn("[db] dump failed", e);
-    } finally {
-      setDbBusy(false);
-    }
-  };
-  const handleClearWalletScan = async () => {
-    if (!username) return;
-    setClearMsg(null);
-    setDbBusy(true);
-    setClearPct(0);
-    let prf: Uint8Array | null = null;
-    try {
-      // Same re-auth as recover: a fresh passkey → PRF re-derives the 0zk that
-      // createRailgunWallet keys by. Zeroed in `finally`.
-      const { getWalletCredential } = await import("@/lib/credstore");
-      const { loadFromDevice } = await import("@/lib/passkeys");
-      const { clearWalletScan } = await import("@/lib/pool/railgun");
-      const cred = await getWalletCredential(username).catch(() => null);
-      if (!cred?.rawId) throw new Error("no credential found for this account");
-      prf = await loadFromDevice(cred.rawId);
-      if (!prf || prf.length === 0) throw new Error("passkey/PRF unavailable on this device");
-      await clearWalletScan(prf, username, (pct) => setClearPct(pct));
-      setClearMsg("Wallet scan rebuilt. Check the console for the DB state.");
-    } catch (e) {
-      setClearMsg("Clear failed: " + ((e as Error)?.message ?? String(e)));
-    } finally {
-      if (prf) prf.fill(0);
-      setDbBusy(false);
     }
   };
 
@@ -874,20 +856,19 @@ export function Settings({
             {minimal && username && (
             <div>
               <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
-                Engine DB (debug)
+                Delete scan data
                 <InfoDot>
-                  Diagnostics for the shielded scan. DUMP prints every IndexedDB
-                  table and its record count to the console. CLEAR WALLET SCAN
-                  clears ONLY this wallet&apos;s decrypted-notes cache and re-scans
-                  its full history against the tree already on this device (the
-                  shared per-network Merkle tree is kept, so nothing is re-downloaded).
-                  It asks for your passkey and your funds are never at risk.
+                  Wipes ONLY this wallet&apos;s Railgun scan cache (decrypted notes
+                  + scan position) on this device. The shared network tree is kept,
+                  and it does NOT rescan. Your funds are on-chain and untouched —
+                  this just clears a re-derivable cache. After it reloads, the next
+                  unlock lets you pick a fresh scan-start date.
                 </InfoDot>
               </p>
-              <div style={{ display: "flex", gap: "0.6rem" }}>
+              {!confirmDeleteScan ? (
                 <button
-                  onClick={handleDumpDb}
-                  disabled={dbBusy}
+                  onClick={() => setConfirmDeleteScan(true)}
+                  disabled={deletingScan}
                   style={{
                     background: "transparent",
                     border: "1px solid currentColor",
@@ -896,38 +877,58 @@ export function Settings({
                     fontSize: "0.75rem",
                     letterSpacing: "0.08em",
                     padding: "6px 12px",
-                    cursor: dbBusy ? "default" : "pointer",
-                    opacity: dbBusy ? 0.5 : 1,
-                    flex: 1,
+                    cursor: deletingScan ? "default" : "pointer",
+                    opacity: deletingScan ? 0.5 : 1,
+                    width: "100%",
                   }}
                 >
-                  [DUMP DB STATE]
+                  {deletingScan ? "[DELETING…]" : "[DELETE SCAN DATA]"}
                 </button>
-                <button
-                  onClick={handleClearWalletScan}
-                  disabled={dbBusy}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid currentColor",
-                    color: "inherit",
-                    fontFamily: "var(--font-geist-mono), monospace",
-                    fontSize: "0.75rem",
-                    letterSpacing: "0.08em",
-                    padding: "6px 12px",
-                    cursor: dbBusy ? "default" : "pointer",
-                    opacity: dbBusy ? 0.5 : 1,
-                    flex: 1,
-                  }}
-                >
-                  {dbBusy
-                    ? clearPct > 0
-                      ? `[SCANNING ${clearPct}%…]`
-                      : "[WORKING…]"
-                    : "[CLEAR WALLET SCAN]"}
-                </button>
-              </div>
-              {clearMsg && (
-                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{clearMsg}</p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <span style={{ fontSize: "0.72rem", opacity: 0.8, lineHeight: 1.5 }}>
+                    Delete this wallet&apos;s scan cache? It will not rescan; the app
+                    reloads and the next unlock asks for a scan-start date.
+                  </span>
+                  <div style={{ display: "flex", gap: "0.6rem" }}>
+                    <button
+                      onClick={handleDeleteScan}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid currentColor",
+                        color: "inherit",
+                        fontFamily: "var(--font-geist-mono), monospace",
+                        fontSize: "0.75rem",
+                        letterSpacing: "0.08em",
+                        padding: "6px 12px",
+                        cursor: "pointer",
+                        flex: 1,
+                      }}
+                    >
+                      [CONFIRM]
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteScan(false)}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid currentColor",
+                        color: "inherit",
+                        opacity: 0.6,
+                        fontFamily: "var(--font-geist-mono), monospace",
+                        fontSize: "0.75rem",
+                        letterSpacing: "0.08em",
+                        padding: "6px 12px",
+                        cursor: "pointer",
+                        flex: 1,
+                      }}
+                    >
+                      [CANCEL]
+                    </button>
+                  </div>
+                </div>
+              )}
+              {deleteScanMsg && (
+                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{deleteScanMsg}</p>
               )}
             </div>
             )}
