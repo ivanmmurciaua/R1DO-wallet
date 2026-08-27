@@ -23,13 +23,21 @@ import type {
   PoolWorkerApi,
   PoolConfig,
   PoolWallet,
+  OpenedPoolWallet,
   PoolBalances,
   TokenBuckets,
   PoolActivity,
   ShieldCall,
 } from "./railgun.worker";
 
-export type { PoolWallet, PoolBalances, TokenBuckets, PoolActivity, ShieldCall };
+export type {
+  PoolWallet,
+  OpenedPoolWallet,
+  PoolBalances,
+  TokenBuckets,
+  PoolActivity,
+  ShieldCall,
+};
 
 // ── worker (lazy, client-only) ────────────────────────────────────────────────
 // Created on first use so SSR / module import never tries to spawn a Worker
@@ -78,11 +86,20 @@ export async function createPoolWallet(
   prf: Uint8Array,
   username: string,
   creationDate?: Date,
-): Promise<PoolWallet> {
+): Promise<OpenedPoolWallet> {
   const creationBlock = creationDate
     ? Number((await blockForCalendarDay(creationDate)).block)
     : undefined;
   return getApi().createPoolWallet(prf, username, creationBlock);
+}
+
+/** Set the scan-start of a still-unscanned ("fresh") 0zk to a chosen calendar
+    day — resolved to a block HERE (the worker has no blockByTime/localStorage).
+    Call ONLY on a wallet createPoolWallet reported as `fresh`, and BEFORE
+    startWatcher, so the first scan begins exactly at the chosen day. */
+export async function setPoolScanStart(fromDate: Date): Promise<void> {
+  const fromBlock = Number((await blockForCalendarDay(fromDate)).block);
+  await getApi().setPoolScanStart(fromBlock);
 }
 export function getPoolWallet(username: string): Promise<PoolWallet | null> {
   return getApi().getPoolWallet(username);
@@ -183,22 +200,10 @@ export async function resetPool(): Promise<void> {
   await getApi().resetPool();
 }
 
-// ── debug: inspect the engine IndexedDB / rebuild just this wallet's cache ────
-/** Log every IndexedDB database + object-store record counts to the console. */
-export function dumpDbState(): Promise<void> {
-  return getApi().dumpDbState();
-}
-/** Clear ONLY this wallet's scan cache and re-scan its full history against the
-    existing (shared, per-network) tree — no date, no tree re-download. Needs the
-    PRF to re-derive the 0zk. On-chain funds are untouched. */
-export function clearWalletScan(
-  prf: Uint8Array,
-  username: string,
-  onProgress?: (pct: number) => void,
-): Promise<PoolWallet> {
-  return getApi().clearWalletScan(
-    prf,
-    username,
-    onProgress ? Comlink.proxy(onProgress) : undefined,
-  );
+/** Delete ONLY this wallet's Railgun scan cache (decrypted notes + scan state)
+    from the engine DB, keeping the shared per-network tree. Does NOT rescan: the
+    0zk leaves the engine and the next unlock treats it as fresh (scan-start
+    picker). Needs the wallet to be currently unlocked/loaded. */
+export function deletePoolWalletData(username: string): Promise<void> {
+  return getApi().deletePoolWalletData(username);
 }
