@@ -432,10 +432,13 @@ export default function Home() {
     setWallet(null);
     setDeployed(false);
     exitPublic(); // always return to the public world on logout
-    // Clear all Railgun pool state so the next account never inherits the
-    // previous 0zk / balances / watcher.
+    // Hard-stop the engine worker so the next account never inherits the
+    // previous 0zk / balances / watcher AND the worker stops hammering
+    // IndexedDB (which was starving the credential store's DB open → the login
+    // screen stuck loading). Terminating drops the worker's in-memory secrets
+    // too, so no separate resetPool is needed.
     import("@/lib/pool/railgun")
-      .then((m) => m.resetPool())
+      .then((m) => m.terminateWorker())
       .catch(() => {});
     closePopup();
   }

@@ -38,28 +38,74 @@ function getAll(db: IDBDatabase): Promise<Record<string, unknown>[]> {
   });
 }
 
+const UPGRADE = (db: IDBDatabase) => {
+  if (!db.objectStoreNames.contains(STORE_NAME)) {
+    const store = db.createObjectStore(STORE_NAME, { keyPath: "username" });
+    store.createIndex("credentialId", "credentialId", { unique: false });
+    store.createIndex("createdAt", "createdAt", { unique: false });
+  }
+};
+
+// Right after a heavy shadow session, mobile IndexedDB can be transiently busy
+// (the engine's big scan still flushing to disk), so the FIRST open times out.
+// It frees up "after a while", so retry with backoff instead of failing the
+// whole login flow on one timeout — the recurring "loading forever" bug.
+async function openDBWithRetry(): Promise<IDBDatabase> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      return await openDB(DB_NAME, 1, UPGRADE);
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[credstore] open attempt ${attempt} failed, retrying:`, e);
+      await new Promise((r) => setTimeout(r, Math.min(1500 * attempt, 5000)));
+    }
+  }
+  throw lastErr;
+}
+
+// A single in-flight init shared by all callers, so a slow open isn't multiplied
+// by every concurrent credential read racing to open the same DB.
+let _initInFlight: Promise<IDBDatabase> | null = null;
 async function initDB(): Promise<IDBDatabase> {
   if (_db) return _db;
-  _db = await openDB(DB_NAME, 1, (db) => {
-    if (!db.objectStoreNames.contains(STORE_NAME)) {
-      const store = db.createObjectStore(STORE_NAME, { keyPath: "username" });
-      store.createIndex("credentialId", "credentialId", { unique: false });
-      store.createIndex("createdAt", "createdAt", { unique: false });
-    }
-  });
+  if (_initInFlight) return _initInFlight;
+  _initInFlight = (async () => {
+    const db = await openDBWithRetry();
+    _db = db;
+    await runLegacyMigration(db);
+    return db;
+  })();
+  try {
+    return await _initInFlight;
+  } finally {
+    _initInFlight = null;
+  }
+}
 
+async function runLegacyMigration(db: IDBDatabase): Promise<void> {
   // One-time migration from the legacy tools DB (only if it exists).
   try {
-    const current = await getAll(_db);
-    if (current.length === 0 && indexedDB.databases) {
-      const names = (await indexedDB.databases()).map((d) => d.name);
+    const current = await getAll(db);
+    // indexedDB.databases() can itself hang on some mobile browsers — cap it so
+    // it never wedges init after the open already succeeded.
+    const listDbs = indexedDB.databases
+      ? await Promise.race([
+          indexedDB.databases(),
+          new Promise<IDBDatabaseInfo[]>((_, rej) =>
+            setTimeout(() => rej(new Error("databases() timeout")), 3000),
+          ),
+        ])
+      : [];
+    if (current.length === 0 && listDbs.length) {
+      const names = listDbs.map((d) => d.name);
       if (names.includes(LEGACY_DB_NAME)) {
         const old = await openDB(LEGACY_DB_NAME);
         const records = await getAll(old);
         old.close();
         if (records.length > 0) {
           await new Promise<void>((resolve, reject) => {
-            const tx = _db!.transaction(STORE_NAME, "readwrite");
+            const tx = db.transaction(STORE_NAME, "readwrite");
             const store = tx.objectStore(STORE_NAME);
             for (const rec of records) store.put(rec);
             tx.oncomplete = () => resolve();
@@ -71,8 +117,6 @@ async function initDB(): Promise<IDBDatabase> {
   } catch (e) {
     console.warn("[credstore] legacy migration skipped:", e);
   }
-
-  return _db;
 }
 
 function hexToArray(rawIdHex: string): number[] {

@@ -296,8 +296,12 @@ export default function PrivateView({
     })();
     return () => {
       alive = false;
-      import("@/lib/pool/railgun").then((m) => m.stopWatcher());
-      console.log("[private] left the shadow — watcher stopped");
+      // Hard-stop the engine worker (not just the watcher): a still-running scan
+      // keeps hammering IndexedDB after you leave the shadow, which starves the
+      // credential store's DB open on mobile and leaves the app stuck loading.
+      // The scan resumes incrementally on the next entry (no data lost).
+      import("@/lib/pool/railgun").then((m) => m.terminateWorker());
+      console.log("[private] left the shadow — engine worker terminated");
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootAttempt]);
