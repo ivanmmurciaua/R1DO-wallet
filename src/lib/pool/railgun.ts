@@ -54,6 +54,31 @@ function getApi(): Comlink.Remote<PoolWorkerApi> {
   return api;
 }
 
+/** Hard-stop the engine worker: terminate the thread (dropping its heavy
+    IndexedDB write load + its callback stream) and reset the singletons so the
+    next entry boots a fresh engine. Leaving the worker alive after the private
+    view closes keeps it hammering IndexedDB during a scan, which on mobile
+    serializes the whole IndexedDB backend and starves other DB opens — that is
+    what left the credential store's "open" timing out and the app stuck loading.
+    Committed scan data survives (IndexedDB writes are atomic); the scan resumes
+    incrementally on the next boot. Synchronous + main-thread, so it works even
+    when the worker is too busy to answer a Comlink call. */
+export function terminateWorker(): void {
+  if (worker) {
+    worker.terminate();
+    worker = null;
+    api = null;
+  }
+}
+
+// Also kill it as the page unloads (F5 / navigation): the browser tears a Worker
+// down anyway, but terminating here nudges it to stop issuing new IndexedDB
+// writes sooner, so the backend has less to flush and the next load's DB opens
+// aren't starved. `pagehide` fires on mobile Safari where `beforeunload` doesn't.
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => terminateWorker());
+}
+
 // ── config the worker can't read (window/localStorage live here) ──────────────
 const RAILGUN_NETWORK: Partial<Record<NetworkId, NetworkName>> = {
   sepolia: NetworkName.EthereumSepolia,
