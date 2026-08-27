@@ -16,7 +16,7 @@ import {
   removeWalletMeta,
 } from "@/lib/localstorage";
 import { deleteWalletCredential } from "@/lib/credstore";
-import { LOCAL_LAST_USER, LOCAL_WIPE_SCAN } from "@/app/constants";
+import { LOCAL_LAST_USER } from "@/app/constants";
 import { NETWORKS, activeNetwork, setActiveNetwork } from "@/lib/networks";
 import { MAX_DEEP_SCAN_DAYS, defaultScanDay, latestScannableDay, scanWindowFor } from "@/lib/deepScan";
 
@@ -157,19 +157,14 @@ export function Settings({
   const [confirmResync, setConfirmResync] = useState(false);
   const [resyncing, setResyncing] = useState(false);
   const [resyncMsg, setResyncMsg] = useState<string | null>(null);
-  // Recover (shielded pool): move this 0zk's scan-start back to the picked day
-  // and rescan, to recover funds shielded before this device's creation block.
-  // Re-derives the wallet, so it needs the PRF (a fresh passkey), like deep-scan.
-  const [recoverDay, setRecoverDay] = useState<string>(() => toInputValue(defaultScanDay()));
-  const [confirmRecover, setConfirmRecover] = useState(false);
-  const [recovering, setRecovering] = useState(false);
-  const [recoverPct, setRecoverPct] = useState(0);
-  const [recoverMsg, setRecoverMsg] = useState<string | null>(null);
-  // Delete-only: wipe THIS wallet's Railgun scan cache (no rescan). Reloads after,
-  // so the next unlock treats the 0zk as fresh (the scan-start picker).
-  const [confirmDeleteScan, setConfirmDeleteScan] = useState(false);
-  const [deletingScan, setDeletingScan] = useState(false);
-  const [deleteScanMsg, setDeleteScanMsg] = useState<string | null>(null);
+  // Hard reset: delete the WHOLE Railgun engine IndexedDB (the Merkle tree + all
+  // wallet caches) and rebuild from scratch. A stuck/partial tree from an
+  // interrupted scan is what wedges scanning, and it lives outside any per-wallet
+  // namespace, so only a full wipe unsticks it. Deterministic: we verify the
+  // store reports 0 records before reloading.
+  const [confirmHardReset, setConfirmHardReset] = useState(false);
+  const [hardResetting, setHardResetting] = useState(false);
+  const [hardResetMsg, setHardResetMsg] = useState<string | null>(null);
   // Calendar deep-scan (light world, private wallets). A sweep is a fixed-span
   // window the user drags anywhere into the past; the default lands it on the last
   // few days, which is the common case (a cursor that started at "now" on this
@@ -214,56 +209,103 @@ export function Settings({
     }
   };
 
-  const handleRecover = async () => {
-    if (!username) return;
-    setConfirmRecover(false);
-    setRecoverMsg(null);
-    const day = fromInputValue(recoverDay);
-    if (!isValidDay(day)) {
-      setRecoverMsg("Pick a valid date first.");
-      return;
-    }
-    setRecovering(true);
-    setRecoverPct(0);
-    let prf: Uint8Array | null = null;
-    try {
-      // Mirrors the deep-scan / seed-reveal re-auth: a fresh passkey → PRF, since
-      // recovery derives the mnemonic to re-key the wallet. Zeroed in `finally`.
-      const { getWalletCredential } = await import("@/lib/credstore");
-      const { loadFromDevice } = await import("@/lib/passkeys");
-      const { recoverPoolBalances } = await import("@/lib/pool/railgun");
-      const cred = await getWalletCredential(username).catch(() => null);
-      if (!cred?.rawId) throw new Error("no credential found for this account");
-      prf = await loadFromDevice(cred.rawId);
-      if (!prf || prf.length === 0) throw new Error("passkey/PRF unavailable on this device");
-      // The heavy rescan runs in the worker; progress streams back here without
-      // freezing the UI.
-      await recoverPoolBalances(prf, username, day, (pct) => setRecoverPct(pct));
-      setRecoverMsg(`Rescanned from ${recoverDay}. Older funds should now appear.`);
-    } catch (e) {
-      setRecoverMsg("Recovery failed: " + ((e as Error)?.message ?? String(e)));
-    } finally {
-      if (prf) prf.fill(0);
-      setRecovering(false);
-    }
-  };
+  // The engine store is level-js → IndexedDB database "level-js-r1do-railgun".
+  const ENGINE_DB = "level-js-r1do-railgun";
 
-  const handleDeleteScan = () => {
-    if (!username) return;
-    setConfirmDeleteScan(false);
-    // Deadlock-proof: do NOT touch the engine here. Clearing a wallet's scan
-    // cache while the engine is live can hang behind an in-flight scan (the
-    // IndexedDB clear waits on the scan's transaction). Instead just mark this
-    // wallet for wipe and reload — the actual per-wallet namespace clear runs on
-    // the next unlock, in a clean engine state with no watcher contending.
-    setDeletingScan(true);
-    setDeleteScanMsg("Scan data will be cleared on next unlock. Reloading…");
+  // Count every record across the engine DB's object stores. Deterministic truth
+  // of whether the wipe fully landed: 0 = empty. Returns -1 if it can't tell
+  // (blocked/held open elsewhere), which we treat as "not empty, retry".
+  const engineDbRecordCount = (): Promise<number> =>
+    new Promise((resolve) => {
+      let settled = false;
+      const done = (n: number) => {
+        if (!settled) {
+          settled = true;
+          resolve(n);
+        }
+      };
+      try {
+        const req = indexedDB.open(ENGINE_DB);
+        req.onerror = () => done(-1);
+        req.onblocked = () => done(-1);
+        req.onsuccess = () => {
+          const db = req.result;
+          const stores = Array.from(db.objectStoreNames);
+          if (stores.length === 0) {
+            db.close();
+            return done(0);
+          }
+          const tx = db.transaction(stores, "readonly");
+          let total = 0;
+          let pending = stores.length;
+          for (const s of stores) {
+            const cr = tx.objectStore(s).count();
+            cr.onsuccess = () => {
+              total += cr.result;
+              if (--pending === 0) {
+                db.close();
+                done(total);
+              }
+            };
+            cr.onerror = () => {
+              if (--pending === 0) {
+                db.close();
+                done(total);
+              }
+            };
+          }
+        };
+        setTimeout(() => done(-1), 4000);
+      } catch {
+        done(-1);
+      }
+    });
+
+  const deleteEngineDb = (): Promise<void> =>
+    new Promise((resolve) => {
+      try {
+        const req = indexedDB.deleteDatabase(ENGINE_DB);
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+        req.onblocked = () => resolve(); // held open; the count check will catch it
+        setTimeout(resolve, 4000);
+      } catch {
+        resolve();
+      }
+    });
+
+  const handleHardReset = async () => {
+    setConfirmHardReset(false);
+    setHardResetting(true);
+    setHardResetMsg("Stopping the engine…");
+    // Kill the worker first so it releases its IndexedDB connection (deleteDatabase
+    // is blocked while the engine holds it open).
     try {
-      localStorage.setItem(LOCAL_WIPE_SCAN, username);
+      const mod = await import("@/lib/pool/railgun");
+      mod.terminateWorker();
     } catch {
-      /* private mode / storage disabled — reload still lands on the unlock flow */
+      /* ignore — we still try to delete + verify below */
     }
-    window.location.reload();
+    // Delete, then VERIFY the store is truly empty (0 records). Retry until it is
+    // — a lingering connection (another open tab of this app) leaves records and
+    // we surface that instead of pretending it worked.
+    let count = -1;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      setHardResetMsg(`Wiping the private database… (attempt ${attempt})`);
+      await deleteEngineDb();
+      count = await engineDbRecordCount();
+      if (count === 0) break;
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    if (count === 0) {
+      setHardResetMsg("Database empty (0 records). Reloading…");
+      window.location.reload();
+    } else {
+      setHardResetMsg(
+        "Could not fully clear the database. Close any other tabs of this app on this device and try again.",
+      );
+      setHardResetting(false);
+    }
   };
 
   const handleResync = async () => {
@@ -761,29 +803,21 @@ export function Settings({
             {minimal && username && (
             <div>
               <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
-                Recover older funds
+                Hard reset
                 <InfoDot>
-                  If you shielded funds before setting up this device, this wallet can
-                  start scanning too late to see them. Pick the day you first set it up
-                  (or earlier) and it re-scans your shielded balance from that day, so
-                  older deposits reappear. Your funds were never lost, just unseen here.
-                  Takes a few minutes and re-derives your wallet, so it asks for your
-                  passkey.
+                  Deletes this device&apos;s entire private engine database (the
+                  Merkle tree and every wallet scan cache) and rebuilds it from
+                  scratch on the next unlock. Use this if scanning gets stuck: a
+                  partial tree from an interrupted scan can wedge it, and only a
+                  full wipe clears that. Your funds are on-chain and safe — this
+                  only clears re-derivable local data. After it reloads, unlock and
+                  pick a scan-start date.
                 </InfoDot>
               </p>
-              <TextField
-                type="date"
-                size="small"
-                value={recoverDay}
-                disabled={recovering}
-                onChange={(e) => setRecoverDay(e.target.value)}
-                slotProps={{ htmlInput: { max: toInputValue(latestScannableDay()) } }}
-                sx={{ ...inputSx, width: "100%", mb: 1 }}
-              />
-              {!confirmRecover ? (
+              {!confirmHardReset ? (
                 <button
-                  onClick={() => setConfirmRecover(true)}
-                  disabled={recovering}
+                  onClick={() => setConfirmHardReset(true)}
+                  disabled={hardResetting}
                   style={{
                     background: "transparent",
                     border: "1px solid currentColor",
@@ -792,25 +826,21 @@ export function Settings({
                     fontSize: "0.75rem",
                     letterSpacing: "0.08em",
                     padding: "6px 12px",
-                    cursor: recovering ? "default" : "pointer",
-                    opacity: recovering ? 0.5 : 1,
+                    cursor: hardResetting ? "default" : "pointer",
+                    opacity: hardResetting ? 0.5 : 1,
                     width: "100%",
                   }}
                 >
-                  {recovering
-                    ? recoverPct > 0
-                      ? `[RECOVERING… scanning ${recoverPct}% · keep tab open]`
-                      : "[RECOVERING… preparing, keep tab open]"
-                    : "[RECOVER FUNDS]"}
+                  {hardResetting ? "[RESETTING…]" : "[HARD RESET]"}
                 </button>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                   <span style={{ fontSize: "0.72rem", opacity: 0.8, lineHeight: 1.5 }}>
-                    Re-scan shielded funds from {recoverDay}? This can take a few minutes.
+                    Delete the whole private database and rebuild it? The app reloads.
                   </span>
                   <div style={{ display: "flex", gap: "0.6rem" }}>
                     <button
-                      onClick={handleRecover}
+                      onClick={handleHardReset}
                       style={{
                         background: "transparent",
                         border: "1px solid currentColor",
@@ -826,7 +856,7 @@ export function Settings({
                       [CONFIRM]
                     </button>
                     <button
-                      onClick={() => setConfirmRecover(false)}
+                      onClick={() => setConfirmHardReset(false)}
                       style={{
                         background: "transparent",
                         border: "1px solid currentColor",
@@ -845,88 +875,8 @@ export function Settings({
                   </div>
                 </div>
               )}
-              {recoverMsg && (
-                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{recoverMsg}</p>
-              )}
-            </div>
-            )}
-
-            {minimal && username && (
-            <div>
-              <p style={{ fontSize: "0.8rem", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
-                Delete scan data
-                <InfoDot>
-                  Wipes ONLY this wallet&apos;s Railgun scan cache (decrypted notes
-                  + scan position) on this device. The shared network tree is kept,
-                  and it does NOT rescan. Your funds are on-chain and untouched —
-                  this just clears a re-derivable cache. After it reloads, the next
-                  unlock lets you pick a fresh scan-start date.
-                </InfoDot>
-              </p>
-              {!confirmDeleteScan ? (
-                <button
-                  onClick={() => setConfirmDeleteScan(true)}
-                  disabled={deletingScan}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid currentColor",
-                    color: "inherit",
-                    fontFamily: "var(--font-geist-mono), monospace",
-                    fontSize: "0.75rem",
-                    letterSpacing: "0.08em",
-                    padding: "6px 12px",
-                    cursor: deletingScan ? "default" : "pointer",
-                    opacity: deletingScan ? 0.5 : 1,
-                    width: "100%",
-                  }}
-                >
-                  {deletingScan ? "[DELETING…]" : "[DELETE SCAN DATA]"}
-                </button>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                  <span style={{ fontSize: "0.72rem", opacity: 0.8, lineHeight: 1.5 }}>
-                    Delete this wallet&apos;s scan cache? It will not rescan; the app
-                    reloads and the next unlock asks for a scan-start date.
-                  </span>
-                  <div style={{ display: "flex", gap: "0.6rem" }}>
-                    <button
-                      onClick={handleDeleteScan}
-                      style={{
-                        background: "transparent",
-                        border: "1px solid currentColor",
-                        color: "inherit",
-                        fontFamily: "var(--font-geist-mono), monospace",
-                        fontSize: "0.75rem",
-                        letterSpacing: "0.08em",
-                        padding: "6px 12px",
-                        cursor: "pointer",
-                        flex: 1,
-                      }}
-                    >
-                      [CONFIRM]
-                    </button>
-                    <button
-                      onClick={() => setConfirmDeleteScan(false)}
-                      style={{
-                        background: "transparent",
-                        border: "1px solid currentColor",
-                        color: "inherit",
-                        opacity: 0.6,
-                        fontFamily: "var(--font-geist-mono), monospace",
-                        fontSize: "0.75rem",
-                        letterSpacing: "0.08em",
-                        padding: "6px 12px",
-                        cursor: "pointer",
-                        flex: 1,
-                      }}
-                    >
-                      [CANCEL]
-                    </button>
-                  </div>
-                </div>
-              )}
-              {deleteScanMsg && (
-                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{deleteScanMsg}</p>
+              {hardResetMsg && (
+                <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{hardResetMsg}</p>
               )}
             </div>
             )}
