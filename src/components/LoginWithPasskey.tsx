@@ -49,6 +49,14 @@ export default function LoginWithPasskey({ createOrLoad }: props) {
       for (const m of getWalletMetas()) {
         byName.set(m.username.toLowerCase(), m);
       }
+      // Render the LOCAL list immediately: the shared credential store is a
+      // best-effort enhancement and must never gate the wallet list. On mobile
+      // its IndexedDB open has hung, leaving "Loading wallets..." forever — so if
+      // this device already knows a wallet, show it now and enrich afterwards.
+      if (byName.size > 0) {
+        setWallets([...byName.values()]);
+        setLoading(false);
+      }
       try {
         for (const c of await listWalletCredentials()) {
           const key = c.username.toLowerCase();

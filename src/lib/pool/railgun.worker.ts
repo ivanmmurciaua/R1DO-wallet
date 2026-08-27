@@ -315,6 +315,7 @@ export async function createPoolWallet(
   prf: Uint8Array,
   username: string,
   creationBlockOverride?: number,
+  wipeFirst?: boolean,
 ): Promise<OpenedPoolWallet> {
   if (poolWallet && poolWallet.username === username) {
     console.log("[pool] 0zk wallet already derived — reusing");
@@ -378,6 +379,21 @@ export async function createPoolWallet(
   });
   poolWallet = { id: info.id, railgunAddress: info.railgunAddress, username };
   wireCallbacks();
+
+  // Deferred "delete scan data": the button only sets a flag + reloads, so the
+  // heavy per-chain namespace clear runs HERE, at boot, with the wallet just
+  // loaded and NO watcher running yet — no engine-lock contention, no IndexedDB
+  // deadlock against an in-flight scan (which is what hung the live delete).
+  if (wipeFirst) {
+    console.log("[pool] wipeFirst — clearing this wallet's scan cache (clean boot state)…");
+    try {
+      await withTimeout(clearWalletChainData(info.id), 30_000, "wipeWalletScan");
+      console.log("[pool] ✓ scan cache cleared");
+    } catch (e) {
+      console.warn("[pool] wipeFirst failed (continuing):", e);
+    }
+  }
+
   // createRailgunWallet loads-or-creates but does NOT scan (the watcher does).
   // So we can now read whether this wallet has ever been scanned on this device
   // for the active network. If not (fresh), the caller can still choose the
@@ -1170,29 +1186,6 @@ async function clearWalletAndRescan(
   }
 }
 
-/** Delete ONLY this wallet's decrypted-notes + scan cache from the engine DB
-    (the shared per-network Merkle tree is kept). Does NOT recreate and does NOT
-    scan — the 0zk simply leaves the engine. The next unlock treats it as fresh,
-    so it lands on the scan-start picker. Funds are on-chain; what's wiped is a
-    re-derivable cache. No passkey: uses the id of the already-loaded wallet. */
-export async function deletePoolWalletData(username: string): Promise<void> {
-  if (!poolWallet || poolWallet.username !== username)
-    throw new Error("no 0zk wallet loaded for this account");
-  const id = poolWallet.id;
-  recoverPending = true; // an in-flight watcher tick bails at its next await
-  stopWatcher();
-  console.log(`[pool] deleting wallet DB for ${id.slice(0, 8)}… (no rescan)`);
-  try {
-    await withEngineLock(async () => {
-      await clearWalletChainData(id);
-    });
-    await resetPool(); // clear in-memory account state (also unloads from engine)
-    console.log("[pool] ✓ wallet DB deleted (no rescan)");
-  } finally {
-    recoverPending = false;
-  }
-}
-
 /** Recover funds hidden by a too-recent scan-start ("I shielded weeks ago but
     this device shows nothing"): re-scan the wallet from the picked day's block
     against the existing tree. See `clearWalletAndRescan`. */
@@ -1265,7 +1258,6 @@ const workerApi = {
   refreshNow,
   resyncPool,
   recoverPoolBalances,
-  deletePoolWalletData,
   setPoolScanStart,
   resetPool,
 };

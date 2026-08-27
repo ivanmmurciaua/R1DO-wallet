@@ -86,11 +86,12 @@ export async function createPoolWallet(
   prf: Uint8Array,
   username: string,
   creationDate?: Date,
+  wipeFirst?: boolean,
 ): Promise<OpenedPoolWallet> {
   const creationBlock = creationDate
     ? Number((await blockForCalendarDay(creationDate)).block)
     : undefined;
-  return getApi().createPoolWallet(prf, username, creationBlock);
+  return getApi().createPoolWallet(prf, username, creationBlock, wipeFirst);
 }
 
 /** Set the scan-start of a still-unscanned ("fresh") 0zk to a chosen calendar
@@ -198,12 +199,4 @@ export async function recoverPoolBalances(
 
 export async function resetPool(): Promise<void> {
   await getApi().resetPool();
-}
-
-/** Delete ONLY this wallet's Railgun scan cache (decrypted notes + scan state)
-    from the engine DB, keeping the shared per-network tree. Does NOT rescan: the
-    0zk leaves the engine and the next unlock treats it as fresh (scan-start
-    picker). Needs the wallet to be currently unlocked/loaded. */
-export function deletePoolWalletData(username: string): Promise<void> {
-  return getApi().deletePoolWalletData(username);
 }
