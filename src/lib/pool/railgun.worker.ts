@@ -214,6 +214,7 @@ export async function bootEngine(cfg: PoolConfig): Promise<void> {
       false, // verboseScanLogs
     );
     console.log("[pool] ✓ engine started");
+    installScanProgress(); // visibility into the (heavy, first-run) tree scan
 
     // The SDK ships NO Groth16 prover — inject snarkjs (browser).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -817,11 +818,15 @@ export type PoolActivity = {
   finalizing: boolean; // a spent-POI is pending → the watcher must generate it
   generatingProof: boolean; // actively proving right now
   proofProgress: number; // 0..100
+  scanning: boolean; // the UTXO merkletree is being built/scanned (heavy first-run)
+  scanProgress: number; // 0..100
 };
 const activity: PoolActivity = {
   finalizing: false,
   generatingProof: false,
   proofProgress: 0,
+  scanning: false,
+  scanProgress: 0,
 };
 let onActivity: ((a: PoolActivity) => void) | null = null;
 export function onPoolActivity(cb: (a: PoolActivity) => void): void {
@@ -829,6 +834,35 @@ export function onPoolActivity(cb: (a: PoolActivity) => void): void {
   cb({ ...activity });
 }
 const notifyActivity = () => onActivity?.({ ...activity });
+
+// Global UTXO merkletree scan-progress reporter. The FIRST run on a device builds
+// the whole tree (heavy — minutes on mobile IndexedDB) and otherwise emits no
+// signal at all, so the app just looks frozen ("no veo nada"). Surface it to the
+// console and the UI (activity.scanning/scanProgress). Throttled so a fast
+// callback stream never floods. Installed at boot; recover restores it after its
+// own temporary callback.
+// True once this wallet has painted balances at least once this session. Every
+// refreshBalances re-emits the merkletree-scan callback (0→100%), so WITHOUT this
+// gate the "building history" indicator + logs would flash on every 20s tick. We
+// only care about the FIRST run (the heavy tree build before any balance shows);
+// after the first paint the routine per-tick rescans stay silent.
+let everPaintedBalances = false;
+let lastScanLogPct = -1;
+function installScanProgress(): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  setOnUTXOMerkletreeScanCallback((e: any) => {
+    if (everPaintedBalances) return; // routine per-tick rescan — no UI, no logs
+    const pct = Math.round((e?.progress ?? 0) * 100);
+    const done = pct >= 100 || e?.scanStatus === "Complete";
+    activity.scanning = !done && pct > 0 && pct < 100;
+    activity.scanProgress = pct;
+    if (pct > lastScanLogPct && pct % 5 === 0) {
+      lastScanLogPct = pct;
+      console.log(`[pool] tree scan ${pct}%`);
+    }
+    notifyActivity();
+  });
+}
 
 let callbacksWired = false;
 function wireCallbacks() {
@@ -838,6 +872,14 @@ function wireCallbacks() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setOnBalanceUpdateCallback((e: any) => {
     if (!poolWallet || e.railgunWalletID !== poolWallet.id) return;
+    // First balance paint → the initial tree build is effectively done; silence
+    // the "building history" indicator + scan logs for all routine rescans after.
+    if (!everPaintedBalances) {
+      everPaintedBalances = true;
+      activity.scanning = false;
+      activity.scanProgress = 100;
+      notifyActivity();
+    }
     // Which TokenBuckets field this bucket maps to (ignore ShieldBlocked /
     // ProofSubmitted / Spent — not part of the spendable/pending picture).
     const field: keyof TokenBuckets | undefined = (
@@ -934,7 +976,12 @@ function withEngineLock<T>(fn: () => Promise<T>): Promise<T> {
 
 async function scanBalances(): Promise<void> {
   if (!poolWallet) return;
+  const t0 = performance.now();
+  console.log("[pool] refreshBalances — scanning wallet against the tree…");
   await refreshBalances(CHAIN, [poolWallet.id]); // fires the balance callback
+  console.log(
+    `[pool] refreshBalances done in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
 }
 
 // generatePOIsForWallet pushes spent-POIs forward, but on testnet a POI whose
@@ -1181,7 +1228,7 @@ async function clearWalletAndRescan(
     return wallet;
   } finally {
     recoverPending = false;
-    if (onProgress) setOnUTXOMerkletreeScanCallback(() => {});
+    if (onProgress) installScanProgress(); // restore the global scan reporter
     if (wasWatching) startWatcher();
   }
 }
@@ -1219,6 +1266,10 @@ export async function resetPool(): Promise<void> {
   activity.finalizing = false;
   activity.generatingProof = false;
   activity.proofProgress = 0;
+  activity.scanning = false;
+  activity.scanProgress = 0;
+  everPaintedBalances = false;
+  lastScanLogPct = -1;
   onActivity = null;
   if (prev) {
     // Best-effort: unload the wallet from the engine so its keys leave memory.
