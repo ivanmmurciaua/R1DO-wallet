@@ -111,12 +111,11 @@ export async function createPoolWallet(
   prf: Uint8Array,
   username: string,
   creationDate?: Date,
-  wipeFirst?: boolean,
 ): Promise<OpenedPoolWallet> {
   const creationBlock = creationDate
     ? Number((await blockForCalendarDay(creationDate)).block)
     : undefined;
-  return getApi().createPoolWallet(prf, username, creationBlock, wipeFirst);
+  return getApi().createPoolWallet(prf, username, creationBlock);
 }
 
 /** Set the scan-start of a still-unscanned ("fresh") 0zk to a chosen calendar
@@ -201,25 +200,6 @@ export function refreshNow(): Promise<void> {
 }
 export function resyncPool(): Promise<void> {
   return getApi().resyncPool();
-}
-
-/** Recovery: reuse the loaded 0zk, move its scan-start back to `fromDate`, clear
-    this network's balances and rescan to 100% (the lab path — no delete/recreate).
-    The date → block resolve happens here; the heavy rescan runs in the worker so
-    the UI stays alive. */
-export async function recoverPoolBalances(
-  prf: Uint8Array,
-  username: string,
-  fromDate: Date,
-  onProgress?: (pct: number) => void,
-): Promise<PoolWallet> {
-  const fromBlock = Number((await blockForCalendarDay(fromDate)).block);
-  return getApi().recoverPoolBalances(
-    prf,
-    username,
-    fromBlock,
-    onProgress ? Comlink.proxy(onProgress) : undefined,
-  );
 }
 
 export async function resetPool(): Promise<void> {

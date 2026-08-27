@@ -4,10 +4,6 @@ import { activeRpcUrls, directoryAddress } from "@/lib/networks";
 // localStorage globals — namespaced under r1do/wallet/v1 (see lib/localstorage.tsx).
 export const LOCAL_WALLET_LIST = "r1do/wallet/v1/wallets";
 export const LOCAL_LAST_USER = "r1do/wallet/v1/lastUser";
-// Set by the "Delete scan data" button (holds the username to wipe). The heavy
-// per-wallet namespace clear then runs on the NEXT unlock, in a clean engine
-// state with no watcher contending — so the button itself can never hang.
-export const LOCAL_WIPE_SCAN = "r1do/wallet/v1/wipeScan";
 // Chain config is derived from the active network (see lib/networks.ts) — the
 // single source of truth. These re-exports keep the existing wide imports
 // working unchanged while the actual values live in one extensible registry.
