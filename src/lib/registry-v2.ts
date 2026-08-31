@@ -226,7 +226,7 @@ export async function readDirectory(
   const { directoryClient } = await import("@/lib/client");
 
   const { fp, encKey } = await deriveDirectoryKeys(username, pin);
-  const blob = (await directoryClient.readContract({
+  const blob = (await directoryClient().readContract({
     address: dir,
     abi: DIRECTORY_ABI,
     functionName: "getEntry",
@@ -243,7 +243,7 @@ export async function readDirectory(
 export async function hasDirectoryEntry(fp: `0x${string}`): Promise<boolean> {
   const dir = directoryAddress();
   const { directoryClient } = await import("@/lib/client");
-  return (await directoryClient.readContract({
+  return (await directoryClient().readContract({
     address: dir,
     abi: DIRECTORY_ABI,
     functionName: "hasEntry",
@@ -268,7 +268,7 @@ async function readOwnEntry(
 ): Promise<DirectoryEntry | null> {
   const dir = directoryAddress();
   const { directoryClient } = await import("@/lib/client");
-  const blob = (await directoryClient.readContract({
+  const blob = (await directoryClient().readContract({
     address: dir,
     abi: DIRECTORY_ABI,
     functionName: "getEntry",

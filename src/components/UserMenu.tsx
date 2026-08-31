@@ -24,13 +24,12 @@ import { QrCode } from "./QrCode";
 import { GlitchText } from "./GlitchText";
 import Popup from "./Popup";
 import type { SafeWallet } from "@/lib/aa-client";
-import { formatUnits, createPublicClient } from "viem";
-import { sepoliaTransport } from "@/app/constants";
-import { activeChain, activeChainId, networkName, allNetworkNames, explorerTxUrl, explorerAddressUrl } from "@/lib/networks";
+import { formatUnits } from "viem";
+import { activeChainId, networkName, allNetworkNames, explorerTxUrl, explorerAddressUrl } from "@/lib/networks";
 import { formatList } from "@/lib/common";
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { activeTokens, assetByAddress, formatAsset, type Asset } from "@/lib/assets";
-import { getLastBlock } from "@/lib/client";
+import { getLastBlock, rpcClient } from "@/lib/client";
 import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealthCleanup, getWalletMeta, saveStealthScanDurable, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
 import { getWalletCredential } from "@/lib/credstore";
 import { loadFromDevice } from "@/lib/passkeys";
@@ -132,7 +131,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({ wallet, username, balance, a
     const tokens = activeTokens();
     if (tokens.length === 0) return;
     let mounted = true;
-    const client = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+    const client = rpcClient();
     const fetchTokens = async () => {
       try {
         if (tokenBals === null) setTokensLoading(true);
@@ -288,7 +287,7 @@ const handleBackToMenu = (message: string = "") => {
   const fetchStealthBalances = useCallback(async () => {
     let utxos = getSpendableUTXOs(username);
     if (utxos.length === 0) return;
-    const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+    const pub = rpcClient();
 
     // Discover the asset of still-untagged pre-minted notes (off-chain Courier
     // receives). An ERC20 sent to one would otherwise read as native 0 forever:
@@ -391,7 +390,7 @@ const handleBackToMenu = (message: string = "") => {
       }
       const keys = await derivePQKeysFromPRF(prf);
       const lastBlock = getLastScannedBlock(username);
-      const pub = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+      const pub = rpcClient();
       const fromBlock = lastBlock ?? (await pub.getBlockNumber() - 21600n);
       // Windowed scan: each window persists to idb and only THEN advances the
       // cursor → resumable, never skips a UTXO (see saveStealthScanDurable).

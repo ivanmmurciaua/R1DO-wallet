@@ -1,26 +1,12 @@
-import { http, fallback } from "viem";
-import { activeRpcUrls, directoryAddress } from "@/lib/networks";
+import { directoryAddress } from "@/lib/networks";
 
 // localStorage globals — namespaced under r1do/wallet/v1 (see lib/localstorage.tsx).
 export const LOCAL_WALLET_LIST = "r1do/wallet/v1/wallets";
 export const LOCAL_LAST_USER = "r1do/wallet/v1/lastUser";
-// Chain config is derived from the active network (see lib/networks.ts) — the
-// single source of truth. These re-exports keep the existing wide imports
-// working unchanged while the actual values live in one extensible registry.
-// Failover order (see activeRpcUrls / the network registry): public RPCs only.
-// Used by every read client and passed to Railgun's loadProvider so a single RPC
-// blip doesn't stall balances/scans (matters once many testers hit it at once).
-export const RPC_URLS = activeRpcUrls();
-// Primary RPC (index 0 of the public list).
-export const RPC_URL = RPC_URLS[0];
-// RPC for Safe/4337 operations (deploy, send, Make-findable). DELIBERATELY a
-// different node than the scanner's primary (RPC_URLS[0]) so a heavy stealth
-// scan and a wallet operation never fight over the same rate-limited endpoint.
-// Falls back to the primary if the registry has a single RPC.
-export const OPS_RPC_URL = RPC_URLS[1] ?? RPC_URLS[0];
-// Shared viem transport with automatic failover (tries RPC_URLS in order).
-// Name kept for back-compat; it follows the active chain, not Sepolia per se.
-export const sepoliaTransport = () => fallback(RPC_URLS.map((u) => http(u)));
+// NOTE: reading the chain goes through rpcClient() in lib/client.tsx (the single
+// live, failover transport over activeRpcUrls). There are deliberately NO frozen
+// RPC consts here anymore — they froze the RPC list at import and ignored the
+// user's overrides.
 // Bundler + paymaster go through our OWN server proxy (app/api/pimlico) so the
 // Pimlico API key never reaches the client bundle — it lives server-side as
 // PIMLICO_API_KEY (NOT NEXT_PUBLIC_). The relay-kit just sees a JSON-RPC URL;
@@ -28,8 +14,7 @@ export const sepoliaTransport = () => fallback(RPC_URLS.map((u) => http(u)));
 // the same upstream, so one route serves both. Built as an absolute URL from the
 // runtime origin (client-only); on server/SSR `window` is absent and it falls
 // back to a relative path, never actually used (wallet init runs client-side).
-// NOTE: the static IPFS export has no server → no proxy; that build is frozen.
-const PIMLICO_PROXY_PATH = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/pimlico`;
+const PIMLICO_PROXY_PATH = "/api/pimlico";
 const PIMLICO_PROXY_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
 export const BUNDLER_URL = `${PIMLICO_PROXY_ORIGIN}${PIMLICO_PROXY_PATH}`;
 export const PAYMASTER_URL = BUNDLER_URL;

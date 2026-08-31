@@ -1,7 +1,7 @@
-import { sepoliaTransport } from "@/app/constants";
+import { rpcClient } from "@/lib/client";
 import { buildSafeWallet, type SafeWallet, type BuiltUserOp } from "./aa-client";
-import { encodeFunctionData, createPublicClient, formatEther } from "viem";
-import { activeChain, gasFloorEnabled, directoryAddress, directoryNetwork } from "@/lib/networks";
+import { encodeFunctionData, formatEther } from "viem";
+import { gasFloorEnabled, directoryAddress, directoryNetwork } from "@/lib/networks";
 import { getStealthBalances, getTokenBalances } from "@/lib/balances";
 import { log } from "./common";
 import { getSpendableUTXOs } from "./localstorage";
@@ -588,7 +588,7 @@ export const getStealthCoins = async (
 ): Promise<{ utxo: StealthUTXO; balance: bigint }[]> => {
   const utxos = getSpendableUTXOs(username);
   if (utxos.length === 0) return [];
-  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const publicClient = rpcClient();
 
   // Per-asset balances: a stealth UTXO holds exactly one asset (tagged on the
   // note). Read native ones via getEthBalance and each token's UTXOs via that
@@ -619,7 +619,7 @@ export const getStealthCoins = async (
 export const getStealthTotal = async (username: string): Promise<bigint> => {
   const utxos = getSpendableUTXOs(username);
   if (utxos.length === 0) return 0n;
-  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const publicClient = rpcClient();
   const balances = await getStealthBalances(publicClient, utxos.map((u) => u.stealthAddress));
   return balances.reduce((s, b) => s + b, 0n);
 };
@@ -718,7 +718,7 @@ export const smartShield = async (
 
   const akey = asset?.toLowerCase() ?? null;
   const utxos = getSpendableUTXOs(username).filter((u) => (u.asset?.toLowerCase() ?? null) === akey);
-  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const publicClient = rpcClient();
   const addrs = utxos.map((u) => u.stealthAddress);
   const shieldBalances = asset
     ? await getTokenBalances(publicClient, asset as `0x${string}`, addrs)
@@ -783,7 +783,7 @@ export const shieldCoins = async (
     return { success: false, shieldedAmount: 0n, txHashes: [], error: "Could not access your passkey. Try again." };
   }
   const keys = await derivePQKeysFromPRF(prf);
-  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const publicClient = rpcClient();
 
   console.log(`[shieldCoins] shielding ${selected.length} selected coin(s) → pool`);
   const feeRecipient = await getFeeRecipient(); // resolved ONCE; fresh r1do stealth per coin
@@ -1280,7 +1280,7 @@ export const planDraw = async (
   total: bigint,
   token?: `0x${string}`,
 ): Promise<{ plan: { source: DrawSource; amount: bigint }[]; mainBalance: bigint } | null> => {
-  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const publicClient = rpcClient();
   let mainBalance: bigint;
   let utxos: StealthUTXO[];
   let balances: bigint[];
@@ -1643,7 +1643,7 @@ export const smartSendToken = async (
   // public destination (plain transfer) and a private one (token transfer to the
   // stealth Safe + blob). Recipient gets `totalAmount − fee`; user spends `totalAmount`.
   if (!prepared) {
-    const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+    const publicClient = rpcClient();
     const safeAddress = (await wallet.protocolKit.getAddress()) as `0x${string}`;
     const [mainBalance] = await getTokenBalances(publicClient, token, [safeAddress]);
     if (mainBalance >= totalAmount) {

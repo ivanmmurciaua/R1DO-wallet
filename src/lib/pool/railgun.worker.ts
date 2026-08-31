@@ -209,13 +209,13 @@ export async function bootEngine(cfg: PoolConfig): Promise<void> {
       // Harmless for healthy DBs (store already exists → no-op, data preserved).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       new (LevelDB as any)("r1do-railgun", { version: 2 }),
-      true, // shouldDebug — TEMP: surface engine-internal sync/getLogs/quickSync logs (diagnosing the ~15% tree-scan stall on Arbitrum mainnet)
+      false, // shouldDebug
       makeArtifactStore(),
       false, // useNativeArtifacts
       false, // skipMerkletreeScans — must be false so balances scan
       POI_NODES,
       [], // customPOILists
-      true, // verboseScanLogs — TEMP: see per-batch merkletree scan progress + where it wedges
+      false, // verboseScanLogs
     );
     console.log("[pool] ✓ engine started");
     installScanProgress(); // visibility into the (heavy, first-run) tree scan
@@ -965,12 +965,7 @@ function withEngineLock<T>(fn: () => Promise<T>): Promise<T> {
 
 async function scanBalances(): Promise<void> {
   if (!poolWallet) return;
-  const t0 = performance.now();
-  console.log("[pool] refreshBalances — scanning wallet against the tree…");
   await refreshBalances(CHAIN, [poolWallet.id]); // fires the balance callback
-  console.log(
-    `[pool] refreshBalances done in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
-  );
 }
 
 // generatePOIsForWallet pushes spent-POIs forward, but on testnet a POI whose

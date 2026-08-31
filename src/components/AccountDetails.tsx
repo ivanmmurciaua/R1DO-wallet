@@ -1,10 +1,10 @@
 import type { SafeWallet } from "@/lib/aa-client";
 import { useEffect, useState } from "react";
 import { CircularProgress } from "@mui/material";
-import { formatUnits, createPublicClient } from "viem";
-import { activeChain } from "@/lib/networks";
+import { formatUnits } from "viem";
+import { rpcClient } from "@/lib/client";
 import { getStealthBalances } from "@/lib/balances";
-import { sepoliaTransport, DIRECTORY_ADDRESS } from "@/app/constants";
+import { DIRECTORY_ADDRESS } from "@/app/constants";
 import { directoryEnabled } from "@/lib/registry-v2";
 import { Settings } from "./Settings";
 import { UserMenu } from "./UserMenu";
@@ -58,7 +58,7 @@ export default function AccountDetails({ username, wallet, address, makeFindable
     setFindableNudgeDismissed(username);
   };
 
-  const publicClient = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+  const publicClient = rpcClient();
 
   // Public balance polling is part of the "normal" balance flow that starts
   // ONLY once the UTXO scan has finished (the `scanning` gate). Running it during

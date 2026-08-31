@@ -11,9 +11,9 @@ import { readDirectory } from "@/lib/registry-v2";
 import { getTokenBalances } from "@/lib/balances";
 import { getSpendableUTXOs, getWalletMeta } from "@/lib/localstorage";
 import { nativeAsset, activeTokens, type Asset } from "@/lib/assets";
-import { parseUnits, formatUnits, zeroAddress, createPublicClient } from "viem";
-import { activeChain, networkName } from "@/lib/networks";
-import { sepoliaTransport } from "@/app/constants";
+import { parseUnits, formatUnits, zeroAddress } from "viem";
+import { networkName } from "@/lib/networks";
+import { rpcClient } from "@/lib/client";
 import { isPQMetaAddress } from "@/lib/stealth";
 import { ProgressBar } from "./ProgressBar";
 
@@ -94,7 +94,7 @@ export const SendEth: React.FC<SendEthProps> = ({ wallet, username, onBack }) =>
     let alive = true;
     (async () => {
       try {
-        const client = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+        const client = rpcClient();
         const safe = (await wallet.protocolKit.getAddress()) as `0x${string}`;
         const mainWei = BigInt((await wallet.protocolKit.getBalance()).toString());
         // Only a private wallet holds stealth funds — a public one never scans, so

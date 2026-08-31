@@ -61,9 +61,8 @@ export default function RootLayout({
         {/* <BetaBanner /> */}
         <ThemeRegistry>{children}</ThemeRegistry>
         {/* Vercel Web Analytics — privacy-friendly (no cookies, no PII), served
-            same-origin from /_vercel/insights. Skipped on the frozen IPFS export
-            (no Vercel backend there). */}
-        {process.env.NEXT_PUBLIC_IPFS_BUILD === "1" ? null : <Analytics />}
+            same-origin from /_vercel/insights. */}
+        <Analytics />
       </body>
     </html>
   );
