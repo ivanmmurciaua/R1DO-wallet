@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import SettingsIcon from "@mui/icons-material/Settings";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
@@ -18,6 +18,7 @@ import {
 import { deleteWalletCredential } from "@/lib/credstore";
 import { LOCAL_LAST_USER } from "@/app/constants";
 import { NETWORKS, activeNetwork, setActiveNetwork } from "@/lib/networks";
+import RpcManager from "@/components/RpcManager";
 import { MAX_DEEP_SCAN_DAYS, defaultScanDay, latestScannableDay, scanWindowFor } from "@/lib/deepScan";
 
 // <input type="date"> speaks "YYYY-MM-DD" in LOCAL time, but `new Date(str)` on
@@ -111,6 +112,20 @@ export function Settings({
   onMakeFindable?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Re-open automatically after an RPC authorize-reload (RpcManager sets this flag
+  // before reloading to CSP-authorize a host), so the bench resumes where the user
+  // left off instead of the panel silently closing. Effect (not initial state) →
+  // no SSR/hydration mismatch.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("r1do-reopen-settings")) {
+        sessionStorage.removeItem("r1do-reopen-settings");
+        setOpen(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
   const [seedWorking, setSeedWorking] = useState(false);
   const [seedPhrase, setSeedPhrase] = useState<string | null>(null);
   const [seedErr, setSeedErr] = useState<string | null>(null);
@@ -461,6 +476,11 @@ export function Settings({
                 ))}
               </TextField>
 
+              {/* Per-network RPC fleet: view/toggle curated nodes, bench + add your own. */}
+              <div style={{ margin: "18px 0" }}>
+                <RpcManager />
+              </div>
+
               {/* Wallets — reveal the device's account(s), with a destructive delete. */}
               <p style={{ fontSize: "0.8rem", margin: "18px 0 10px" }}>Wallets</p>
               {!showWallets ? (
@@ -777,6 +797,12 @@ export function Settings({
               {resyncMsg && (
                 <p style={{ fontSize: "0.72rem", opacity: 0.8, marginTop: "8px" }}>{resyncMsg}</p>
               )}
+            </div>
+            )}
+
+            {minimal && (
+            <div>
+              <RpcManager />
             </div>
             )}
 

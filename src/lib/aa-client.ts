@@ -55,7 +55,7 @@ import {
   MULTI_SEND_CALL_ONLY_ADDRESS,
   SAFE_SALT_NONCE,
 } from "./aa-config";
-import { activeNetwork, type Network } from "./networks";
+import { activeNetwork, rpcUrlsForNetwork, type Network } from "./networks";
 import { bundlerUrlFor } from "@/app/constants";
 
 /** A keyless "paymaster service" pointing at OUR OWN paymaster contract. Unlike the
@@ -97,7 +97,7 @@ export function activeSafeSingleton(net: Network = activeNetwork()): Address {
     to the active network; the directory path passes the directory network so its
     reads hit Arbitrum, not the active chain. */
 function opsPublicClient(net: Network = activeNetwork()) {
-  const rpcs = net.rpcUrls;
+  const rpcs = rpcUrlsForNetwork(net); // user's LIVE list (honours disable/add) + fallback
   const opsUrl = rpcs[1] ?? rpcs[0];
   const urls = [opsUrl, ...rpcs.filter((u) => u !== opsUrl)];
   return createPublicClient({

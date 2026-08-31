@@ -385,9 +385,11 @@ export async function scanStealthPayments(
   toBlock?: bigint,
 ): Promise<{ utxos: StealthUTXO[]; latestBlock: bigint }> {
   const { createPublicClient, http, fallback, parseAbiItem } = await import("viem");
-  const { activeChain, activeLogsRpcs, activeScanRpcUrls, scanPaymasters } =
+  const { activeChain, activeRpcUrls, activeLogsRpcs, activeScanRpcUrls, scanPaymasters } =
     await import("@/lib/networks");
-  const { RPC_URLS } = await import("@/app/constants");
+  // The user's LIVE RPC list (honours disable/add), snapshotted once at the start
+  // of THIS scan so the round-robin index math below stays stable for the run.
+  const RPC_URLS = activeRpcUrls();
 
   // JSON-RPC batching: the getTransaction fan-out fires many node calls in one tick
   // — coalesce them into one POST per RPC_BATCH_SIZE instead of N round-trips.

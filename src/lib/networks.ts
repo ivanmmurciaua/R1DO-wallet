@@ -18,6 +18,7 @@
 */
 import type { Address, Chain } from "viem";
 import { sepolia, arbitrum } from "viem/chains";
+import { CSP_CONNECT_BASE, RPC_HOSTS_COOKIE } from "./csp";
 
 export type NetworkId = "sepolia" | "arbitrum";
 
@@ -280,6 +281,141 @@ export const NETWORKS: readonly Network[] = [
     imports networks, never the reverse. */
 export const ACTIVE_NETWORK_KEY = "r1do/wallet/v1/network";
 
+// ── user RPC overrides (per network) ──────────────────────────────────────────
+// The curated fleet below is the DEFAULT. A user can, per network, disable some
+// curated nodes and add their own (vetted by the in-app bench in rpcManager.ts,
+// which assigns each custom node its roles + getLogs window). Kept here — read +
+// written from localStorage directly — so networks.ts stays SDK-free and
+// import-cycle-free (rpcManager imports networks, never the reverse). Applied by
+// the getters below; like the network switch, edits take effect on RELOAD.
+export type RpcRole = "logs" | "scan"; // "general" (rpcUrls) is implicit for any accepted node
+export type CustomRpc = { url: string; roles: RpcRole[]; window?: number };
+export type RpcOverride = { disabled: string[]; custom: CustomRpc[] };
+const EMPTY_OVERRIDE: RpcOverride = { disabled: [], custom: [] };
+export const rpcOverrideKey = (id: NetworkId): string => `r1do/rpc/v1/${id}`;
+
+export function readRpcOverride(id: NetworkId): RpcOverride {
+  if (typeof window === "undefined") return EMPTY_OVERRIDE;
+  try {
+    const raw = window.localStorage.getItem(rpcOverrideKey(id));
+    if (!raw) return EMPTY_OVERRIDE;
+    const o = JSON.parse(raw);
+    return {
+      disabled: Array.isArray(o?.disabled) ? o.disabled.filter((u: unknown) => typeof u === "string") : [],
+      custom: Array.isArray(o?.custom)
+        ? o.custom.filter((c: unknown): c is CustomRpc => !!c && typeof (c as CustomRpc).url === "string")
+        : [],
+    };
+  } catch {
+    return EMPTY_OVERRIDE;
+  }
+}
+
+export function writeRpcOverride(id: NetworkId, o: RpcOverride): void {
+  try {
+    window.localStorage.setItem(rpcOverrideKey(id), JSON.stringify(o));
+  } catch {
+    /* private mode / storage disabled → the curated defaults simply stand */
+  }
+  // NOTE: the cookie is deliberately NOT synced here. It is committed ONLY right
+  // before a reload (commitRpcHostsCookie), so the cookie always matches the CSP
+  // of the CURRENTLY loaded page. That invariant lets activeRpcUrls trust the
+  // LIVE cookie: a custom RPC added now won't be used by the engine until the
+  // reload that also puts its origin into connect-src — no CSP-blocked host.
+}
+
+// A single origin the user is currently BENCHING but hasn't added to their list.
+// It gets CSP-authorized (via the cookie) so the bench can reach it, WITHOUT
+// polluting the active RPC list until it passes and is explicitly added.
+const RPC_PENDING_KEY = "r1do/rpc/v1/pending";
+export function readPendingRpcOrigin(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(RPC_PENDING_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+export function writePendingRpcOrigin(origin: string): void {
+  try {
+    if (origin) window.localStorage.setItem(RPC_PENDING_KEY, origin);
+    else window.localStorage.removeItem(RPC_PENDING_KEY);
+  } catch {
+    /* ignore */
+  }
+  // Cookie committed by commitRpcHostsCookie() right before the reload, not here.
+}
+
+/** Commit the r1do-rpc-hosts cookie = the union of every network's custom RPC
+    ORIGINS (+ the one pending-bench origin). Call this ONLY right before a reload:
+    middleware.ts reads it on the next request to extend connect-src, so the new
+    page's CSP and the engine's RPC list agree. Between loads the cookie is left
+    UNCHANGED, so it always equals the current page's CSP. */
+export function commitRpcHostsCookie(): void {
+  if (typeof document === "undefined") return;
+  const origins = new Set<string>();
+  for (const n of NETWORKS) {
+    for (const c of readRpcOverride(n.id).custom) {
+      try {
+        origins.add(new URL(c.url).origin);
+      } catch {
+        /* skip a malformed url */
+      }
+    }
+  }
+  const pending = readPendingRpcOrigin();
+  if (pending) origins.add(pending);
+  // Percent-encode so spaces/reserved chars are cookie-safe (middleware decodes).
+  const value = encodeURIComponent([...origins].join(" "));
+  try {
+    document.cookie = `${RPC_HOSTS_COOKIE}=${value}; path=/; max-age=31536000; SameSite=Lax`;
+  } catch {
+    /* cookie write blocked → the origin just won't be CSP-authorized */
+  }
+}
+
+const uniq = (xs: string[]): string[] => [...new Set(xs)];
+const uniqLogs = (xs: LogsRpc[]): LogsRpc[] => {
+  const seen = new Set<string>();
+  return xs.filter((r) => (seen.has(r.url) ? false : (seen.add(r.url), true)));
+};
+
+const originOf = (u: string): string => {
+  try {
+    return new URL(u).origin;
+  } catch {
+    return "";
+  }
+};
+
+// Origins the CURRENT page's CSP permits: the curated base (always in the policy)
+// + the r1do-rpc-hosts cookie read LIVE. Reading live is safe here BECAUSE the
+// cookie only ever changes immediately before a reload (commitRpcHostsCookie), so
+// at any moment during a page's life the cookie equals exactly what middleware
+// built this page's CSP from. A custom RPC added now is NOT yet in the cookie, so
+// the engine won't use it until the reload that also authorizes it — no
+// CSP-blocked host, and no fragile module-load snapshot timing.
+function authorizedOriginsNow(): Set<string> {
+  const set = new Set<string>();
+  for (const u of CSP_CONNECT_BASE) {
+    const o = originOf(u);
+    if (o) set.add(o);
+  }
+  if (typeof document !== "undefined") {
+    try {
+      const row = document.cookie.split("; ").find((c) => c.startsWith(RPC_HOSTS_COOKIE + "="));
+      if (row) {
+        const val = decodeURIComponent(row.slice(RPC_HOSTS_COOKIE.length + 1));
+        for (const o of val.split(/[\s,]+/).filter(Boolean)) set.add(o);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return set;
+}
+const cspAllows = (url: string): boolean => authorizedOriginsNow().has(originOf(url));
+
 /** The network a fresh user (no persisted choice) starts on, and the selector's
     default. Arbitrum One — the production chain. */
 export const DEFAULT_NETWORK_ID: NetworkId = "arbitrum";
@@ -387,26 +523,85 @@ export function networkName(): string {
   return activeNetwork().chain.name;
 }
 
+/** The effective RPC list for a GIVEN network, applying the user's override:
+    curated − disabled, then their custom nodes (each a general failover node), but
+    only those the CURRENT page's CSP allows. Falls back to the full curated fleet
+    if that leaves the list empty. Used for the active chain AND the (Arbitrum-)
+    pinned directory network, so BOTH honour a disabled/added node. */
+export function rpcUrlsForNetwork(n: Network): string[] {
+  const ov = readRpcOverride(n.id);
+  const base = n.rpcUrls.filter((u) => !ov.disabled.includes(u));
+  const custom = ov.custom.map((c) => c.url).filter(cspAllows);
+  const list = uniq([...base, ...custom]);
+  // Never hand out an EMPTY list (e.g. all curated disabled + the only custom not
+  // yet CSP-authorized, before a [RELOAD TO APPLY]) → fall back to the curated
+  // fleet so the app still works; the user's edits apply after the reload.
+  return list.length ? list : uniq([...n.rpcUrls]);
+}
+
 export function activeRpcUrls(): string[] {
-  return [...activeNetwork().rpcUrls];
+  return rpcUrlsForNetwork(activeNetwork());
 }
 
 /** getLogs endpoints for the active chain, in order, each with its per-RPC window
     (see the `logsRpcUrls` field). Where no curated list exists, synthesizes one from
     `rpcUrls` at the default window (scanWindowBlocks) — so the scanner always has a
-    windowed list to rotate through. */
+    windowed list to rotate through. User overrides: curated − disabled, plus custom
+    nodes the bench tagged with the "logs" role (each carrying its probed window). */
 export function activeLogsRpcs(): LogsRpc[] {
   const n = activeNetwork();
-  if (n.logsRpcUrls) return [...n.logsRpcUrls];
-  const window = scanWindowBlocks();
-  return n.rpcUrls.map((url) => ({ url, window }));
+  const ov = readRpcOverride(n.id);
+  const win = scanWindowBlocks();
+  const curated = n.logsRpcUrls ? [...n.logsRpcUrls] : n.rpcUrls.map((url) => ({ url, window: win }));
+  const base = curated.filter((r) => !ov.disabled.includes(r.url));
+  const custom = ov.custom
+    .filter((c) => c.roles.includes("logs") && cspAllows(c.url))
+    .map((c) => ({ url: c.url, window: c.window ?? win }));
+  return uniqLogs([...base, ...custom]);
 }
 
 /** RPCs the scanner's fan-out shards across on the active chain (see `scanRpcUrls`).
-    Falls back to the full list where none is curated. */
+    Falls back to the full list where none is curated. User overrides: curated −
+    disabled, plus custom nodes the bench tagged with the "scan" role. */
 export function activeScanRpcUrls(): string[] {
   const n = activeNetwork();
-  return [...(n.scanRpcUrls ?? n.rpcUrls)];
+  const ov = readRpcOverride(n.id);
+  const base = (n.scanRpcUrls ?? n.rpcUrls).filter((u) => !ov.disabled.includes(u));
+  const custom = ov.custom
+    .filter((c) => c.roles.includes("scan") && cspAllows(c.url))
+    .map((c) => c.url);
+  return uniq([...base, ...custom]);
+}
+
+/** Unified RPC view for the active network, for the Settings RPC manager: every
+    node the app would use, curated or custom, with its roles + disabled state. */
+export type RpcEntry = {
+  url: string;
+  curated: boolean; // part of the vetted default fleet (can be disabled, not removed)
+  roles: RpcRole[]; // logs / scan (general is implicit)
+  disabled: boolean; // curated node the user turned off
+  window?: number; // getLogs window (logs role)
+};
+export function activeRpcRoster(): RpcEntry[] {
+  const n = activeNetwork();
+  const ov = readRpcOverride(n.id);
+  const logsWin = new Map((n.logsRpcUrls ?? []).map((r) => [r.url, r.window]));
+  const scanSet = new Set(n.scanRpcUrls ?? []);
+  const entries: RpcEntry[] = n.rpcUrls.map((url) => {
+    const roles: RpcRole[] = [];
+    if (logsWin.has(url)) roles.push("logs");
+    if (scanSet.has(url)) roles.push("scan");
+    return { url, curated: true, roles, disabled: ov.disabled.includes(url), window: logsWin.get(url) };
+  });
+  for (const c of ov.custom) {
+    entries.push({ url: c.url, curated: false, roles: c.roles, disabled: false, window: c.window });
+  }
+  return entries;
+}
+
+/** The active network's id (for keying RPC overrides in the UI). */
+export function activeNetworkId(): NetworkId {
+  return activeNetwork().id;
 }
 
 /** Whether to apply the operator-fee gas floor on the active chain (default true). */

@@ -25,11 +25,11 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
-import { formatUnits, parseUnits, createPublicClient } from "viem";
+import { formatUnits, parseUnits } from "viem";
 import type { SafeWallet } from "@/lib/aa-client";
-import { activeChain, railgunNetworkNames } from "@/lib/networks";
+import { railgunNetworkNames } from "@/lib/networks";
 import { formatList } from "@/lib/common";
-import { sepoliaTransport } from "@/app/constants";
+import { rpcClient } from "@/lib/client";
 import { getTokenBalances } from "@/lib/balances";
 import { nativeAsset, activeTokens, assetByAddress, type Asset } from "@/lib/assets";
 import { getWalletCredential } from "@/lib/credstore";
@@ -406,7 +406,7 @@ export default function PrivateView({
       } else {
         const safe = (await wallet.protocolKit.getAddress()) as `0x${string}`;
         map.set("native", BigInt((await wallet.protocolKit.getBalance()).toString()));
-        const client = createPublicClient({ chain: activeChain(), transport: sepoliaTransport() });
+        const client = rpcClient();
         for (const t of activeTokens()) {
           const [bal] = await getTokenBalances(client, t.address as `0x${string}`, [safe]);
           if (bal > 0n) map.set(t.address!.toLowerCase(), bal);

@@ -381,11 +381,8 @@ export default function Home() {
       // floods the RPC with a backlog (which is what block-fixed lookback did, worst
       // on fast chains). With a cursor it resumes normally (cursor → latest).
       const fromBlock = lastBlock ?? (await (async () => {
-        const { createPublicClient, http, fallback } = await import("viem");
-        const { activeChain } = await import("@/lib/networks");
-        const { RPC_URLS } = await import("@/app/constants");
-        const c = createPublicClient({ chain: activeChain(), transport: fallback(RPC_URLS.map((u) => http(u))) });
-        return c.getBlockNumber();
+        const { rpcClient } = await import("@/lib/client");
+        return rpcClient().getBlockNumber();
       })());
 
       console.log(`[stealthScan] From block: ${fromBlock} | existing UTXOs: ${existing.length}`);
@@ -632,7 +629,7 @@ export default function Home() {
           >
             <Image
               aria-hidden
-              src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/ethereum-badge.svg`}
+              src="/ethereum-badge.svg"
               alt="Powered by Ethereum"
               width={77}
               height={33}

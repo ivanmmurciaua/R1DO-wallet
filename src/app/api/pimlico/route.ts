@@ -9,11 +9,9 @@ import { activeNetwork, NETWORKS } from "@/lib/networks";
 // NEXT_PUBLIC_ prefix). The client points bundlerUrl/paymasterUrl here; we
 // forward to Pimlico with the key attached and pass the response back verbatim.
 //
-// SCOPE: this is a server route → it only exists in the Node/Vercel deployment,
-// NOT in the static IPFS export (which has no server; that build is frozen and
-// will get its own key-handling). Rate-limiting is handled upstream in the
-// Vercel WAF (per the deployment owner); the protection added HERE is the method
-// whitelist so the endpoint can't be used as an open relay for arbitrary RPC.
+// Rate-limiting is handled upstream in the Vercel WAF (per the deployment owner);
+// the protection added HERE is the method whitelist so the endpoint can't be used
+// as an open relay for arbitrary RPC.
 
 // Bundler (ERC-4337) + Pimlico paymaster/utility methods the wallet legitimately
 // needs. Anything else → 403, so this proxy can't be abused as a general RPC.
