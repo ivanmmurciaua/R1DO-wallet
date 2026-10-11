@@ -27,7 +27,7 @@ import type { SafeWallet } from "@/lib/aa-client";
 import { formatUnits } from "viem";
 import { activeChainId, networkName, allNetworkNames, explorerTxUrl, explorerAddressUrl } from "@/lib/networks";
 import { formatList } from "@/lib/common";
-import { getStealthBalances, getTokenBalances } from "@/lib/balances";
+import { getTokenBalances, getStealthBalancesChecked, getTokenBalancesChecked } from "@/lib/balances";
 import { activeTokens, assetByAddress, formatAsset, type Asset } from "@/lib/assets";
 import { getLastBlock, rpcClient } from "@/lib/client";
 import { getDecimals, getSymbol, getStealthUTXOs, getSpendableUTXOs, applyStealthCleanup, getWalletMeta, saveStealthScanDurable, getLastScannedBlock, patchStealthUTXO, getHideBalance, setHideBalance } from "@/lib/localstorage";
@@ -286,8 +286,34 @@ const handleBackToMenu = (message: string = "") => {
 
   const fetchStealthBalances = useCallback(async () => {
     let utxos = getSpendableUTXOs(username);
-    if (utxos.length === 0) return;
     const pub = rpcClient();
+
+    // Resurrect any on-chain UTXO wrongly tombstoned by a PAST failed balance read (a
+    // false 0 from a flaky RPC). Re-check the tombstoned, non-local notes with a CHECKED
+    // read: a CONFIRMED > 0 clears the tombstone so it shows again; a failed read (null)
+    // leaves it tombstoned. Cleanup is locked to "tombstone" mode, so these records
+    // survive in idb and can be revived (spentAt -> undefined).
+    const tombstoned = getStealthUTXOs(username).filter((u) => u.spentAt && !u.localOnly);
+    if (tombstoned.length > 0) {
+      const natT = tombstoned.filter((u) => !u.asset);
+      if (natT.length > 0) {
+        const b = await getStealthBalancesChecked(pub, natT.map((u) => u.stealthAddress));
+        natT.forEach((u, i) => { if (b[i] !== null && b[i]! > 0n) patchStealthUTXO(username, u.stealthAddress, { spentAt: undefined }); });
+      }
+      const tokT = new Map<string, `0x${string}`[]>();
+      for (const u of tombstoned.filter((x) => !!x.asset)) {
+        const k = u.asset!.toLowerCase();
+        const g = tokT.get(k);
+        if (g) g.push(u.stealthAddress); else tokT.set(k, [u.stealthAddress]);
+      }
+      for (const [tokenAddr, addrs] of tokT) {
+        const b = await getTokenBalancesChecked(pub, tokenAddr as `0x${string}`, addrs);
+        addrs.forEach((a, i) => { if (b[i] !== null && b[i]! > 0n) patchStealthUTXO(username, a, { spentAt: undefined }); });
+      }
+      utxos = getSpendableUTXOs(username); // include any just-resurrected
+    }
+
+    if (utxos.length === 0) return;
 
     // Discover the asset of still-untagged pre-minted notes (off-chain Courier
     // receives). An ERC20 sent to one would otherwise read as native 0 forever:
@@ -307,7 +333,7 @@ const handleBackToMenu = (message: string = "") => {
       utxos = getSpendableUTXOs(username); // re-read with the fresh asset tags
     }
 
-    type Row = { utxo: StealthUTXO; raw: bigint; amount: number; symbol?: string };
+    type Row = { utxo: StealthUTXO; raw: bigint | null; amount: number; symbol?: string };
     const rows: Row[] = [];
 
     // Displayed amount is rounded; sub-dust (e.g. 1 wei) rounds to 0 and is
@@ -318,10 +344,10 @@ const handleBackToMenu = (message: string = "") => {
     const nativeUtxos = utxos.filter((u) => !u.asset);
     if (nativeUtxos.length > 0) {
       const decimals = getDecimals();
-      const bals = await getStealthBalances(pub, nativeUtxos.map((u) => u.stealthAddress));
+      const bals = await getStealthBalancesChecked(pub, nativeUtxos.map((u) => u.stealthAddress));
       nativeUtxos.forEach((utxo, i) => {
-        const raw = bals[i] ?? 0n;
-        rows.push({ utxo, raw, amount: round(raw, decimals) });
+        const raw = bals[i] ?? null;
+        rows.push({ utxo, raw, amount: raw === null ? 0 : round(raw, decimals) });
       });
     }
 
@@ -339,10 +365,10 @@ const handleBackToMenu = (message: string = "") => {
     for (const [tokenAddr, group] of byToken) {
       const asset = assetByAddress(tokenAddr);
       const decimals = asset?.decimals ?? 18;
-      const bals = await getTokenBalances(pub, tokenAddr as `0x${string}`, group.map((u) => u.stealthAddress));
+      const bals = await getTokenBalancesChecked(pub, tokenAddr as `0x${string}`, group.map((u) => u.stealthAddress));
       group.forEach((utxo, i) => {
-        const raw = bals[i] ?? 0n;
-        rows.push({ utxo, raw, amount: round(raw, decimals), symbol: asset?.symbol });
+        const raw = bals[i] ?? null;
+        rows.push({ utxo, raw, amount: raw === null ? 0 : round(raw, decimals), symbol: asset?.symbol });
       });
     }
 
@@ -355,7 +381,7 @@ const handleBackToMenu = (message: string = "") => {
       // been spent, so it drops out of every future read. Confirmed 0 only — a
       // thrown multicall never reaches here. Never funded → leave it (a Courier
       // receive awaiting funds reads 0 too, but that's "pending", not "spent").
-      else if (raw === 0n && utxo.receivedAt) applyStealthCleanup(username, utxo.stealthAddress);
+      else if (raw !== null && raw === 0n && utxo.receivedAt) applyStealthCleanup(username, utxo.stealthAddress);
     }
 
     setStealthTxs(
@@ -366,7 +392,7 @@ const handleBackToMenu = (message: string = "") => {
           type: "private" as const,
           amount,
           stealthAddress: utxo.stealthAddress,
-          weiBalance: raw, // exact — spend clamps to this, never the rounded `amount`
+          weiBalance: raw ?? 0n, // exact — spend clamps to this, never the rounded `amount` (raw is non-null when amount > 0)
           symbol, // undefined = native ⧫; token symbol otherwise (drives the row label)
         })),
     );

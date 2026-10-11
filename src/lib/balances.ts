@@ -21,15 +21,22 @@ const GET_ETH_BALANCE_ABI = [
  * Replaces the per-UTXO `Promise.all(map(getBalance))` fan-out — N RPC calls
  * collapse to 1, which matters as a wallet accrues stealth UTXOs.
  */
-export async function getStealthBalances(
+// Checked variant: a FAILED sub-call yields `null`, never `0n`. A null is "could not
+// read" (RPC hiccup, rate limit, partial multicall), which a caller must NOT confuse
+// with a genuine zero balance. The old `?? 0n` collapse was silently tombstoning real
+// UTXOs on a flaky read (UserMenu), so the display-side read uses this and treats null
+// as "unknown, leave the UTXO alone".
+export async function getStealthBalancesChecked(
   client: PublicClient,
   addresses: readonly Address[],
-): Promise<bigint[]> {
+): Promise<(bigint | null)[]> {
   if (addresses.length === 0) return [];
 
   const multicall3 = client.chain?.contracts?.multicall3?.address;
   if (!multicall3) {
-    return Promise.all(addresses.map((address) => client.getBalance({ address })));
+    return Promise.all(
+      addresses.map((address) => client.getBalance({ address }).then((b) => b as bigint).catch(() => null)),
+    );
   }
 
   const results = await client.multicall({
@@ -42,7 +49,14 @@ export async function getStealthBalances(
     allowFailure: true,
   });
 
-  return results.map((r) => (r.status === "success" ? (r.result as bigint) : 0n));
+  return results.map((r) => (r.status === "success" ? (r.result as bigint) : null));
+}
+
+export async function getStealthBalances(
+  client: PublicClient,
+  addresses: readonly Address[],
+): Promise<bigint[]> {
+  return (await getStealthBalancesChecked(client, addresses)).map((b) => b ?? 0n);
 }
 
 // Minimal ERC20 balanceOf — the read every token balance needs.
@@ -66,11 +80,11 @@ const ERC20_BALANCE_OF_ABI = [
  * Used (Fase 1+) to read a token across the main Safe + every stealth address in
  * one shot, the same way native balances are read today.
  */
-export async function getTokenBalances(
+export async function getTokenBalancesChecked(
   client: PublicClient,
   token: Address,
   addresses: readonly Address[],
-): Promise<bigint[]> {
+): Promise<(bigint | null)[]> {
   if (addresses.length === 0) return [];
 
   const multicall3 = client.chain?.contracts?.multicall3?.address;
@@ -80,7 +94,7 @@ export async function getTokenBalances(
         client
           .readContract({ address: token, abi: ERC20_BALANCE_OF_ABI, functionName: "balanceOf", args: [address] })
           .then((r) => r as bigint)
-          .catch(() => 0n),
+          .catch(() => null),
       ),
     );
   }
@@ -95,5 +109,13 @@ export async function getTokenBalances(
     allowFailure: true,
   });
 
-  return results.map((r) => (r.status === "success" ? (r.result as bigint) : 0n));
+  return results.map((r) => (r.status === "success" ? (r.result as bigint) : null));
+}
+
+export async function getTokenBalances(
+  client: PublicClient,
+  token: Address,
+  addresses: readonly Address[],
+): Promise<bigint[]> {
+  return (await getTokenBalancesChecked(client, token, addresses)).map((b) => b ?? 0n);
 }

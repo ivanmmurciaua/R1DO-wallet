@@ -1,5 +1,9 @@
 "use client";
 import { useState, useEffect, useRef, useCallback } from "react";
+import FrameHome from "@/components/FrameHome";
+import FrameStealthHome from "@/components/FrameStealthHome";
+import { isRailActive } from "@/lib/frame/railMode";
+import { deriveAccount as deriveFrameAccount, stealthMeta, type PqAccount, type PqStealthMeta } from "@/lib/frame/pqClient";
 import { CircularProgress } from "@mui/material";
 import { createPasskey, loadFromDevice } from "@/lib/passkeys";
 import LoginWithPasskey from "@/components/LoginWithPasskey";
@@ -52,6 +56,9 @@ export default function Home() {
   const [deployed, setDeployed] = useState(false);
   const [address, setAddress] = useState<Address | null>(null);
   const [userWallet, setWallet] = useState<SafeWallet | null>(null);
+  const [frameAccount, setFrameAccount] = useState<PqAccount | null>(null);
+  const [frameMeta, setFrameMeta] = useState<PqStealthMeta | null>(null);
+  const [railPrivacy, setRailPrivacy] = useState(false);
   const [showPopup, setShowPopup] = useState(false);
   const [popupMessage, setPopupMessage] = useState("");
   // const [recovery, setRecovery] = useState(false);
@@ -114,9 +121,11 @@ export default function Home() {
     }
   }, [openPopup]);
 
-  // Persist active session so F5 restores it
+  // Persist active session so F5 restores it. In frame-rail mode there is no Safe
+  // `address` (FrameHome derives the PQ account on demand), so admit that path too —
+  // otherwise LOCAL_LAST_USER never gets written and FrameHome can't find the wallet.
   useEffect(() => {
-    if (deployed && address && username) {
+    if (deployed && username && (address || isRailActive())) {
       localStorage.setItem(LOCAL_LAST_USER, username);
     }
   }, [deployed, address, username]);
@@ -200,7 +209,8 @@ export default function Home() {
     privacyHint?: boolean,
   ) {
     const ownerKey = deriveOwnerKey(prf);
-    await handleWalletInit(ownerKey);
+    // Frame-native rail: no Safe/4337 account is built; FrameHome derives the PQ account.
+    if (!isRailActive()) await handleWalletInit(ownerKey);
 
     // Respect the privacy choice made at registration: stored flag, then a
     // hint from the directory entry. Wallets unknown to this device (e.g. a
@@ -214,9 +224,17 @@ export default function Home() {
 
     console.log(`[login] privacy: ${privacy}`);
     setDeployed(true); // logged in — counterfactual address is already usable
+    // Frame rail: at login (the passkey already tapped), derive what the home needs with no
+    // second in-view tap — privacy=false -> the transparent PQ account (FrameHome);
+    // privacy=true -> the stealth meta-address (FrameStealthHome; it taps per action).
+    if (isRailActive()) {
+      setRailPrivacy(privacy);
+      if (privacy) stealthMeta(prf).then(setFrameMeta).catch(() => {});
+      else deriveFrameAccount(prf).then(setFrameAccount).catch(() => {});
+    }
     closePopup();
     if (privacy) {
-      runStealthScan(username, prf);
+      if (!isRailActive()) runStealthScan(username, prf);
     }
     // NOTE: NO automatic directory publish here. Becoming findable is a
     // deliberate opt-in (makeFindable), so logging in never spends sponsored
@@ -251,7 +269,8 @@ export default function Home() {
     privacy?: boolean,
   ) {
     const ownerKey = deriveOwnerKey(prf);
-    await handleWalletInit(ownerKey);
+    // Frame-native rail: no Safe/4337 account is built; FrameHome derives the PQ account.
+    if (!isRailActive()) await handleWalletInit(ownerKey);
 
     if (privacy) {
       const keys = await derivePQKeysFromPRF(prf);
@@ -269,11 +288,17 @@ export default function Home() {
     // is a separate opt-in the user triggers later (makeFindable), so spamming
     // registrations costs the paymaster nothing — safe on a real-gas chain.
     setDeployed(true);
+    if (isRailActive()) {
+      const p = privacy ?? true;
+      setRailPrivacy(p);
+      if (p) stealthMeta(prf).then(setFrameMeta).catch(() => {});
+      else deriveFrameAccount(prf).then(setFrameAccount).catch(() => {});
+    }
     closePopup();
     if (privacy) {
       // No cursor yet → runStealthScan starts at "now" (no wasteful sweep that
       // 429s the RPC and blocks the Make-findable publish right after registering).
-      runStealthScan(username, prf);
+      if (!isRailActive()) runStealthScan(username, prf);
     }
   }
 
@@ -427,6 +452,9 @@ export default function Home() {
     setUsername("");
     setAddress(null);
     setWallet(null);
+    setFrameAccount(null);
+    setFrameMeta(null);
+    setRailPrivacy(false);
     setDeployed(false);
     exitPublic(); // always return to the public world on logout
     // Hard-stop the engine worker so the next account never inherits the
@@ -440,7 +468,7 @@ export default function Home() {
     closePopup();
   }
 
-  const inWallet = !!(userWallet && username && address && deployed);
+  const inWallet = !!(username && deployed && ((userWallet && address) || isRailActive()));
 
   return (
     <div className={`${styles.page} ${inWallet ? styles.inWallet : styles.onLogin}`}>
@@ -570,7 +598,7 @@ export default function Home() {
         </div>
       )}
 
-      {deployed && address && (
+      {deployed && (address || isRailActive()) && (
         <button
           onClick={handleLogout}
           title="Logout"
@@ -599,7 +627,19 @@ export default function Home() {
       )}
 
       <main className={styles.main}>
-        {!showPopup && userWallet && username && address && deployed ? (
+        {isRailActive() ? (
+          /* Frame-native rail: the hegota PQ stealth world. Its own home view; the 4337
+             Safe/Railgun UI below never renders here (clean path separation). */
+          !showPopup && username && deployed ? (
+            railPrivacy ? (
+              <FrameStealthHome meta={frameMeta} />
+            ) : (
+              <FrameHome account={frameAccount} />
+            )
+          ) : (
+            <LoginWithPasskey createOrLoad={createOrLoad} />
+          )
+        ) : !showPopup && userWallet && username && address && deployed ? (
           !storeReady ? (
             <CircularProgress size={50} sx={{ mt: 3 }} />
           ) : isPrivate ? (
