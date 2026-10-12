@@ -3,7 +3,7 @@
 import * as Comlink from "comlink";
 import type {
   PqWorkerApi, PqAccount, PqAccountStatus, PqSpendResult, FrameTxDesc, FrameDesc,
-  PqStealthMeta, PqStealthPayment, PqNickResolution,
+  PqStealthMeta, PqStealthPayment,
 } from "./pq.worker";
 
 let worker: Worker | null = null;
@@ -52,13 +52,7 @@ export function stealthSpend(
   return getApi().stealthSpend(prf, ct, viewTag, to, sweep ? "max" : valueWei.toString());
 }
 
-/** PAY-BY-NICK: resolve @nick -> meta-address OFF-CHAIN, authenticated by EIP-8272 recent
-    roots (free view call, no gas, no PRF). Returns ok=false with a reason on a miss. */
-export function resolveNick(name: string): Promise<PqNickResolution> {
-  return getApi().resolveNick(name);
-}
-
 export type {
   PqAccount, PqAccountStatus, PqSpendResult, FrameTxDesc, FrameDesc,
-  PqStealthMeta, PqStealthPayment, PqNickResolution,
+  PqStealthMeta, PqStealthPayment,
 };

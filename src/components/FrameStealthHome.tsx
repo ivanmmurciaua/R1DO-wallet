@@ -314,6 +314,42 @@ export default function FrameStealthHome({ meta }: { meta?: PqStealthMeta | null
       </Box>
 
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+        {/* PQ identity card: both post-quantum primitives this stealth home uses are explicit
+            and on-chain-verifiable (ML-KEM-512 discovery + blinded ML-DSA-44 signing). */}
+        {metaState && (
+          <Box sx={{ mb: 2, p: 1.25, border: "1px solid", borderColor: "success.main", borderRadius: 1.5 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.4 }}>
+              <Box sx={{ ...label, color: "success.main", opacity: 1 }}>Your keys</Box>
+              <Box component="span" sx={{ fontFamily: "ui-monospace,monospace", fontSize: "0.56rem", letterSpacing: "0.08em", color: "success.main", border: "1px solid", borderColor: "success.main", borderRadius: 0.5, px: 0.5, py: 0.1 }}>
+                POST-QUANTUM
+              </Box>
+            </Box>
+            <Box sx={{ fontSize: "0.84rem" }}>
+              <b>Receiving</b> · ML-KEM-512
+              <Box component="span" sx={{ opacity: 0.55, fontSize: "0.68rem" }}> · FIPS-203 · lattice</Box>
+            </Box>
+            <Box sx={{ ...mono, fontSize: "0.7rem", opacity: 0.8 }}>
+              meta-address {((metaState.metaAddress.length - 2) / 2).toLocaleString()} B — the viewing key senders encrypt to
+            </Box>
+            <Box sx={{ fontSize: "0.84rem", mt: 0.5 }}>
+              <b>Spending</b> · ML-DSA-44 (blinded)
+              <Box component="span" sx={{ opacity: 0.55, fontSize: "0.68rem" }}> · FIPS-204 · lattice</Box>
+            </Box>
+            <Box sx={{ fontSize: "0.64rem", opacity: 0.6 }}>
+              a fresh blinded key per one-time address · a normal wallet uses ECDSA (breakable by a quantum computer)
+            </Box>
+            {HEGOTA.singletons?.verifier && (
+              <Box sx={{ fontSize: "0.64rem", opacity: 0.6, mt: 0.4, lineHeight: 1.5 }}>
+                each spend&apos;s blinded ML-DSA signature is verified on-chain by{" "}
+                <Link href={`${HEGOTA.explorerUrl}/address/${HEGOTA.singletons.verifier}`} target="_blank" rel="noopener" sx={{ fontFamily: "ui-monospace,monospace" }}>
+                  {shortHex(HEGOTA.singletons.verifier)} ↗
+                </Link>{" "}
+                — funds move only if it is VALID.
+              </Box>
+            )}
+          </Box>
+        )}
+
         {/* Receive side: the ML-KEM meta-address others encrypt a payment to. */}
         <Box sx={{ ...label, mb: 0.5 }}>Your stealth meta-address</Box>
         {metaState ? (

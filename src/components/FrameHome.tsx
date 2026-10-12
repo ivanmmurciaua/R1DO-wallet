@@ -5,12 +5,11 @@
 // Rail-owned, self-contained, removable: it drives the frame rail entirely through
 // src/lib/frame/pqClient.ts and never touches the base wallet's 4337 / Railgun stack.
 // It mirrors the normal wallet home UX (receive address, balance, send form) but every
-// action runs on the post-quantum ML-DSA frame-tx rail.
+// action runs on the post-quantum ML-DSA frame-tx rail, and each send shows the real
+// on-chain anatomy of the frame-tx it produced (not an opaque 4337 UserOp).
 //
-// Pay-by-nick on this rail is NATIVE and storage-free: a @nick resolves to a meta-address
-// against a directory whose merkle root an operator publishes to the 0x8272 recent-root
-// predeploy (EIP-8272). Resolution is a free, authenticated view call (no gas, no PRF); a
-// send still targets the resolved raw address. A plain 0x address also works as before.
+// Recipient is a raw 0x address: there is no name directory on this rail. Private, unlinkable
+// receiving lives in the stealth home (privacy=true), not in a reusable-address nick scheme.
 //
 // Removable: delete this file (and the single render that mounts it in rail mode).
 import { useState, useEffect } from "react";
@@ -20,14 +19,11 @@ import { HEGOTA } from "@/lib/frame/network";
 import { loadFromDevice } from "@/lib/passkeys";
 import { getWalletCredential } from "@/lib/credstore";
 import { LOCAL_LAST_USER } from "@/app/constants";
-import {
-  deriveAccount, readStatus, spend, resolveNick,
-  type PqAccount, type PqAccountStatus, type PqSpendResult,
-} from "@/lib/frame/pqClient";
-import FrameTxView from "@/components/FrameTxView";
+import { deriveAccount, readStatus, spend, type PqAccount, type PqAccountStatus, type PqSpendResult } from "@/lib/frame/pqClient";
+import FrameTxView, { shortHex } from "@/components/FrameTxView";
 
 // Reads LOCAL_LAST_USER, fetches the stored credential, and taps the authenticator to get
-// the 32-byte PRF root the rail derives its ML-DSA identity from. Same flow as the panel.
+// the 32-byte PRF root the rail derives its ML-DSA identity from.
 async function tapForPrf(): Promise<Uint8Array> {
   const user = typeof localStorage !== "undefined" ? localStorage.getItem(LOCAL_LAST_USER) : null;
   if (!user) throw new Error("log in with a passkey first");
@@ -38,8 +34,7 @@ async function tapForPrf(): Promise<Uint8Array> {
   return prf;
 }
 
-// Inline "what changes vs the 4337 wallet" note. This view IS the teaching surface now
-// (the separate Settings panel was removed): each differing step explains itself.
+// Inline "what changes vs the 4337 wallet" note: each differing step explains itself.
 function Vs({ a, b }: { a: string; b: string }) {
   return (
     <Box sx={{ mt: 0.75, mb: 0.5, pl: 1, borderLeft: "2px solid", borderColor: "divider", fontSize: "0.68rem", lineHeight: 1.5 }}>
@@ -68,41 +63,6 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
   const [sendMsg, setSendMsg] = useState<{ ok: boolean; busy: boolean; text: string } | null>(null);
   const [decoded, setDecoded] = useState<PqSpendResult["decoded"] | null>(null);
 
-  // Pay-by-nick resolution state. `resolvedNick` is set when a @nick authenticates against a
-  // recent root; it is cleared whenever the recipient field no longer matches it.
-  const [resolvedNick, setResolvedNick] = useState<{ name: string; address: `0x${string}`; slot: number } | null>(null);
-  const [resolvingNick, setResolvingNick] = useState(false);
-  const [nickMsg, setNickMsg] = useState<string | null>(null);
-
-  const isNickInput = to.trim().startsWith("@");
-  const nickResolved = resolvedNick && to.trim().toLowerCase() === `@${resolvedNick.name}`;
-  // The address a send actually targets: the resolved nick's address, or a raw 0x address.
-  const effectiveRecipient: `0x${string}` | null = nickResolved
-    ? resolvedNick!.address
-    : (isAddress(to.trim()) ? (to.trim() as `0x${string}`) : null);
-
-  async function doResolveNick() {
-    setNickMsg(null);
-    setResolvedNick(null);
-    try {
-      setResolvingNick(true);
-      const r = await resolveNick(to.trim());
-      if (r.ok && r.address) {
-        setResolvedNick({ name: r.name, address: r.address, slot: r.slot ?? 0 });
-      } else {
-        const why = r.reason === "unknown-nick" ? "not in the directory"
-          : r.reason === "stale-root" ? "directory root is stale (operator must republish)"
-            : r.reason === "no-resolver" ? "no directory resolver configured"
-              : "rejected by the recent-root gate";
-        setNickMsg(`@${r.name || to.trim().replace(/^@/, "")}: ${why}`);
-      }
-    } catch (e: unknown) {
-      setNickMsg(e instanceof Error ? e.message : "could not resolve");
-    } finally {
-      setResolvingNick(false);
-    }
-  }
-
   const label = { fontSize: "0.72rem", opacity: 0.6, letterSpacing: "0.06em", textTransform: "uppercase" as const };
   const row = { display: "flex", justifyContent: "space-between", gap: "12px", fontSize: "0.85rem", padding: "3px 0" };
   const mono = { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.8rem", wordBreak: "break-all" as const };
@@ -115,8 +75,7 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
     }
   }
 
-  // Adopt the account derived at login (arrives async) and read its on-chain status, with
-  // no in-view authenticator prompt.
+  // Adopt the account derived at login (arrives async) and read its on-chain status.
   useEffect(() => {
     if (account) {
       setPq({ kind: "ok", acc: account });
@@ -138,9 +97,9 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
   }
 
   async function doSend(acc: PqAccount) {
-    const recipient = effectiveRecipient;
-    if (!recipient) {
-      setSendMsg({ ok: false, busy: false, text: isNickInput ? "resolve the @nick first" : "enter a valid 0x recipient address" });
+    const recipient = to.trim();
+    if (!isAddress(recipient)) {
+      setSendMsg({ ok: false, busy: false, text: "enter a valid 0x recipient address" });
       return;
     }
     let valueWei: bigint;
@@ -202,6 +161,38 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
           </>
         ) : (
           <>
+            {/* PQ identity card: make it explicit (and on-chain-verifiable) that this account
+                signs with a post-quantum scheme, not ECDSA. */}
+            <Box sx={{ mb: 2, p: 1.25, border: "1px solid", borderColor: "success.main", borderRadius: 1.5 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.4 }}>
+                <Box sx={{ ...label, color: "success.main", opacity: 1 }}>Your signing key</Box>
+                <Box component="span" sx={{ fontFamily: "ui-monospace,monospace", fontSize: "0.56rem", letterSpacing: "0.08em", color: "success.main", border: "1px solid", borderColor: "success.main", borderRadius: 0.5, px: 0.5, py: 0.1 }}>
+                  POST-QUANTUM
+                </Box>
+              </Box>
+              <Box sx={{ fontSize: "0.95rem", fontWeight: 600 }}>
+                {pq.acc.level}
+                <Box component="span" sx={{ opacity: 0.55, fontWeight: 400, fontSize: "0.7rem" }}> · FIPS-204 · lattice (module-LWE)</Box>
+              </Box>
+              <Box sx={{ ...mono, fontSize: "0.72rem", opacity: 0.85, mt: 0.5 }}>
+                public key {pq.acc.publicKeyBytes.toLocaleString()} B · signature {pq.acc.signatureBytes.toLocaleString()} B
+              </Box>
+              <Box sx={{ fontSize: "0.64rem", opacity: 0.5 }}>
+                a normal wallet (ECDSA secp256k1) is 33 B / 65 B — breakable by a quantum computer
+              </Box>
+              <Box sx={{ ...mono, fontSize: "0.7rem", opacity: 0.8, mt: 0.5 }}>key commitment {shortHex(pq.acc.commit)}</Box>
+              {HEGOTA.singletons?.verifier && (
+                <Box sx={{ fontSize: "0.64rem", opacity: 0.6, mt: 0.4, lineHeight: 1.5 }}>
+                  verified on-chain by{" "}
+                  <Link href={`${HEGOTA.explorerUrl}/address/${HEGOTA.singletons.verifier}`} target="_blank" rel="noopener" sx={{ fontFamily: "ui-monospace,monospace" }}>
+                    {shortHex(HEGOTA.singletons.verifier)} ↗
+                  </Link>{" "}
+                  (ZKNOX inline ML-DSA verifier): your account&apos;s own code runs it to approve every spend, so funds
+                  move only if your post-quantum signature is VALID.
+                </Box>
+              )}
+            </Box>
+
             {/* Receive: the deterministic CREATE2 address funds arrive to. */}
             <Box sx={{ ...label, mb: 0.5 }}>Your address (send funds here to receive)</Box>
             <Box sx={{ ...mono, mb: 1 }}>{pq.acc.address}</Box>
@@ -244,53 +235,25 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
 
             <Divider sx={{ my: 2 }} />
 
-            {/* Send: self-pay ML-DSA spend to a raw 0x address (no pay-by-nick on this rail). */}
+            {/* Send: self-pay ML-DSA spend to a raw 0x address. */}
             <Box sx={{ ...label, mb: 0.5 }}>Send (self-pay)</Box>
             <Vs
               a="a bundler relays your UserOp and an off-chain paymaster fronts the gas"
               b="self-pay frame-tx: the account pays its own gas from received funds, no relayer"
             />
             <Box sx={{ mb: 1 }} />
-            <Box sx={{ fontSize: "0.68rem", opacity: 0.55, mb: 1.5 }}>
-              Recipient is a raw 0x address or a <b>@nick</b>. A @nick resolves through the directory;
-              paste a plain address to skip it.
-            </Box>
-            <Vs
-              a="pay-by-name reads a registry contract's storage (an SLOAD, and a public, enumerable mapping)"
-              b="@nick is proven against a recent merkle root at the 0x8272 predeploy (EIP-8272), storage-free: no SLOAD, nothing enumerable on-chain"
-            />
-            <Box sx={{ mb: 1 }} />
             <TextField
               fullWidth
               size="small"
-              label="Recipient (0x address or @nick)"
-              placeholder="0x... or @alice"
+              label="Recipient (0x address)"
+              placeholder="0x..."
               value={to}
-              onChange={(e) => { setTo(e.target.value); setResolvedNick(null); setNickMsg(null); }}
+              onChange={(e) => setTo(e.target.value)}
               disabled={sending}
-              error={to.trim().length > 0 && !isNickInput && !isAddress(to.trim())}
-              sx={{ mb: 1 }}
+              error={to.trim().length > 0 && !isAddress(to.trim())}
+              sx={{ mb: 1.5 }}
               inputProps={{ style: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.8rem" } }}
             />
-
-            {/* Pay-by-nick resolve affordance: only when the recipient looks like a @nick. */}
-            {isNickInput && !nickResolved && (
-              <Button size="small" variant="outlined" onClick={() => void doResolveNick()} disabled={sending || resolvingNick} sx={{ mb: 1.5 }}>
-                {resolvingNick ? "resolving..." : "Resolve @nick"}
-              </Button>
-            )}
-            {nickResolved && (
-              <Box sx={{ mb: 1.5, p: 1, border: "1px solid", borderColor: "success.main", borderRadius: 1, fontSize: "0.72rem" }}>
-                <Box sx={{ color: "success.main", fontWeight: 600, mb: 0.25 }}>
-                  @{resolvedNick!.name} resolved · recent-roots ✓ (slot {resolvedNick!.slot})
-                </Box>
-                <Box sx={{ ...mono, fontSize: "0.72rem" }}>{resolvedNick!.address}</Box>
-                <Box sx={{ opacity: 0.55, mt: 0.25 }}>
-                  authenticated against the directory root at 0x8272, no storage read
-                </Box>
-              </Box>
-            )}
-            {nickMsg && <Alert severity="warning" sx={{ mb: 1.5 }}>{nickMsg}</Alert>}
             <TextField
               fullWidth
               size="small"
@@ -304,7 +267,7 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
             <Button
               variant="contained"
               onClick={() => doSend(pq.acc)}
-              disabled={sending || !effectiveRecipient || amount.trim().length === 0}
+              disabled={sending || !isAddress(to.trim()) || amount.trim().length === 0}
             >
               {sending ? "tap your key..." : "Send (self-pay)"}
             </Button>

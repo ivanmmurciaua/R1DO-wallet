@@ -5,7 +5,7 @@
 // Rail-owned and removable: extracted out of FrameHome so BOTH rail homes (the public
 // privacy=false home and the stealth privacy=true home) render a decoded frame-tx the same
 // way. It depends only on the rail's own pqClient types + network, never on the base wallet.
-import { Box } from "@mui/material";
+import { Box, Link } from "@mui/material";
 import { formatEther } from "viem";
 import { HEGOTA } from "@/lib/frame/network";
 import type { FrameTxDesc } from "@/lib/frame/pqClient";
@@ -24,14 +24,26 @@ export default function FrameTxView({ d }: { d: FrameTxDesc }) {
       <Box sx={{ fontSize: "0.74rem", fontWeight: 600, mb: 0.25 }}>
         {d.label} <Box component="span" sx={{ opacity: 0.5, fontWeight: 400 }}>· {d.type}</Box>
       </Box>
-      <Box sx={{ ...mono, opacity: 0.6, mb: 1 }}>sender {shortHex(d.sender)} · nonce {d.nonce} · chain {d.chainId}</Box>
+      <Box sx={{ ...mono, opacity: 0.6, mb: d.onchain ? 0.5 : 1 }}>sender {shortHex(d.sender)} · nonce {d.nonce} · chain {d.chainId}</Box>
+
+      {/* The REAL on-chain trace of this exact tx: what the chain stored, who paid, how much gas.
+          This is the point of the rail — the account itself is the on-chain sender, not a bundler. */}
+      {d.onchain && (
+        <Box sx={{ mb: 1, p: 0.75, borderRadius: 1, border: "1px solid", borderColor: "success.main", fontSize: "0.68rem", lineHeight: 1.6 }}>
+          <Box sx={{ color: "success.main", fontWeight: 600 }}>on-chain ✓ · native frame-tx (0x06)</Box>
+          <Box sx={{ opacity: 0.8 }}>paid by <b>{d.onchain.payer}</b></Box>
+          <Link href={`${HEGOTA.explorerUrl}/tx/${d.onchain.txHash}`} target="_blank" rel="noopener" sx={{ ...mono, fontSize: "0.68rem" }}>
+            {shortHex(d.onchain.txHash)} ↗
+          </Link>
+        </Box>
+      )}
       {d.frames.map((f) => (
         <Box key={f.index} sx={{ mb: 0.75, pl: 1, borderLeft: "2px solid", borderColor: "divider" }}>
           <Box sx={{ fontSize: "0.72rem", fontWeight: 600 }}>
             #{f.index} {f.mode} <Box component="span" sx={{ opacity: 0.6, fontWeight: 400 }}>[{f.flags}]</Box>
           </Box>
           <Box sx={mono}>
-            → {shortHex(f.target)} · gas {f.executionGas.toLocaleString()}+{f.stateGas.toLocaleString()} · value {formatEther(BigInt(f.valueWei))} {HEGOTA.symbol}
+            → {shortHex(f.target)} · value {formatEther(BigInt(f.valueWei))} {HEGOTA.symbol}
           </Box>
           {f.note && <Box sx={{ fontSize: "0.68rem", opacity: 0.6, mt: 0.25 }}>{f.note}</Box>}
         </Box>

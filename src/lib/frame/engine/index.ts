@@ -16,12 +16,10 @@
 //   stealth44   - DKSAP blinded stealth key (derive on send, recover on receive).
 //   dksap       - DKSAP discovery (ML-KEM-512 key agreement + view tag).
 //   frametx     - EIP-8141 frame-tx codec (encode + sig_hash), envelope-config aware.
-//   directory   - EIP-8272 recent roots + native pay-by-nick (merkle + resolve calldata).
 //   submit      - secp256k1 frame signing + live submission (sendRaw / waitReceipt).
 export * as dilithium44 from "./dilithium44";
 export * as mldsa44 from "./mldsa44";
 export * as stealth44 from "./stealth44";
 export * as dksap from "./dksap";
 export * as frametx from "./frametx";
-export * as directory from "./directory";
 export * as submit from "./submit";

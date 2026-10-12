@@ -24,11 +24,7 @@ import {
   FLAG_NONE, SCHEME_ARBITRARY, sigHash, encode, type FrameTx,
 } from "./engine/frametx";
 import { rpc, sendFrameTx, waitReceipt, networkFees } from "./engine/submit";
-import {
-  RECENT_ROOT, storageKey, entryHash, resolveCalldata,
-} from "./engine/directory";
 import { HEGOTA } from "./network";
-import { lookupNick, DIRECTORY_SRC, DIRECTORY_ROOT } from "./directory";
 
 const MLDSA_DOMAIN = new TextEncoder().encode("r1do/hegota/mldsa");
 const MLKEM_DOMAIN = new TextEncoder().encode("r1do/hegota/mlkem");
@@ -54,7 +50,6 @@ const RPC = HEGOTA.rpcUrls[0];
 const verifier = HEGOTA.singletons?.verifier;
 const factory = HEGOTA.singletons?.accountFactory;
 const openSponsor = HEGOTA.singletons?.openSponsor;
-const directoryResolver = HEGOTA.singletons?.directory;
 const chain = defineChain({
   id: HEGOTA.chainId,
   name: HEGOTA.name,
@@ -128,18 +123,6 @@ export interface PqStealthMeta {
   metaAddress: Hex;
 }
 
-// Result of resolving @nick against the pay-by-nick directory (EIP-8272 recent roots).
-// `ok`: the DirectoryResolver authenticated the directory's recent root at 0x8272 and the
-// merkle membership of this nick, storage-free. `reason` explains a miss.
-export interface PqNickResolution {
-  ok: boolean;
-  name: string;
-  meta?: Hex;      // the directory's meta-address for the nick
-  address?: Hex;   // display/payout address derived from meta (last 20 bytes)
-  slot?: number;   // the slot the current root was published at (freshness proof)
-  reason?: "unknown-nick" | "no-resolver" | "stale-root" | "rejected";
-}
-
 // A one-time stealth payment to self: the derived stealth address plus the OFF-CHAIN ticket
 // (ML-KEM ciphertext + view tag) the recipient needs to recover and spend it.
 export interface PqStealthPayment {
@@ -157,6 +140,9 @@ export interface FrameDesc {
 export interface FrameTxDesc {
   label: string; type: string; sender: Hex; nonce: string; chainId: number;
   frames: FrameDesc[]; signature: string;
+  // Filled in AFTER the tx is mined, so the UI shows the real on-chain trace of this exact tx
+  // (tx hash + who paid). Gas is intentionally NOT shown here: the explorer has the real figure.
+  onchain?: { txHash: Hex; payer: string };
 }
 
 const MODE_NAME: Record<number, string> = { [MODE_DEFAULT]: "DEFAULT", [MODE_VERIFY]: "VERIFY", [MODE_SENDER]: "SENDER" };
@@ -213,46 +199,6 @@ const api = {
     return { deployed: !!code && code !== "0x", balanceWei: balance.toString() };
   },
 
-  // FASE 2.3 pay-by-nick: resolve @nick -> meta-address, OFF-CHAIN, gated by EIP-8272 recent
-  // roots. No PRF, no gas, no storage read: the directory's merkle root is authenticated by a
-  // recent-root reference at 0x8272. We first FIND the slot the current root was published at
-  // (scan a short recent window of 0x8272 storage, so nothing hardcodes an ephemeral slot),
-  // then let the DirectoryResolver (view call) re-validate freshness + prove merkle membership.
-  async resolveNick(name: string, scanDepth = 400): Promise<PqNickResolution> {
-    const hit = lookupNick(name);
-    if (!hit) return { ok: false, name, reason: "unknown-nick" };
-    if (!directoryResolver) return { ok: false, name: hit.name, reason: "no-resolver" };
-    const client = publicClient();
-
-    // Locate the publish slot: entry_hash(src, slot, root) must be stored at storage_key(src, slot).
-    // The ring is mod RING but entry_hash binds the FULL slot, so a wrapped old entry never matches.
-    const current = Number(BigInt(
-      (await rpc<{ slotNumber: Hex }>(RPC, "eth_getBlockByNumber", ["latest", false])).slotNumber,
-    ));
-    const lowest = Math.max(0, current - scanDepth);
-    let slot = -1;
-    // Newest-first, batched so a recently published root resolves in one round-trip.
-    for (let top = current - 1; top >= lowest && slot < 0; top -= 50) {
-      const slots: number[] = [];
-      for (let s = top; s > top - 50 && s >= lowest; s--) slots.push(s);
-      const stored = await Promise.all(slots.map((s) =>
-        rpc<Hex>(RPC, "eth_getStorageAt", [RECENT_ROOT, storageKey(DIRECTORY_SRC, s), "latest"])));
-      for (let i = 0; i < slots.length; i++) {
-        if (BigInt(stored[i]!) === BigInt(entryHash(DIRECTORY_SRC, slots[i]!, DIRECTORY_ROOT))) { slot = slots[i]!; break; }
-      }
-    }
-    if (slot < 0) return { ok: false, name: hit.name, reason: "stale-root" };
-
-    // Authenticate on-chain: resolve() STATICCALLs 0x8272 (recency) + checks the merkle proof.
-    const data = resolveCalldata(DIRECTORY_SRC, slot, DIRECTORY_ROOT, hit.nick, hit.meta, hit.proof);
-    try {
-      await client.call({ to: directoryResolver, data });
-    } catch {
-      return { ok: false, name: hit.name, reason: "rejected" };
-    }
-    return { ok: true, name: hit.name, meta: hit.meta, address: hit.address, slot };
-  },
-
   // FASE 1.2 path A: deploy-if-needed (sponsored) + self-pay ML-DSA spend of `valueWei` to
   // `to`. The user funds nothing; the sponsor pays the one-time deploy, the account pays its
   // own spend from its received balance.
@@ -305,6 +251,7 @@ const api = {
       deployTxHash = await sendFrameTx(RPC, encode(tx1));
       const drc = await waitReceipt(RPC, deployTxHash);
       if (drc.status !== "0x1") throw new Error("sponsored deploy (TX1) failed");
+      deployDesc.onchain = { txHash: deployTxHash, payer: "the on-chain sponsor" };
     }
 
     // TX2: self-pay spend. The account approves paying its own gas, verifies ML-DSA, and the
@@ -327,6 +274,7 @@ const api = {
     const spendTxHash = await sendFrameTx(RPC, encode(tx2));
     const src = await waitReceipt(RPC, spendTxHash);
     if (src.status !== "0x1") throw new Error("self-pay spend (TX2) failed");
+    spendDesc.onchain = { txHash: spendTxHash, payer: "this account (self-pay)" };
 
     return { address, deployTxHash, spendTxHash, decoded: { deploy: deployDesc, spend: spendDesc } };
   },
@@ -407,6 +355,7 @@ const api = {
       deployTxHash = await sendFrameTx(RPC, encode(tx1));
       const drc = await waitReceipt(RPC, deployTxHash);
       if (drc.status !== "0x1") throw new Error("sponsored deploy (TX1) failed");
+      deployDesc.onchain = { txHash: deployTxHash, payer: "the on-chain sponsor" };
     }
 
     // TX2: self-pay spend, signed with the BLINDED key (same 3 frames as spend(); inline blinded pk).
@@ -428,6 +377,7 @@ const api = {
     const spendTxHash = await sendFrameTx(RPC, encode(tx2));
     const src = await waitReceipt(RPC, spendTxHash);
     if (src.status !== "0x1") throw new Error("blinded self-pay spend (TX2) failed");
+    spendDesc.onchain = { txHash: spendTxHash, payer: "this account (self-pay, blinded)" };
 
     return { address, deployTxHash, spendTxHash, decoded: { deploy: deployDesc, spend: spendDesc } };
   },

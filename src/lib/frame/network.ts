@@ -45,9 +45,6 @@ export type FrameNetwork = {
     /** Open on-chain paymaster that pays the one-time account deploy (no guards; only
         risks its own gas, user funds protected by the account's ML-DSA gate). */
     openSponsor?: `0x${string}`;
-    /** DirectoryResolver (pay-by-nick): authenticates a recent root at 0x8272 and checks a
-        merkle proof, storage-free. Read-only (view) from the wallet. */
-    directory?: `0x${string}`;
   };
 };
 
@@ -57,6 +54,7 @@ export const HEGOTA: FrameNetwork = {
   chainId: 8141,
   name: "Hegota",
   rpcUrls: ["https://rpc1.privacy.ethrex.xyz"],
+  explorerUrl: "https://dora.privacy.ethrex.xyz",
   faucetUrl: "https://faucet.privacy.ethrex.xyz/api/claim",
   symbol: "ETH",
   backendKind: "frame-native",
@@ -68,8 +66,6 @@ export const HEGOTA: FrameNetwork = {
     verifier: "0x0328c92be059d250e47650272aa09db2c7257f1f",
     accountFactory: "0xd0526914f1045eb6ec89f9a93c8599306f9f667a",
     openSponsor: "0x655aab4c59b587fd7882ff6566198b40c45a7f21",
-    // DirectoryResolver for pay-by-nick (EIP-8272 recent roots). View-only from the wallet.
-    directory: "0xdd5505b4f053734ecbd02ffd929ff049034704c4",
   },
 };
 
