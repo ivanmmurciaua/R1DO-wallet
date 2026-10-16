@@ -41,6 +41,10 @@ export const CSP_CONNECT_BASE: readonly string[] = [
   "https://ipfs-lb.com",
   "https://rail-squid.squids.live",
   "https://api.thegraph.com",
+  // Hegota frame-tx rail (experimental; src/lib/frame). Removable with the rail.
+  "https://rpc1.privacy.ethrex.xyz",
+  // Hegota faucet: auto-funds the transient one-time deploy payer (FASE 1.2a).
+  "https://faucet.privacy.ethrex.xyz",
 ];
 
 /** A syntactically valid https origin (scheme + host + optional port, NO path)? */

@@ -17,7 +17,8 @@ import {
 } from "@/lib/localstorage";
 import { deleteWalletCredential } from "@/lib/credstore";
 import { LOCAL_LAST_USER } from "@/app/constants";
-import { NETWORKS, activeNetwork, setActiveNetwork } from "@/lib/networks";
+import { NETWORKS, activeNetwork, setActiveNetwork, ACTIVE_NETWORK_KEY } from "@/lib/networks";
+import { FRAME_NETWORKS, frameNetworkById } from "@/lib/frame/network";
 import RpcManager from "@/components/RpcManager";
 import { MAX_DEEP_SCAN_DAYS, defaultScanDay, latestScannableDay, scanWindowFor } from "@/lib/deepScan";
 
@@ -83,6 +84,19 @@ const inputSx = {
     fontSize: "0.75rem",
   },
 };
+
+// The currently selected network id for the switcher's controlled value. Reads the
+// RAW persisted id (not activeNetwork().id) because a frame-rail id like "hegota"
+// is not in NETWORKS, so activeNetwork() would resolve it to the default and the
+// dropdown would show the wrong chain. For any 4337 id this equals activeNetwork().id
+// (nothing persisted → the same default), so the 4337 path is unchanged.
+function currentNetworkId(): string {
+  try {
+    return window.localStorage.getItem(ACTIVE_NETWORK_KEY) ?? activeNetwork().id;
+  } catch {
+    return activeNetwork().id; // SSR / storage blocked
+  }
+}
 
 export function Settings({
   privacy = false,
@@ -168,7 +182,7 @@ export function Settings({
   // `disabled` off later ships it. `network` is LIVE — it drives the switcher
   // (handleNetworkChange: persist + reload).
   const [cleanup, setCleanup] = useState<string>("tombstone");
-  const [network, setNetwork] = useState<string>(activeNetwork().id);
+  const [network, setNetwork] = useState<string>(currentNetworkId());
   const [confirmResync, setConfirmResync] = useState(false);
   const [resyncing, setResyncing] = useState(false);
   const [resyncMsg, setResyncMsg] = useState<string | null>(null);
@@ -327,9 +341,21 @@ export function Settings({
   // also clears the in-memory session (no silent F5 restore) → you land on the
   // login screen for the newly selected chain, which is exactly the switch flow.
   const handleNetworkChange = (id: string) => {
-    if (id === activeNetwork().id) return;
+    if (id === currentNetworkId()) return;
     setNetwork(id);
-    setActiveNetwork(id as (typeof NETWORKS)[number]["id"]);
+    if (frameNetworkById(id)) {
+      // Frame-rail id (e.g. "hegota"): setActiveNetwork is typed to the 4337 id
+      // union and activeNetwork() can't resolve a frame id, so persist the raw id
+      // straight to ACTIVE_NETWORK_KEY (same key setActiveNetwork writes). The rail
+      // reads its own registry (frameNetworkById) on the next load.
+      try {
+        window.localStorage.setItem(ACTIVE_NETWORK_KEY, id);
+      } catch {
+        /* storage blocked → stays on the current network */
+      }
+    } else {
+      setActiveNetwork(id as (typeof NETWORKS)[number]["id"]);
+    }
     window.location.reload();
   };
 
@@ -355,7 +381,7 @@ export function Settings({
     setSymbol(getSymbol());
     setDecimals(getDecimals());
     setCleanup(getUtxoCleanup());
-    setNetwork(activeNetwork().id);
+    setNetwork(currentNetworkId());
     setConfirmResync(false);
     setSeedPhrase(null);
     setSeedErr(null);
@@ -473,6 +499,12 @@ export function Settings({
               >
                 {NETWORKS.map((n) => (
                   <MenuItem key={n.id} value={n.id}>{n.chain.name}</MenuItem>
+                ))}
+                {/* Frame-native (hegota) rail — experimental, served by frame-tx,
+                    not 4337. Selecting one persists its id and reloads like any
+                    network. Removable with src/lib/frame. */}
+                {FRAME_NETWORKS.map((fn) => (
+                  <MenuItem key={fn.id} value={fn.id}>{fn.name} (experimental)</MenuItem>
                 ))}
               </TextField>
 
