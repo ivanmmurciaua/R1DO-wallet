@@ -15,8 +15,9 @@ export const shortHex = (a: string) =>
   a.startsWith("0x") && a.length > 20 ? `${a.slice(0, 10)}…${a.slice(-6)}` : a;
 
 // Renders the human-readable anatomy of one EIP-8141 frame-tx: its frames (mode/flags/
-// target/gas/value + a plain-language note) and the inline ML-DSA signature. This is the
-// teaching payoff of the rail — you SEE the self-pay frame-tx, not an opaque 4337 UserOp.
+// target/gas/value + a plain-language note) and the inline post-quantum signature. This is the
+// teaching payoff of the rail: you SEE the frame-tx, not an opaque 4337 UserOp.
+const isAddr = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a);
 export default function FrameTxView({ d }: { d: FrameTxDesc }) {
   const mono = { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.72rem", wordBreak: "break-all" as const };
   return (
@@ -31,7 +32,17 @@ export default function FrameTxView({ d }: { d: FrameTxDesc }) {
       {d.onchain && (
         <Box sx={{ mb: 1, p: 0.75, borderRadius: 1, border: "1px solid", borderColor: "success.main", fontSize: "0.68rem", lineHeight: 1.6 }}>
           <Box sx={{ color: "success.main", fontWeight: 600 }}>on-chain ✓ · native frame-tx (0x06)</Box>
-          <Box sx={{ opacity: 0.8 }}>paid by <b>{d.onchain.payer}</b></Box>
+          <Box sx={{ opacity: 0.8 }}>
+            paid by{" "}
+            {isAddr(d.onchain.payer) ? (
+              <Link href={`${HEGOTA.explorerUrl}/address/${d.onchain.payer}`} target="_blank" rel="noopener" sx={{ ...mono, fontSize: "0.68rem", fontWeight: 600 }}>
+                {shortHex(d.onchain.payer)}
+              </Link>
+            ) : (
+              <b>{d.onchain.payer}</b>
+            )}
+            {d.onchain.payerRole && <> ({d.onchain.payerRole}, per the receipt)</>}
+          </Box>
           <Link href={`${HEGOTA.explorerUrl}/tx/${d.onchain.txHash}`} target="_blank" rel="noopener" sx={{ ...mono, fontSize: "0.68rem" }}>
             {shortHex(d.onchain.txHash)} ↗
           </Link>

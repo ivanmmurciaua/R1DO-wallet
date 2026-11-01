@@ -16,7 +16,7 @@
 //   stealth44   - DKSAP blinded stealth key (derive on send, recover on receive).
 //   dksap       - DKSAP discovery (ML-KEM-512 key agreement + view tag).
 //   frametx     - EIP-8141 frame-tx codec (encode + sig_hash), envelope-config aware.
-//   submit      - secp256k1 frame signing + live submission (sendRaw / waitReceipt).
+//   submit      - live submission (JSON-RPC, fees, sendRaw); the receipt wait is railCore.sendAndWait.
 export * as dilithium44 from "./dilithium44";
 export * as mldsa44 from "./mldsa44";
 export * as stealth44 from "./stealth44";
