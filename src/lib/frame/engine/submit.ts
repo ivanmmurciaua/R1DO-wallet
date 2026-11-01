@@ -1,27 +1,54 @@
-// Live frame-tx submission + secp256k1 frame signature (wire v(1, bare 0/1)||r(32)||s(32)).
-import { sign } from 'viem/accounts';
+// Live frame-tx submission: JSON-RPC, dynamic fees, raw send. The receipt wait (with the dropped-tx
+// re-broadcast) lives in railCore.sendAndWait. The rail signs only with PQ keys, so the vendored
+// secp256k1 frame signer is not carried here.
 import { type Hex } from 'viem';
-import { sigHash, encode, type FrameTx, type Signature } from "./frametx";
 
-export async function k1FrameSignature(sigHashHex: Hex, privateKey: Hex): Promise<Hex> {
-  const s = await sign({ hash: sigHashHex, privateKey });
-  const v = s.yParity === 0 ? '00' : '01';
-  const r = s.r.slice(2).padStart(64, '0');
-  const ss = s.s.slice(2).padStart(64, '0');
-  return ('0x' + v + r + ss) as Hex;
+// Per-request timeout. A fetch the node never answers would otherwise never settle, and a caller
+// holding a lock (railCore's serialized sponsored deploy) would wedge every later caller behind it.
+// 25 s is far above a healthy devnet round trip (well under 1 s) yet short enough that a stuck UI
+// action fails visibly. A timed-out request is aborted and rejects with RpcTimeoutError; it is NOT
+// retried here (a node that held one request that long is not answering): polling callers treat it
+// as a transient miss and poll again, one-shot callers surface it.
+export const RPC_TIMEOUT_MS = 25_000;
+
+/** No response within RPC_TIMEOUT_MS. For eth_sendRawTransaction the tx may still have reached the
+    node: the caller must not assume it was not sent. */
+export class RpcTimeoutError extends Error {}
+
+async function postOnce<T>(url: string, method: string, params: unknown[]): Promise<{ result?: T; error?: { message: string } }> {
+  const ctl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Raced against the fetch as well as aborting it, so a body read that ignores the signal still
+  // cannot hang the caller.
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      reject(new RpcTimeoutError(`RPC timeout: ${method} got no response from the node within ${RPC_TIMEOUT_MS / 1000}s`));
+    }, RPC_TIMEOUT_MS);
+  });
+  const request = (async () => {
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: ctl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`); // transient (5xx / gateway): retry
+    return await res.json() as { result?: T; error?: { message: string } };
+  })();
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function rpc<T>(url: string, method: string, params: unknown[], retries = 3): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`); // transient (5xx / gateway): retry
-      const j = await res.json() as { result?: T; error?: { message: string } };
+      const j = await postOnce<T>(url, method, params);
       if (j.error) throw new Error(`${method}: ${j.error.message}`); // RPC logic error: do NOT retry
       return j.result as T;
     } catch (e) {
-      // Only retry transient transport failures (fetch throw / non-2xx), never RPC logic errors.
+      // Only retry transient transport failures (fetch throw / non-2xx), never RPC logic errors
+      // and never a timeout (see RPC_TIMEOUT_MS).
+      if (e instanceof RpcTimeoutError) throw e;
       if (e instanceof Error && e.message.startsWith(`${method}:`)) throw e;
       lastErr = e;
       if (attempt < retries - 1) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
@@ -53,35 +80,6 @@ export async function networkFees(url: string): Promise<Fees> {
   return { gasPrice: maxFee, maxFeePerGas: maxFee, maxPriorityFeePerGas: FEE_TIP_WEI };
 }
 
-/** Dynamic gas LIMIT for a normal tx: ask the node (eth_estimateGas) and add a buffer, so
-    we never hardcode a limit that is too low (a short limit reverts, e.g. a CREATE needs
-    ~220k, not the 21k/200k one might guess) nor absurdly high. The buffer absorbs estimate
-    drift and state changes between estimate and inclusion. */
-export async function gasFor(
-  url: string,
-  req: { from?: Hex; to?: Hex; data?: Hex; value?: Hex },
-  bufferPct = 25,
-): Promise<bigint> {
-  const est = BigInt(await rpc<Hex>(url, 'eth_estimateGas', [req]));
-  return (est * BigInt(100 + bufferPct)) / 100n;
-}
-
 export async function sendFrameTx(url: string, raw: Hex): Promise<Hex> { return rpc<Hex>(url, 'eth_sendRawTransaction', [raw]); }
 
 export interface FrameReceipt { status?: Hex; transactionHash?: Hex; gasUsed?: Hex; contractAddress?: Hex | null; [k: string]: unknown; }
-
-export async function waitReceipt(url: string, hash: Hex, tries = 180): Promise<FrameReceipt> {
-  for (let i = 0; i < tries; i++) {
-    const r = await rpc<FrameReceipt | null>(url, 'eth_getTransactionReceipt', [hash]);
-    if (r) return r;
-    await new Promise((res) => setTimeout(res, 1000));
-  }
-  throw new Error('receipt timeout');
-}
-
-/** Sign a single-k1 frame tx as `sender` and return the raw bytes. */
-export async function signAndEncodeK1(tx: FrameTx, privateKey: Hex): Promise<Hex> {
-  const sig = await k1FrameSignature(sigHash(tx), privateKey);
-  (tx.signatures[0] as Signature).signature = sig;
-  return encode(tx);
-}
