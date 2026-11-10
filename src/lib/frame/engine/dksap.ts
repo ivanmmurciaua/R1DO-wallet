@@ -1,13 +1,14 @@
-// DKSAP discovery layer (P1.3a): ML-KEM-512 key agreement for stealth-address discovery.
+// DKSAP discovery layer (P1.3a): ML-KEM-768 key agreement for stealth-address discovery.
 // The recipient publishes an ML-KEM encapsulation key (the "viewing" half of its meta
 // address); a sender encapsulates to get a shared secret + ciphertext and a short view
 // tag; the recipient decapsulates to recover the same shared secret and scans by view tag.
-// The shared secret then drives the blinded-ML-DSA stealth key (P1.3b). ML-KEM-512 is
-// FIPS-203 standard (matches pq-dksap's kyber_py ML_KEM_512).
-import { ml_kem512 } from '@noble/post-quantum/ml-kem.js';
+// The shared secret then drives the stealth key (blinded ML-DSA or a leanSphincs-s seed). ML-KEM-768
+// is FIPS-203 standard, the parameter set the PQ stealth ERCs use (ERC-8441, Skas's PQ-SAP).
+import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
 import { shake256 } from '@noble/hashes/sha3';
 
-export const KEM_EK_BYTES = 800;   // ML-KEM-512 encapsulation key
+export const KEM_EK_BYTES = 1184;  // ML-KEM-768 encapsulation key
+export const KEM_CT_BYTES = 1088;  // ML-KEM-768 ciphertext
 export const VIEW_TAG_BYTES = 1;
 const VIEW_KDF = new TextEncoder().encode('pq-dksap/view/v1');
 const VIEW_TAG_KDF = new TextEncoder().encode('pq-dksap/viewtag/v1');
@@ -17,7 +18,7 @@ export interface MetaKeys { encapsulationKey: Uint8Array; decapsulationKey: Uint
 /** Recipient meta keys from a 32-byte seed (deterministic). */
 export function genMeta(seed: Uint8Array): MetaKeys {
   const kemSeed = shake256(new Uint8Array([...VIEW_KDF, ...seed]), { dkLen: 64 });
-  const { publicKey, secretKey } = ml_kem512.keygen(kemSeed);
+  const { publicKey, secretKey } = ml_kem768.keygen(kemSeed);
   return { encapsulationKey: publicKey, decapsulationKey: secretKey };
 }
 
@@ -29,13 +30,14 @@ export interface Announcement { sharedSecret: Uint8Array; cipherText: Uint8Array
 
 /** Sender: encapsulate to the recipient's published encapsulation key. */
 export function senderDerive(encapsulationKey: Uint8Array): Announcement {
-  const { cipherText, sharedSecret } = ml_kem512.encapsulate(encapsulationKey);
+  const { cipherText, sharedSecret } = ml_kem768.encapsulate(encapsulationKey);
   return { sharedSecret, cipherText, viewTag: viewTag(sharedSecret) };
 }
 
 /** Recipient: recover the shared secret from a ciphertext; optionally filter by view tag. */
 export function recipientRecover(dk: Uint8Array, cipherText: Uint8Array, tag?: Uint8Array): Uint8Array | null {
-  const ss = ml_kem512.decapsulate(cipherText, dk);
+  if (cipherText.length !== KEM_CT_BYTES) return null;
+  const ss = ml_kem768.decapsulate(cipherText, dk);
   if (tag && !eq(viewTag(ss), tag)) return null;
   return ss;
 }

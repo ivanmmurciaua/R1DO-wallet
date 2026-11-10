@@ -17,9 +17,9 @@ export const LSS_ACCOUNT_S_BIN: Hex = "0x60803461013d57601f610521388190039182016
 // AccountMldsaS (ML-DSA-44 rail): creation code (249 B). Constructor tail appended at deploy is
 // commit(32) || pad32(verifier) (see account.ts accountInitcode), stored in slots 0 and 1, so
 // every instance shares one runtime codehash (0x54d7443d...06adac) and a keyless paymaster can
-// sponsor the class. Unlike the retired pre-migration AccountPQ (drainable without a signature),
-// its VERIFY gates the frame LAYOUT before APPROVE (the next frame is a DEFAULT frame to itself,
-// atomically batched through the last frame), and that DEFAULT frame runs the ML-DSA verify
+// sponsor the class. Its VERIFY gates the frame LAYOUT before APPROVE: the next frame must be a
+// DEFAULT frame to itself, atomically batched through the last frame (otherwise a tx that simply
+// omits the verify frame could drain the account), and that DEFAULT frame runs the ML-DSA verify
 // (~1.25M gas on the packed verifier, over the VERIFY prefix gas cap). The runtime is verifier-agnostic
 // (it calls verifyInline on the address in slot 1), so swapping the verifier keeps this codehash.
 // Compiled with solc 0.8.23 --strict-assembly --evm-version shanghai --optimize.

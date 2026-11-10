@@ -247,7 +247,7 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
                 <Box sx={{ fontSize: "0.64rem", opacity: 0.5 }}>
                   a normal wallet (ECDSA secp256k1) is 33 B / 65 B, breakable by a quantum computer
                 </Box>
-                <Box sx={{ ...mono, fontSize: "0.7rem", opacity: 0.8, mt: 0.5 }}>account salt {shortHex(acc.commit)}</Box>
+                <Box sx={{ ...mono, fontSize: "0.7rem", opacity: 0.8, mt: 0.5 }}>account salt {shortHex(acc.salt)}</Box>
                 {acctStatus && rail && (
                   <Box sx={{ ...mono, fontSize: "0.7rem", opacity: 0.8 }}>
                     {budget !== null

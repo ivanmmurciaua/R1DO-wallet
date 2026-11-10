@@ -12,7 +12,7 @@ export const MODE_DEFAULT = 0, MODE_VERIFY = 1, MODE_SENDER = 2;
 export const SCHEME_ARBITRARY = 0, SCHEME_SECP256K1 = 1, SCHEME_P256 = 2;
 // APPROVE scope bitmask, verified against the live ethrex node + EIP-8141: 0x1 = PAYMENT,
 // 0x2 = EXECUTION, 0x3 = both. The frame `flags` field and the APPROVE opcode arg share
-// this encoding. (These two individual constants were previously reversed.)
+// this encoding.
 export const FLAG_NONE = 0x0, FLAG_APPROVE_PAYMENT = 0x1, FLAG_APPROVE_EXECUTION = 0x2,
   FLAG_APPROVE_EXECUTION_AND_PAYMENT = 0x3, FLAG_ATOMIC_BATCH = 0x4;
 

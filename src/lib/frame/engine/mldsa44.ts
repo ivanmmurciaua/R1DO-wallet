@@ -83,8 +83,7 @@ export function expandPk(pk: Uint8Array): { aHat: bigint[][][]; tr: Uint8Array; 
   const A = expandA(rho);
   const aHat = A.map((row) => row.map(compact256));
   // The packed verifier takes t1 PRE-SCALED and in the NTT domain: NTT(t1 * 2^D mod q),
-  // compacted. (The retired SHAKE inline verifier took t1 raw and scaled it on-chain; a raw
-  // t1 makes the packed verifier return invalid.)
+  // compacted (a raw t1 makes the verifier return invalid).
   const t1: bigint[][] = [];
   const perPoly = (N * T1_BITS) / 8; // 320 bytes
   for (let r = 0; r < K; r++) {

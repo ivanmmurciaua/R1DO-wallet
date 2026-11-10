@@ -4,7 +4,7 @@
 // passkey PRF root with the rail's seedFor primitive and a tag that pins b:
 //   transparent account   "r1do/hegota/lss/b13/v1"
 //   stealth key secret    "r1do/hegota/lss/stealth-key/b13/v1"
-//   ML-KEM meta keys      "r1do/hegota/mlkem" (railCore mlkemMeta: same tag as the ML-DSA-44 rail,
+//   ML-KEM meta keys      "r1do/hegota/mlkem768/v1" (railCore mlkemMeta: same tag as the ML-DSA-44 rail,
 //                         so the user has ONE meta-address whatever the scheme)
 // A stealth account's seed is shake256(utf8("r1do/hegota/lss/stealth/b13/v1/ss") || secret || ss, 32),
 // with ss the ML-KEM shared secret of its ticket.
@@ -287,7 +287,7 @@ async function spendWith(seed: Uint8Array, to: Hex, valueWei: string, who: strin
     ? buildSponsoredSpend(address, pm.paymaster!, nonce2, to, value, fees)
     : buildSelfPaySpend(address, nonce2, to, value, fees);
   signWitness0(tx2, k.key);
-  const label = sponsored ? "sponsored spend" : `self-pay spend (fallback: paymaster ${fallbackReason})`;
+  const label = sponsored ? "sponsored spend (leanSphincs-s)" : `self-pay spend (leanSphincs-s, fallback: paymaster ${fallbackReason})`;
   const spendDesc = describeFrameTx(tx2, label, "lss");
   const { hash, payer } = await sendAndWait(tx2, `${label} (TX2)`, onEvent);
   const paidBy = payer ?? (sponsored ? pm.paymaster! : address);
@@ -305,7 +305,7 @@ async function spendWith(seed: Uint8Array, to: Hex, valueWei: string, who: strin
 
 export function deriveAccount(prf: Uint8Array): PqAccount {
   const p = publicFor(transparentSeed(prf));
-  return { level: "leanSphincs-s", publicKeyBytes: 64, signatureBytes: LSS_SIG_BYTES, commit: p.salt, address: p.address };
+  return { level: "leanSphincs-s", publicKeyBytes: 64, signatureBytes: LSS_SIG_BYTES, salt: p.salt, address: p.address };
 }
 
 export function spend(prf: Uint8Array, to: Hex, valueWei: string, onEvent?: PqSendEventCb): Promise<PqSpendResult> {
