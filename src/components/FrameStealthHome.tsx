@@ -243,17 +243,14 @@ function StealthRow({ entry, rail, onHide }: { entry: LssStealthTicket; rail: Pq
       )}
 
       {decoded && (
-        <Box sx={{ mt: 1.5 }}>
-          <Box sx={{ ...label, mb: 0.25 }}>Frame-tx decoded: what you just signed</Box>
-          <FrameExplain id="stealth.row.decoded" label="what is this">
-            <Box sx={{ fontSize: "0.68rem", opacity: 0.55, mb: 0.5 }}>
-              No opaque UserOp: this is the actual EIP-8141 frame transaction, frame by frame, from this one-time
-              stealth account.
-            </Box>
-          </FrameExplain>
+        <FrameSection id={`stealth.row.decoded.${entry.stealthAddress}`} title="Frame-tx decoded: what you just signed" sx={{ mt: 1.5 }}>
+          <Box sx={{ fontSize: "0.68rem", opacity: 0.55, mb: 0.5 }}>
+            No opaque UserOp: this is the actual EIP-8141 frame transaction, frame by frame, from this one-time
+            stealth account.
+          </Box>
           {decoded.deploy && <FrameTxView d={decoded.deploy} />}
           <FrameTxView d={decoded.spend} />
-        </Box>
+        </FrameSection>
       )}
     </Box>
   );

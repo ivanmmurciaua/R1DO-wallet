@@ -54,9 +54,10 @@ export function seedFor(tag: string, prf: Uint8Array): Uint8Array {
   return shake256(buf, { dkLen: 32 });
 }
 
-/** The ML-KEM stealth meta keys. ONE tag for every scheme, so the user has a
-    single meta-address; only the spending key behind each ticket depends on the scheme. */
-export const MLKEM_TAG = "r1do/hegota/mlkem";
+/** The ML-KEM-768 stealth meta keys. ONE tag for every scheme, so the user has a
+    single meta-address; only the spending key behind each ticket depends on the scheme.
+    The tag names the parameter set, so a future KEM change gets its own tag. */
+export const MLKEM_TAG = "r1do/hegota/mlkem768/v1";
 export const mlkemMeta = (prf: Uint8Array) => dksap.genMeta(seedFor(MLKEM_TAG, prf));
 
 // ---------------------------------------------------------------------------------------------
@@ -71,7 +72,7 @@ export interface PqAccount {
   level: PqScheme;
   publicKeyBytes: number; // leanSphincs-s 64 (pkSeed || pkRoot); ML-DSA-44 1312 (packed pk)
   signatureBytes: number; // leanSphincs-s 4164; ML-DSA-44 2420
-  commit: Hex; // CREATE2 salt (field name kept for page.tsx compat)
+  salt: Hex; // CREATE2 salt
   address: Hex; // deterministic CREATE2 address of the account
 }
 
@@ -204,7 +205,7 @@ export function describeFrameTx(tx: FrameTx, label: string, scheme: DescScheme):
       index: i,
       mode: MODE_NAME[f.mode] ?? String(f.mode),
       flags: flagName(f.flags),
-      target: f.target ?? "self (the sender)",
+      target: f.target == null || f.target.toLowerCase() === tx.sender.toLowerCase() ? "self (the sender)" : f.target,
       executionGas: Number(f.executionGas),
       stateGas: Number(f.stateGas),
       valueWei: (f.value ?? 0).toString(),
@@ -474,6 +475,6 @@ export function fallbackWhy(m: RailMode): string {
 
 /** Who paid, in words, from the receipt payer. */
 export function payerRoleOf(paidBy: Hex, paymaster: Hex | null, account: Hex): string {
-  return same(paidBy, paymaster) ? "the keyless paymaster (your account paid 0 gas)"
+  return same(paidBy, paymaster) ? "the keyless paymaster; your account paid 0 gas"
     : same(paidBy, account) ? "this account (self-pay)" : "a third party";
 }

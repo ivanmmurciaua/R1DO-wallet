@@ -4,9 +4,8 @@
 // lssRail's API so the worker can route by scheme.
 //
 // Keys: one ML-DSA-44 (FIPS-204, SHAKE) key from a 32-byte seed derived from the passkey PRF root:
-//   transparent / stealth base key   "r1do/hegota/mldsa-s/v1" (never reuse the retired
-//                                    "r1do/hegota/mldsa" tag of the pre-migration rail)
-//   ML-KEM meta keys                 railCore mlkemMeta ("r1do/hegota/mlkem"), the SAME meta-address
+//   transparent / stealth base key   "r1do/hegota/mldsa-s/v1"
+//   ML-KEM meta keys                 railCore mlkemMeta ("r1do/hegota/mlkem768/v1"), the SAME meta-address
 //                                    as the leanSphincs-s rail: one meta-address per user
 // ML-DSA is stateless: no signature budget. Secret keys never leave the Web Worker.
 //
@@ -15,7 +14,7 @@
 //           and t1 in the NTT domain, the layout of the ZKNOX packed verifier, network.ts `verifier`)
 //   commit = salt = keccak256(pkEnc); initcode = creation || commit || pad32(verifier)
 // commit and verifier live in storage, so the whole class shares one runtime codehash. The address
-// depends on the verifier: accounts placed on the retired verifier are not derived any more.
+// depends on the verifier (it is part of the initcode).
 // The ML-DSA verify costs ~1.25M gas and the VERIFY prefix is capped at 500K on 8141, so it cannot
 // run in VERIFY. The account's VERIFY only checks the frame LAYOUT (next frame is DEFAULT -> itself and
 // every frame from there to the last one is ATOMIC_BATCH) and approves; the DEFAULT batch head then
@@ -86,9 +85,8 @@ const SPONSORED_GAS_BOUND = 2_500_000n;
 // Self-pay reserve. The account is charged maxFeePerGas * (intrinsic + every frame's declared
 // execution + state gas) UP FRONT, before SENDER moves the value, and refunded the unused part after,
 // so a "send all" must hold back exactly that. Frame part: summed from the constants the self-pay tx
-// is built with (1,873,600). Intrinsic part, from the self-pay receipt 0xcf04495f... on the retired
-// verifier (same 24.7 KB witness): gasUsed 15,168,857 minus frame use (416 + 14,665,296 + 3,000 +
-// 183,600 state) = 316,545. 450K is a ~40% margin. The total (2,323,600) is above the calldata
+// is built with (1,873,600). Intrinsic part: ~316.5K measured for this 24.7 KB witness (gasUsed minus
+// the frames' use on an execution-bound self-pay receipt). 450K is a ~40% margin. The total (2,323,600) is above the calldata
 // floor (1,600,005 measured), so it also covers a floor-bound charge.
 const SELF_PAY_INTRINSIC_BOUND = 450_000n;
 const SELF_PAY_FRAME_GAS = BigInt(
@@ -314,7 +312,7 @@ async function spendWith(k: MldsaKey, to: Hex, valueWei: string, who: string, on
 
 export function deriveAccount(prf: Uint8Array): PqAccount {
   const p = transparentPublic(prf);
-  return { level: "ML-DSA-44", publicKeyBytes: PK_BYTES, signatureBytes: SIG_BYTES, commit: p.salt, address: p.address };
+  return { level: "ML-DSA-44", publicKeyBytes: PK_BYTES, signatureBytes: SIG_BYTES, salt: p.salt, address: p.address };
 }
 
 export function spend(prf: Uint8Array, to: Hex, valueWei: string, onEvent?: PqSendEventCb): Promise<PqSpendResult> {

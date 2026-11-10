@@ -18,8 +18,7 @@ type Addr = `0x${string}`;
 // ---------------------------------------------------------------------------------------------
 
 /** The account class a ticket's address was derived for. A spend routes by THIS, not by the user's
-    current selection, so switching schemes never strands a ticket. Tickets stored before the
-    selection existed carry "leanSphincs-s" (or nothing, read as leanSphincs-s). */
+    current selection, so switching schemes never strands a ticket. */
 export type TicketScheme = "leanSphincs-s" | "ML-DSA-44";
 
 export interface LssStealthTicket {
@@ -100,7 +99,7 @@ function writeListStrict(key: string, list: unknown[]): void {
 const isHex = (x: unknown): x is Addr => typeof x === "string" && x.startsWith("0x");
 
 const schemeOf = (x: unknown): TicketScheme | null =>
-  x === undefined || x === "leanSphincs-s" ? "leanSphincs-s" : x === "ML-DSA-44" ? "ML-DSA-44" : null;
+  x === "leanSphincs-s" || x === "ML-DSA-44" ? x : null;
 
 /** This user's stealth tickets of both schemes (empty if none / storage unavailable), each with
     its scheme normalised. Malformed entries (or an unknown scheme) are skipped on read but never

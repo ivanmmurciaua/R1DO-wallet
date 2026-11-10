@@ -84,7 +84,7 @@ export const HEGOTA: FrameNetwork = {
     // its Keccak-f1600 helper 0xf9a7741d6196d63aa6b1b794981584b6d7cf55a3. ~1.25M gas per verify.
     // The wallet ASSUMES this exists and must error if it is gone (a devnet reset wipes it),
     // never auto-deploy one: an AccountMldsaS address depends on this, so it has to be stable.
-    // Replacing it moves every ML-DSA-44 address (no migration of accounts placed on an older one).
+    // Replacing it moves every ML-DSA-44 address.
     verifier: "0x9fd447116436cec2131e2b0c0f910e8e48bd5e7b",
     accountFactory: "0xd0526914f1045eb6ec89f9a93c8599306f9f667a",
     openSponsor: "0x655aab4c59b587fd7882ff6566198b40c45a7f21",
