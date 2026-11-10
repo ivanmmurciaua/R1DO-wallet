@@ -34,25 +34,27 @@ export const SCHEME_INFO: Record<PqScheme, {
     verifierText: "leanSphincs-s verifier, called by your account's frame module in its VERIFY frame",
     verifyGas: "~50K gas",
     gives:
-      "Security from hash functions alone (no lattice assumptions) and cheap spends: ~50K gas, about 300x less than ML-DSA-44.",
+      "Security from hash functions alone (no lattice assumptions) and cheap spends: ~50K gas to verify, about 25x less " +
+      "than ML-DSA-44, and ~290K gas per spend, about 5x less.",
     costs:
       "Its keys cannot be blinded: only YOU can create your stealth addresses. Nobody can derive one for you from your " +
       "public meta-address, so third parties cannot pay you privately this way. Each key also has a finite signature " +
       "budget (the wallet counts it).",
   },
   "ML-DSA-44": {
-    button: "ML-DSA-44 (lattice, blindable, ~15M gas)",
+    button: "ML-DSA-44 (lattice, blindable, ~1.25M gas)",
     family: "FIPS-204 (Dilithium) · lattice-based",
     keyText: "an ML-DSA-44 lattice post-quantum key",
     accountClass: "AccountMldsaS",
     verifier: HEGOTA.singletons?.verifier,
-    verifierText: "ZKNOX ML-DSA-44 verifier, called by your account in its atomic verify frame",
-    verifyGas: "~15M gas",
+    verifierText: "ZKNOX packed ML-DSA-44 verifier (unaudited, testnet), called by your account in its atomic verify frame",
+    verifyGas: "~1.25M gas",
     gives:
       "Its keys can be blinded: from your public meta-address alone, anyone can derive a fresh stealth address that only " +
       "you can spend. That is what lets a third party pay you privately (planned for a future version of this rail).",
     costs:
-      `Relies on lattice assumptions, and each spend costs ~15M gas (~0.0015 ${HEGOTA.symbol} at current fees).`,
+      `Relies on lattice assumptions, and each spend costs ~1.6M gas (~0.00016 ${HEGOTA.symbol} at current fees), ` +
+      "mostly for the ~24.7 KB witness calldata.",
   },
 };
 

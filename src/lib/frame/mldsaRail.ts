@@ -11,11 +11,13 @@
 // ML-DSA is stateless: no signature budget. Secret keys never leave the Web Worker.
 //
 // Account: AccountMldsaS at a deterministic CREATE2 address:
-//   pkEnc = abi.encode(uint256[][][] aHat, bytes tr, uint256[][] t1)  (ZKNOX expanded pk, 22,272 B)
+//   pkEnc = abi.encode(uint256[][][] aHat, bytes tr, uint256[][] t1)  (expanded pk, 22,272 B; aHat
+//           and t1 in the NTT domain, the layout of the ZKNOX packed verifier, network.ts `verifier`)
 //   commit = salt = keccak256(pkEnc); initcode = creation || commit || pad32(verifier)
-// commit and verifier live in storage, so the whole class shares one runtime codehash.
-// The ML-DSA verify costs ~15M gas and the VERIFY prefix is capped at 500K on 8141, so it cannot run
-// in VERIFY. The account's VERIFY only checks the frame LAYOUT (next frame is DEFAULT -> itself and
+// commit and verifier live in storage, so the whole class shares one runtime codehash. The address
+// depends on the verifier: accounts placed on the retired verifier are not derived any more.
+// The ML-DSA verify costs ~1.25M gas and the VERIFY prefix is capped at 500K on 8141, so it cannot
+// run in VERIFY. The account's VERIFY only checks the frame LAYOUT (next frame is DEFAULT -> itself and
 // every frame from there to the last one is ATOMIC_BATCH) and approves; the DEFAULT batch head then
 // runs the ML-DSA verify on signatures[0] and reverts on a bad signature, so the node skips the rest
 // of the batch (the value-moving SENDER). Spend = up to two frame-txs, with NO EOA in the flow:
@@ -61,30 +63,39 @@ export const MLDSA_S_TAG = "r1do/hegota/mldsa-s/v1";
 
 const PK_BYTES = 1312;
 const SIG_BYTES = 2420;
-// ZKNOX expanded public key (22,272 B) + signature: what the account checks (SIGPARAM(0x03, 0)).
+// Expanded public key (22,272 B) + signature: what the account checks (SIGPARAM(0x03, 0)).
 const WITNESS_BYTES = 24_692;
 
-// Frame gas (execution, state), from OUT.md's measured runs: VERIFY account 416 used, paymaster
-// 3,151, ML-DSA verify 14.74M to 14.83M, SENDER 3,000 + new-account state gas (120 * 1530).
-// Prefix (VERIFY frames) total: 120K sponsored / 60K self-pay, under the 500K cap.
+// Frame gas (execution, state). Measured per-frame receipts on the packed verifier (5 spends:
+// transparent, blinded stealth, self-pay; e.g. 0xd5ed53d2..., 0xb0a686dc..., 0xe46a02a3...): VERIFY
+// account 416, paymaster 3,151, DEFAULT ML-DSA verify 1,248,191 to 1,251,840, SENDER 3,000 (+ up to
+// 120 * 1530 state gas when the recipient is a new account). G_DEFAULT_VERIFY = 1.6M is a ~28%
+// margin over the highest measured verify: if it ran out of gas the batch would be skipped (nothing
+// moves) but the gas would still be paid. Prefix (VERIFY frames) total: 120K sponsored / 60K
+// self-pay (declared limits; ~3.6K actually used), within this devnet's 500K prefix cap. The EIP-8141
+// spec floor is 100K execution gas (EIPs PR #12301 would make it a shared floor nodes may raise).
 const G_VERIFY_ACCOUNT = { executionGas: 60_000, stateGas: 0 };
 const G_VERIFY_PAYMASTER = { executionGas: 60_000, stateGas: 50_000 };
-const G_DEFAULT_VERIFY = { executionGas: 15_800_000, stateGas: 0 };
+const G_DEFAULT_VERIFY = { executionGas: 1_600_000, stateGas: 0 };
 const G_SENDER = { executionGas: 30_000, stateGas: 183_600 };
-// Upper bound for the paymaster balance check: frame gas + ~318K intrinsic and 24.7 KB calldata.
-const SPONSORED_GAS_BOUND = 17_000_000n;
+// The 24.7 KB witness makes the calldata floor bind: every measured spend used exactly 1,600,480 gas
+// (sponsored) / 1,600,005 (self-pay), above frame use (~1.26M) plus the ~317K intrinsic estimated
+// below (~1.57M). The upfront charge is bounded by the declared frame gas (1,983,600 sponsored)
+// plus the intrinsic bound, so 2.5M is the paymaster balance check bound (~56% over the 1.6M used).
+const SPONSORED_GAS_BOUND = 2_500_000n;
 // Self-pay reserve. The account is charged maxFeePerGas * (intrinsic + every frame's declared
 // execution + state gas) UP FRONT, before SENDER moves the value, and refunded the unused part after,
 // so a "send all" must hold back exactly that. Frame part: summed from the constants the self-pay tx
-// is built with (16,073,600). Intrinsic part, from the mined self-pay receipt 0xcf04495f...: gasUsed
-// 15,168,857 minus frame use (416 + 14,665,296 + 3,000 + 183,600 state) = 316,545 for the 24.7 KB
-// witness. 450K is a ~40% margin; the total stays under the 17M the reserve used before.
+// is built with (1,873,600). Intrinsic part, from the self-pay receipt 0xcf04495f... on the retired
+// verifier (same 24.7 KB witness): gasUsed 15,168,857 minus frame use (416 + 14,665,296 + 3,000 +
+// 183,600 state) = 316,545. 450K is a ~40% margin. The total (2,323,600) is above the calldata
+// floor (1,600,005 measured), so it also covers a floor-bound charge.
 const SELF_PAY_INTRINSIC_BOUND = 450_000n;
 const SELF_PAY_FRAME_GAS = BigInt(
   G_VERIFY_ACCOUNT.executionGas + G_VERIFY_ACCOUNT.stateGas + G_DEFAULT_VERIFY.executionGas + G_DEFAULT_VERIFY.stateGas
     + G_SENDER.executionGas + G_SENDER.stateGas,
-); // 16,073,600
-const SELF_PAY_GAS_BOUND = SELF_PAY_FRAME_GAS + SELF_PAY_INTRINSIC_BOUND; // 16,523,600
+); // 1,873,600
+const SELF_PAY_GAS_BOUND = SELF_PAY_FRAME_GAS + SELF_PAY_INTRINSIC_BOUND; // 2,323,600
 
 // ---------------------------------------------------------------------------------------------
 // Key material
@@ -100,7 +111,7 @@ function singletons() {
   return { accountFactory, verifier };
 }
 
-/** ABI-encoded ZKNOX SHAKE PubKey (aHat, tr, t1), 22,272 B: the account's commit is its keccak. */
+/** ABI-encoded SHAKE PubKey (aHat, tr, t1 in the NTT domain), 22,272 B: the account's commit is its keccak. */
 function pkEncOf(pk: Uint8Array): Hex {
   const { aHat, tr, t1 } = mldsa44.expandPk(pk);
   return encodeAbiParameters(

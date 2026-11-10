@@ -20,6 +20,7 @@ export const LSS_ACCOUNT_S_BIN: Hex = "0x60803461013d57601f610521388190039182016
 // sponsor the class. Unlike the retired pre-migration AccountPQ (drainable without a signature),
 // its VERIFY gates the frame LAYOUT before APPROVE (the next frame is a DEFAULT frame to itself,
 // atomically batched through the last frame), and that DEFAULT frame runs the ML-DSA verify
-// (~15M gas, over the 500K VERIFY cap). Compiled with solc 0.8.23 --strict-assembly
-// --evm-version shanghai --optimize.
+// (~1.25M gas on the packed verifier, over the VERIFY prefix gas cap). The runtime is verifier-agnostic
+// (it calls verifyInline on the address in slot 1), so swapping the verifier keeps this codehash.
+// Compiled with solc 0.8.23 --strict-assembly --evm-version shanghai --optimize.
 export const ACCOUNT_MLDSA_S_BIN: Hex = "0x604038603f19015f395f515f5560205160015560db8061001e5f395ff3fe3460d957600ab0600180600283b31460805761607460035fb403607c576008b063c34781db60e01b5f526060600452602452615780604452615700806064525f81816084b55f6109748061578452826157a4b55f549060842003607c57616124602081805f6001545afa15607c5762495a6360e31b905103607c57005b5f80fd5b600682b3916002831460038414811715607c576002910160018101906009b0928391011015607c57600281b3607c57305f82b303607c57905f1901905b81811060cb578360006000aa005b600781b315607c57820160bd565b00";

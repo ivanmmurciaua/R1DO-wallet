@@ -38,8 +38,8 @@ export type FrameNetwork = {
   /** Rail singletons on this chain. The devnet resets, so these are anchors, not law:
       a reset changes the verifier (and therefore every AccountMldsaS address). */
   singletons?: {
-    /** ZKNOX inline ML-DSA verifier, verifyInline(pk, h, sig). Baked into the initcode (and kept in
-        storage) of every AccountMldsaS (ML-DSA-44 rail). */
+    /** Strict inline ML-DSA-44 verifier, verifyInline(pkEnc, h, sig) (ZKNOX packed verifier). Baked
+        into the initcode (and kept in storage) of every AccountMldsaS (ML-DSA-44 rail). */
     verifier?: `0x${string}`;
     /** Generic CREATE2 factory (calldata salt || initcode), shared by both account classes. */
     accountFactory?: `0x${string}`;
@@ -57,7 +57,8 @@ export type FrameNetwork = {
     lssAccountCodehash?: `0x${string}`;
     /** Keyless paymaster of the ML-DSA-44 rail: same runtime as lssPaymaster with only the gated
         class hash swapped (mldsaAccountCodehash). A SEPARATE balance on purpose: an ML-DSA spend
-        costs ~15.3M gas, so sharing one balance would let the expensive class drain the cheap one. */
+        costs ~1.6M gas (vs ~290K for leanSphincs-s), so sharing one balance would let the
+        more expensive class drain the cheaper one. */
     mldsaPaymaster?: `0x${string}`;
     /** Runtime codehash of the AccountMldsaS class (commit + verifier in storage, so one hash for
         every key; the ML-DSA paymaster's gate and the preflight check). */
@@ -77,11 +78,14 @@ export const HEGOTA: FrameNetwork = {
   backendKind: "frame-native",
   pool: false,
   singletons: {
-    // THE canonical ZKNOX inline ML-DSA verifier (verifyInline(demo) == VALID, 15438 bytes).
+    // THE ML-DSA-44 verifier of the rail: ZKNOX exp/packed-verifier (f85ca80, UNAUDITED, testnet
+    // only) behind a strict verifyInline wrapper (signature exactly 2,420 B, pkEnc exactly 22,272 B
+    // with 4x4x32 aHat, 64 B tr, 4x32 t1 in the NTT domain), 23,218 B runtime, bound by codehash to
+    // its Keccak-f1600 helper 0xf9a7741d6196d63aa6b1b794981584b6d7cf55a3. ~1.25M gas per verify.
     // The wallet ASSUMES this exists and must error if it is gone (a devnet reset wipes it),
     // never auto-deploy one: an AccountMldsaS address depends on this, so it has to be stable.
-    // Used by the ML-DSA-44 rail (AccountMldsaS).
-    verifier: "0x0328c92be059d250e47650272aa09db2c7257f1f",
+    // Replacing it moves every ML-DSA-44 address (no migration of accounts placed on an older one).
+    verifier: "0x9fd447116436cec2131e2b0c0f910e8e48bd5e7b",
     accountFactory: "0xd0526914f1045eb6ec89f9a93c8599306f9f667a",
     openSponsor: "0x655aab4c59b587fd7882ff6566198b40c45a7f21",
     // leanSphincs-s rail. Like the verifier above, these are part of every account's initcode,

@@ -163,7 +163,7 @@ function frameNote(tx: FrameTx, i: number, scheme: DescScheme): string {
       return "keyless paymaster: checks the account's code hash (EXTCODEHASH), then pays the gas";
     if ((scheme === "mldsa-s" || scheme === "mldsa-s-blinded") && self) {
       const pays = f.flags === FLAG_APPROVE_EXECUTION_AND_PAYMENT ? " and pays its own gas (self-pay fallback)" : "";
-      return `the account checks the frame layout (its ML-DSA verify frame follows, atomically batched with the spend) and approves execution${pays}; no signature work here, it does not fit the 500K VERIFY cap`;
+      return `the account checks the frame layout (its ML-DSA verify frame follows, atomically batched with the spend) and approves execution${pays}; no signature work here: the ML-DSA verify does not fit the VERIFY prefix gas cap`;
     }
     if (same(f.target, tx.sender) && f.flags === FLAG_APPROVE_EXECUTION)
       return "the account verifies its leanSphincs-s signature (hash-based) and approves execution";
