@@ -12,7 +12,7 @@
 //
 // Layers:
 //   dilithium44 - ML-DSA-44 (FIPS-204, SHAKE): keygen + sign, from scratch (blindable).
-//   mldsa44     - public-key expansion for the on-chain ZKNOX inline verifier.
+//   mldsa44     - public-key expansion for the on-chain ZKNOX packed inline verifier.
 //   stealth44   - DKSAP blinded stealth key (derive on send, recover on receive).
 //   dksap       - DKSAP discovery (ML-KEM-512 key agreement + view tag).
 //   frametx     - EIP-8141 frame-tx codec (encode + sig_hash), envelope-config aware.

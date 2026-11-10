@@ -7,7 +7,7 @@
 // worker holds no selection state; pqClient.ts reads it from storage):
 //   "leanSphincs-s" (lssRail.ts, default): hash-based SphincsFrameAccountS, verify in the VERIFY
 //       prefix (~50K gas), sponsored by the leanSphincs keyless paymaster.
-//   "ML-DSA-44" (mldsaRail.ts): lattice AccountMldsaS, verify in an atomic DEFAULT frame (~15M gas),
+//   "ML-DSA-44" (mldsaRail.ts): lattice AccountMldsaS, verify in an atomic DEFAULT frame (~1.25M gas),
 //       sponsored by its own keyless paymaster; stealth accounts are DKSAP-blinded ML-DSA keys.
 // Both: deployed by the open sponsor on first spend, self-pay fallback if their paymaster is
 // missing, not gating or underfunded, one transparent account plus a fresh one-time stealth account

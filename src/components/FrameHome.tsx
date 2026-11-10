@@ -388,12 +388,12 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
                   {acc.level === "ML-DSA-44" ? (
                     <Box sx={{ mt: 0.75, pl: 1, borderLeft: "2px solid", borderColor: "divider", fontSize: "0.68rem", opacity: 0.72, lineHeight: 1.6 }}>
                       <Box sx={{ fontWeight: 600, mb: 0.25 }}>On the ML-DSA-44 verify (the DEFAULT batch frame)</Box>
-                      The verify costs ~15M gas, far over the 500K cap of the VERIFY frames, so your account&apos;s VERIFY
+                      The verify costs ~1.25M gas, over the gas cap of the VERIFY prefix, so your account&apos;s VERIFY
                       only checks the frame layout (its own verify frame follows, atomically batched with the spend) and
                       approves. The DEFAULT frame then runs the ML-DSA verify; a bad signature reverts it and the node skips
                       the rest of the batch, so nothing moves. The witness is ~24.7 KB of calldata (expanded public key +
                       signature). The ML-DSA paymaster is a separate keyless contract with its own balance, so this
-                      expensive class cannot drain the leanSphincs-s paymaster.
+                      more expensive class cannot drain the leanSphincs-s paymaster.
                     </Box>
                   ) : (
                     <Box sx={{ mt: 0.75, pl: 1, borderLeft: "2px solid", borderColor: "divider", fontSize: "0.68rem", opacity: 0.72, lineHeight: 1.6 }}>

@@ -1,4 +1,5 @@
-// ML-DSA-44 (Dilithium2) public-key expansion for the ZKNOX_dilithium inline verifier.
+// ML-DSA-44 (Dilithium2) public-key expansion for the rail's inline verifier (ZKNOX
+// exp/packed-verifier behind a strict verifyInline wrapper, network.ts `verifier`).
 // Ported from @noble-validated FIPS-204 primitives (skas mldsa65.ts) with K=L=4.
 // Produces the on-chain PubKey = (aHat in NTT domain, tr = H(pk), t1 scaled<<D in NTT),
 // each polynomial compacted to 32 uint256 words (8 coeffs/word, 32-bit lanes), exactly
@@ -81,14 +82,14 @@ export function expandPk(pk: Uint8Array): { aHat: bigint[][][]; tr: Uint8Array; 
   const tr = shake256(pk, { dkLen: 64 });
   const A = expandA(rho);
   const aHat = A.map((row) => row.map(compact256));
-  // The SHAKE ZKNOX_dilithium expects t1 RAW (just unpacked from pk, compacted); it does
-  // the (1<<D) scaling and NTT on-chain. (The keccak ETHDilithium path pre-scales it; we
-  // must NOT, or verify fails.)
+  // The packed verifier takes t1 PRE-SCALED and in the NTT domain: NTT(t1 * 2^D mod q),
+  // compacted. (The retired SHAKE inline verifier took t1 raw and scaled it on-chain; a raw
+  // t1 makes the packed verifier return invalid.)
   const t1: bigint[][] = [];
   const perPoly = (N * T1_BITS) / 8; // 320 bytes
   for (let r = 0; r < K; r++) {
     const packed = pk.slice(32 + r * perPoly, 32 + (r + 1) * perPoly);
-    t1.push(compact256(bitUnpack(packed, T1_BITS, N)));
+    t1.push(compact256(ntt(bitUnpack(packed, T1_BITS, N).map((c) => (c << D) % Q))));
   }
   return { aHat, tr, t1 };
 }
