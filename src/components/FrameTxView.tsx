@@ -1,6 +1,6 @@
 "use client";
 
-// FrameTxView — shared renderer for the human-readable anatomy of one EIP-8141 frame-tx.
+// FrameTxView: shared renderer for the human-readable anatomy of one EIP-8141 frame-tx.
 //
 // Rail-owned and removable: extracted out of FrameHome so BOTH rail homes (the public
 // privacy=false home and the stealth privacy=true home) render a decoded frame-tx the same
@@ -28,7 +28,7 @@ export default function FrameTxView({ d }: { d: FrameTxDesc }) {
       <Box sx={{ ...mono, opacity: 0.6, mb: d.onchain ? 0.5 : 1 }}>sender {shortHex(d.sender)} · nonce {d.nonce} · chain {d.chainId}</Box>
 
       {/* The REAL on-chain trace of this exact tx: what the chain stored, who paid, how much gas.
-          This is the point of the rail — the account itself is the on-chain sender, not a bundler. */}
+          This is the point of the rail: the account itself is the on-chain sender, not a bundler. */}
       {d.onchain && (
         <Box sx={{ mb: 1, p: 0.75, borderRadius: 1, border: "1px solid", borderColor: "success.main", fontSize: "0.68rem", lineHeight: 1.6 }}>
           <Box sx={{ color: "success.main", fontWeight: 600 }}>on-chain ✓ · native frame-tx (0x06)</Box>
@@ -59,7 +59,7 @@ export default function FrameTxView({ d }: { d: FrameTxDesc }) {
           {f.note && <Box sx={{ fontSize: "0.68rem", opacity: 0.6, mt: 0.25 }}>{f.note}</Box>}
         </Box>
       ))}
-      <Box sx={{ fontSize: "0.68rem", opacity: 0.75, mt: 0.5 }}><b>signature</b> — {d.signature}</Box>
+      <Box sx={{ fontSize: "0.68rem", opacity: 0.75, mt: 0.5 }}><b>signature</b>: {d.signature}</Box>
     </Box>
   );
 }

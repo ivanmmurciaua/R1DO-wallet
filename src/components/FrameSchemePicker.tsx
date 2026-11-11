@@ -5,9 +5,9 @@
 //
 // Rail-owned and removable like the other Frame* components: it reads the selection and each
 // scheme's paymaster status through src/lib/frame/pqClient.ts only. The selection itself is stored
-// by pqClient (per device user); this component just shows it, changes it, and shows for the
-// SELECTED scheme its tradeoffs, which keyless paymaster sponsors it and whether it is in self-pay
-// fallback. Both schemes' statuses are read up front so switching shows the new line instantly.
+// by pqClient (per device user); this component shows it, changes it and explains the SELECTED
+// scheme's tradeoffs right under the toggle. SchemeGas (shown in Details) says which keyless paymaster
+// sponsors it or whether it is in self-pay fallback; both schemes' statuses are read up front.
 import { useState, useEffect } from "react";
 import { Box, Link, ToggleButton, ToggleButtonGroup } from "@mui/material";
 import { formatEther } from "viem";
@@ -69,11 +69,9 @@ export function gasLine(rail: PqRailStatus | null): string {
   return "self-pay fallback (paymaster missing)";
 }
 
-export default function FrameSchemePicker({
-  scheme, onChange, disabled, context,
-}: { scheme: PqScheme; onChange: (s: PqScheme) => void; disabled?: boolean; context: "transparent" | "stealth" }) {
+/** Both schemes' rail statuses, read once on mount (switching shows the new line instantly). */
+function useRails(): Partial<Record<PqScheme, PqRailStatus>> {
   const [rails, setRails] = useState<Partial<Record<PqScheme, PqRailStatus>>>({});
-
   useEffect(() => {
     let live = true;
     for (const s of PQ_SCHEMES) {
@@ -81,9 +79,15 @@ export default function FrameSchemePicker({
     }
     return () => { live = false; };
   }, []);
+  return rails;
+}
 
+/** The scheme selector plus, right under it, why to choose the selected scheme (collapsed). */
+export default function FrameSchemePicker({
+  scheme, onChange, disabled, context,
+}: { scheme: PqScheme; onChange: (s: PqScheme) => void; disabled?: boolean; context: "transparent" | "stealth" }) {
   return (
-    <Box sx={{ mb: 2 }}>
+    <Box>
       <Box sx={{ fontSize: "0.72rem", opacity: 0.6, letterSpacing: "0.06em", textTransform: "uppercase", mb: 0.5 }}>
         Post-quantum signature scheme
       </Box>
@@ -99,8 +103,6 @@ export default function FrameSchemePicker({
           <ToggleButton key={s} value={s}>{SCHEME_INFO[s].button}</ToggleButton>
         ))}
       </ToggleButtonGroup>
-
-      {/* Only the selected scheme's explanation, like the highlighted paymaster line below. Collapsed by default. */}
       <FrameExplain id={`scheme.why.${context}`} label="why choose this scheme">
         <Box sx={{ fontSize: "0.66rem", mt: 0.5, lineHeight: 1.55 }}>
           <Box sx={{ color: "success.main", opacity: 0.9 }}>+ {SCHEME_INFO[scheme].gives}</Box>
@@ -116,22 +118,28 @@ export default function FrameSchemePicker({
             : "New stealth addresses use the selected scheme. Existing tickets keep their own scheme (badge on each) and stay spendable whatever you select."}
         </Box>
       </FrameExplain>
+    </Box>
+  );
+}
 
-      {/* Gas line for the selected scheme only. */}
-      <Box sx={{ mt: 0.75, fontSize: "0.64rem", lineHeight: 1.6, opacity: 0.85, fontFamily: "ui-monospace,monospace" }}>
-        gas:{" "}
-        {rails[scheme]
-          ? <>
-              {gasLine(rails[scheme]!)}
-              {rails[scheme]!.paymaster && (
-                <>
-                  {" "}
-                  <Link href={`${HEGOTA.explorerUrl}/address/${rails[scheme]!.paymaster}`} target="_blank" rel="noopener">↗</Link>
-                </>
-              )}
-            </>
-          : "reading..."}
-      </Box>
+/** Which keyless paymaster sponsors the SELECTED scheme (or why it is in self-pay fallback). */
+export function SchemeGas({ scheme }: { scheme: PqScheme }) {
+  const rails = useRails();
+  const rail = rails[scheme];
+  return (
+    <Box sx={{ fontSize: "0.64rem", lineHeight: 1.6, opacity: 0.85, fontFamily: "ui-monospace,monospace" }}>
+      gas ({scheme}):{" "}
+      {rail
+        ? <>
+            {gasLine(rail)}
+            {rail.paymaster && (
+              <>
+                {" "}
+                <Link href={`${HEGOTA.explorerUrl}/address/${rail.paymaster}`} target="_blank" rel="noopener">↗</Link>
+              </>
+            )}
+          </>
+        : "reading..."}
     </Box>
   );
 }

@@ -19,11 +19,10 @@
 //
 // Removable: delete this file (and the single render that mounts it in stealth rail mode).
 import { useState, useEffect, useCallback } from "react";
-import { Paper, Box, Button, Link, TextField, Alert, Divider } from "@mui/material";
-import { parseEther, isAddress, formatEther } from "viem";
+import { Box, Button, Link, Alert, IconButton, Stack, Typography } from "@mui/material";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import { HEGOTA } from "@/lib/frame/network";
-import { loadFromDevice } from "@/lib/passkeys";
-import { getWalletCredential } from "@/lib/credstore";
+import { claimFaucet } from "@/lib/frame/faucet";
 import { LOCAL_LAST_USER } from "@/app/constants";
 import {
   stealthNewPayment, stealthSpend, readStatus, railStatus, getScheme, setScheme, onSchemeChange, sendEventText,
@@ -33,21 +32,13 @@ import {
   getTickets, addTicket, setTicketHidden, corruptTicketBackups, ticketStoreUnreadable,
   type LssStealthTicket,
 } from "@/lib/frame/stealthStore";
-import FrameTxView, { shortHex } from "@/components/FrameTxView";
-import FrameSchemePicker, { SCHEME_INFO, SchemeBadge, gasLine } from "@/components/FrameSchemePicker";
+import { shortHex } from "@/components/FrameTxView";
+import FrameSchemePicker, { SCHEME_INFO, SchemeBadge, SchemeGas, gasLine } from "@/components/FrameSchemePicker";
 import FrameSection, { FrameExplain } from "@/components/FrameSection";
-
-// Reads LOCAL_LAST_USER, fetches the stored credential, and taps the authenticator to get the
-// 32-byte PRF root the rail derives its stealth keys from. Same flow as FrameHome.
-async function tapForPrf(): Promise<Uint8Array> {
-  const user = typeof localStorage !== "undefined" ? localStorage.getItem(LOCAL_LAST_USER) : null;
-  if (!user) throw new Error("log in with a passkey first");
-  const cred = await getWalletCredential(user);
-  if (!cred?.rawId) throw new Error("no credential found for this wallet");
-  const prf = await loadFromDevice(cred.rawId);
-  if (!prf || prf.length !== 32) throw new Error("authenticator has no 32-byte PRF support");
-  return prf;
-}
+import {
+  MONO, captionSx, BAR_SPACE, tapForPrf, shortAddr, useHideBalance, Amount, BalanceCard, ActionBar,
+  SubHeader, ReceiveBlock, SendFlow, DecodedSection, type BarSlot,
+} from "@/components/FrameWalletKit";
 
 // Inline "what changes vs the 4337 wallet" note (same teaching surface as FrameHome).
 function Vs({ a, b }: { a: string; b: string }) {
@@ -60,211 +51,49 @@ function Vs({ a, b }: { a: string; b: string }) {
 }
 
 type Msg = { ok: boolean; busy: boolean; text: string } | null;
+type View = "menu" | "send" | "receive" | "details";
 
-const label = { fontSize: "0.72rem", opacity: 0.6, letterSpacing: "0.06em", textTransform: "uppercase" as const };
-const row = { display: "flex", justifyContent: "space-between", gap: "12px", fontSize: "0.85rem", padding: "3px 0" };
-const mono = { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.8rem", wordBreak: "break-all" as const };
+const NOTE = { fontSize: "0.68rem", opacity: 0.55, mb: 0.5 };
+const wrapSx = { display: "flex", flexDirection: "column" as const, maxWidth: 400, mx: "auto", width: "100%", px: 2, py: 2 };
+const rowSx = {
+  display: "flex", alignItems: "center", gap: 1, border: "1px solid", borderColor: "divider", borderRadius: "2px",
+  px: 1.25, py: 0.75,
+};
+const clickRowSx = { ...rowSx, cursor: "pointer", "&:hover": { borderColor: "primary.main" } };
 
-// Human label for the gas mode, from railStatus.
-function gasModeText(rail: PqRailStatus | null): string {
-  if (!rail || rail.mode === "sponsored") return "gas paid by paymaster";
-  if (rail.fallbackReason === "underfunded") return "self-pay, paymaster out of funds";
-  if (rail.fallbackReason === "not-gated") return "self-pay, paymaster does not cover this account";
-  return "self-pay fallback";
-}
-
-// One stored ticket: its account's on-chain status + a compact spend form. Each ticket is an
-// independent one-time account, so it owns its own state; `rail` is the status of the TICKET's scheme.
-function StealthRow({ entry, rail, onHide }: { entry: LssStealthTicket; rail: PqRailStatus | null; onHide: (hidden: boolean) => void }) {
-  const [status, setStatus] = useState<PqAccountStatus | null>(null);
-  const [to, setTo] = useState("");
-  const [amount, setAmount] = useState("");
-  const [sending, setSending] = useState(false);
-  const [msg, setMsg] = useState<Msg>(null);
-  const [decoded, setDecoded] = useState<PqSpendResult["decoded"] | null>(null);
-  const [copied, setCopied] = useState<"address" | "ticket" | null>(null);
-  const sponsored = rail ? rail.mode === "sponsored" : true;
-
-  async function copy(what: "address" | "ticket") {
-    try {
-      // The ticket JSON is the manual backup: with the passkey it is all that spends this account.
-      const text = what === "address"
-        ? entry.stealthAddress
-        : JSON.stringify({ v: entry.v, scheme: entry.scheme, stealthAddress: entry.stealthAddress, ct: entry.ct, viewTag: entry.viewTag, createdAt: entry.createdAt });
-      await navigator.clipboard.writeText(text);
-      setCopied(what);
-      setTimeout(() => setCopied(null), 1500);
-    } catch {
-      /* clipboard unavailable: the full address is shown below to copy by hand */
-    }
-  }
-
-  const refreshStatus = useCallback(async () => {
-    try {
-      setStatus(await readStatus(entry.stealthAddress));
-    } catch {
-      /* a read hiccup is not fatal to the view */
-    }
-  }, [entry.stealthAddress]);
-
-  useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
-
-  async function doSpend(sweep = false) {
-    const recipient = to.trim();
-    if (!isAddress(recipient)) {
-      setMsg({ ok: false, busy: false, text: "enter a valid 0x recipient address" });
-      return;
-    }
-    let valueWei = 0n;
-    if (!sweep) {
-      try {
-        valueWei = parseEther(amount.trim());
-      } catch {
-        setMsg({ ok: false, busy: false, text: "enter a valid amount" });
-        return;
-      }
-      if (valueWei <= 0n) {
-        setMsg({ ok: false, busy: false, text: "amount must be greater than zero" });
-        return;
-      }
-    }
-    try {
-      setSending(true);
-      setMsg({ ok: false, busy: true, text: "tap your key..." });
-      const prf = await tapForPrf();
-      setMsg({ ok: false, busy: true, text: `opening the ticket + deriving the ${entry.scheme} key + deploying (if needed) + ${sweep ? "sending all" : "spending"}...` });
-      // Routed by the ticket's own scheme, not the current selection.
-      const res = await stealthSpend(prf, entry, recipient, valueWei, sweep, (ev) => setMsg({ ok: false, busy: true, text: sendEventText(ev) }));
-      setMsg({ ok: true, busy: false, text: `${res.deployTxHash ? "deployed + spent" : "spent"} (${res.mode === "sponsored" ? "gas paid by the paymaster" : "self-pay fallback, this account paid the gas"})` });
-      setDecoded(res.decoded);
-      setAmount("");
-      await refreshStatus();
-    } catch (e: unknown) {
-      setMsg({ ok: false, busy: false, text: e instanceof Error ? e.message : "spend failed" });
-    } finally {
-      setSending(false);
-    }
-  }
-
-  const balWei = status ? BigInt(status.balanceWei) : 0n;
-
+// Compact row used by the "Awaiting payment" / "Spent" / hidden lists.
+function MiniRow({ t, extra, actions }: { t: LssStealthTicket; extra?: string; actions: React.ReactNode }) {
   return (
-    <Box sx={{ mt: 1.5, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 1.5, opacity: entry.hidden ? 0.6 : 1 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 1 }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-          <Box sx={{ ...label, mb: 0.25 }}>One-time stealth address, fund this to receive</Box>
-          <SchemeBadge scheme={entry.scheme} />
-        </Box>
-        <Button size="small" variant="text" color="inherit" onClick={() => onHide(!entry.hidden)} disabled={sending} sx={{ opacity: 0.6, minWidth: 0 }}>
-          {entry.hidden ? "unhide" : "hide"}
-        </Button>
-      </Box>
-      {/* Full address (not shortened): this is what you paste into the faucet / sender to fund it. */}
-      <Box sx={{ ...mono, fontSize: "0.78rem", mb: 0.5 }}>{entry.stealthAddress}</Box>
-      <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 0.5 }}>
-        <Button size="small" variant="outlined" onClick={() => void copy("address")}>
-          {copied === "address" ? "copied" : "copy address"}
-        </Button>
-        <Button size="small" variant="text" onClick={() => void copy("ticket")} title="Copy the ticket JSON as a manual backup of this address">
-          {copied === "ticket" ? "copied" : "copy ticket"}
-        </Button>
-      </Box>
-
-      <Box sx={row}>
-        <span>State</span>
-        <span style={mono}>
-          {status === null
-            ? "reading..."
-            : status.deployed
-              ? `deployed · ${status.signaturesUsed} signature${status.signaturesUsed === 1 ? "" : "s"} used`
-              : "not deployed (deploys on first spend)"}
-        </span>
-      </Box>
-      <Box sx={row}>
-        <span>Balance</span>
-        <span style={mono}>{status === null ? "-" : `${formatEther(balWei)} ${HEGOTA.symbol}`}</span>
-      </Box>
-
-      <Box sx={{ mt: 0.5, mb: 1 }}>
-        <Button size="small" variant="text" onClick={() => void refreshStatus()} disabled={sending}>
-          refresh
-        </Button>
-      </Box>
-
-      {/* Spend with the ticket's scheme (sponsored, or self-pay fallback) to a raw 0x address (no pay-by-nick on this rail). */}
-      <TextField
-        fullWidth
-        size="small"
-        label="Recipient (0x address)"
-        placeholder="0x..."
-        value={to}
-        onChange={(e) => setTo(e.target.value)}
-        disabled={sending}
-        error={to.trim().length > 0 && !isAddress(to.trim())}
-        sx={{ mb: 1.25 }}
-        inputProps={{ style: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.8rem" } }}
-      />
-      <TextField
-        fullWidth
-        size="small"
-        label={`Amount (${HEGOTA.symbol})`}
-        placeholder="0.0"
-        value={amount}
-        onChange={(e) => setAmount(e.target.value)}
-        disabled={sending}
-        sx={{ mb: 1.25 }}
-      />
-      <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-        <Button
-          variant="contained"
-          size="small"
-          onClick={() => void doSpend(false)}
-          disabled={sending || to.trim().length === 0 || amount.trim().length === 0}
-        >
-          {sending ? "working..." : `Spend (${gasModeText(rail)})`}
-        </Button>
-        <Button
-          variant="outlined"
-          size="small"
-          onClick={() => void doSpend(true)}
-          disabled={sending || to.trim().length === 0 || balWei === 0n}
-          title={sponsored ? "Send the whole balance (the paymaster pays the gas)" : "Send the balance minus the self-pay gas reserve"}
-        >
-          Send all
-        </Button>
-      </Box>
-
-      {msg && (
-        <Alert severity={msg.ok ? "success" : msg.busy ? "info" : "error"} sx={{ mt: 1.5 }}>
-          {msg.text}
-        </Alert>
-      )}
-
-      {decoded && (
-        <FrameSection id={`stealth.row.decoded.${entry.stealthAddress}`} title="Frame-tx decoded: what you just signed" sx={{ mt: 1.5 }}>
-          <Box sx={{ fontSize: "0.68rem", opacity: 0.55, mb: 0.5 }}>
-            No opaque UserOp: this is the actual EIP-8141 frame transaction, frame by frame, from this one-time
-            stealth account.
-          </Box>
-          {decoded.deploy && <FrameTxView d={decoded.deploy} />}
-          <FrameTxView d={decoded.spend} />
-        </FrameSection>
-      )}
+    <Box sx={{ ...rowSx, opacity: t.hidden ? 0.6 : 1 }}>
+      <Box sx={{ fontFamily: MONO, fontSize: "0.72rem" }}>{shortAddr(t.stealthAddress)}</Box>
+      <SchemeBadge scheme={t.scheme} />
+      {extra && <Box sx={{ fontSize: "0.68rem", opacity: 0.55 }}>{extra}</Box>}
+      <Box sx={{ ml: "auto", display: "flex", gap: 0.5 }}>{actions}</Box>
     </Box>
   );
 }
+
+const txtBtn = { opacity: 0.7, minWidth: 0, fontSize: "0.7rem", py: 0 };
 
 // `meta` is the ML-KEM meta-address page.tsx derives at login (the key a payment is encrypted to).
 // Generating a stealth address taps the passkey again: the ticket is made in the worker.
 export default function FrameStealthHome({ meta }: { meta?: PqStealthMeta | null }) {
   const [tickets, setTickets] = useState<LssStealthTicket[]>([]);
+  const [statuses, setStatuses] = useState<Record<string, PqAccountStatus>>({});
+  const [statusesLoaded, setStatusesLoaded] = useState(false);
   const [rails, setRails] = useState<Partial<Record<PqScheme, PqRailStatus>>>({});
   const [scheme, setSchemeState] = useState<PqScheme>(() => getScheme());
   const [genBusy, setGenBusy] = useState(false);
   const [genMsg, setGenMsg] = useState<Msg>(null);
   const [showHidden, setShowHidden] = useState(false);
+  const [view, setView] = useState<View>("menu");
+  const [spendFrom, setSpendFrom] = useState<LssStealthTicket | null>(null);
+  const [shown, setShown] = useState<LssStealthTicket | null>(null);
+  const [lastResult, setLastResult] = useState<PqSpendResult | null>(null);
+  // Per-address faucet claim state (testnet convenience): pending, or the faucet's answer.
+  const [claims, setClaims] = useState<Record<string, { busy: boolean; ok?: boolean; text?: string }>>({});
+  const [copied, setCopied] = useState(false);
+  const [hideBal, toggleHideBal] = useHideBalance();
   // Unparseable ticket data: set aside (never deleted) or still in place. Shown as a warning.
   const [storeIssue, setStoreIssue] = useState<{ unreadable: boolean; backups: string[] }>({ unreadable: false, backups: [] });
 
@@ -284,7 +113,44 @@ export default function FrameStealthHome({ meta }: { meta?: PqStealthMeta | null
     reload();
   }, [reload]);
 
-  // Both schemes' rail status: the rows need the status of THEIR ticket's scheme.
+  // Per-ticket on-chain status, lifted here so the total and the lists share one source.
+  const refreshAll = useCallback(async () => {
+    const list = tickets;
+    const results = await Promise.all(
+      list.map(async (t) => {
+        try {
+          return [t.stealthAddress, await readStatus(t.stealthAddress)] as const;
+        } catch {
+          return null; // a read hiccup is not fatal: keep the previous value
+        }
+      }),
+    );
+    setStatuses((prev) => {
+      const next = { ...prev };
+      for (const r of results) if (r) next[r[0]] = r[1];
+      return next;
+    });
+    setStatusesLoaded(true);
+  }, [tickets]);
+
+  const refreshOne = useCallback(async (address: `0x${string}`) => {
+    try {
+      const st = await readStatus(address);
+      setStatuses((prev) => ({ ...prev, [address]: st }));
+    } catch {
+      /* a read hiccup is not fatal to the view */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tickets.length === 0) {
+      setStatusesLoaded(true);
+      return;
+    }
+    void refreshAll();
+  }, [tickets, refreshAll]);
+
+  // Both schemes' rail status: each ticket needs the status of ITS scheme.
   useEffect(() => {
     for (const s of PQ_SCHEMES) railStatus(s).then((r) => setRails((prev) => ({ ...prev, [s]: r }))).catch(() => {});
   }, []);
@@ -311,13 +177,27 @@ export default function FrameStealthHome({ meta }: { meta?: PqStealthMeta | null
       const p = await stealthNewPayment(prf, scheme);
       // Store the ticket (with its scheme) IMMEDIATELY: it is the only way back to this account.
       // Throws if the ticket is not durably stored: the address is then never shown, so never funded.
-      await addTicket(user, { v: 1, scheme: p.scheme, stealthAddress: p.stealthAddress, ct: p.ct, viewTag: p.viewTag, createdAt: Date.now() });
+      const ticket: LssStealthTicket = { v: 1, scheme: p.scheme, stealthAddress: p.stealthAddress, ct: p.ct, viewTag: p.viewTag, createdAt: Date.now() };
+      await addTicket(user, ticket);
       reload();
-      setGenMsg({ ok: true, busy: false, text: "fresh stealth address generated and its ticket stored on this device, fund it to receive" });
+      setGenMsg(null);
+      setShown(ticket);
     } catch (e: unknown) {
       setGenMsg({ ok: false, busy: false, text: e instanceof Error ? e.message : "could not generate a stealth address" });
     } finally {
       setGenBusy(false);
+    }
+  }
+
+  // One faucet claim per click, then poll that address a few times until the funds land.
+  async function doClaim(address: `0x${string}`) {
+    setClaims((p) => ({ ...p, [address]: { busy: true } }));
+    const r = await claimFaucet(address);
+    setClaims((p) => ({ ...p, [address]: { busy: false, ok: r.ok, text: r.text } }));
+    if (!r.ok) return;
+    for (let i = 0; i < 6; i++) {
+      await new Promise((res) => setTimeout(res, 5000));
+      await refreshOne(address);
     }
   }
 
@@ -327,157 +207,361 @@ export default function FrameStealthHome({ meta }: { meta?: PqStealthMeta | null
     void setTicketHidden(user, stealthAddress, hidden).finally(reload);
   }
 
-  const hiddenCount = tickets.filter((t) => t.hidden).length;
-  const visible = tickets.filter((t) => showHidden || !t.hidden).slice().sort((a, b) => b.createdAt - a.createdAt);
+  async function copyTicket(t: LssStealthTicket) {
+    try {
+      // The ticket JSON is the manual backup: with the passkey it is all that spends this account.
+      await navigator.clipboard.writeText(JSON.stringify({ v: t.v, scheme: t.scheme, stealthAddress: t.stealthAddress, ct: t.ct, viewTag: t.viewTag, createdAt: t.createdAt }));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable: nothing else to fall back to here */
+    }
+  }
+
+  const balOf = (t: LssStealthTicket): bigint => {
+    const st = statuses[t.stealthAddress];
+    return st ? BigInt(st.balanceWei) : 0n;
+  };
+  const sortedAll = tickets.slice().sort((a, b) => b.createdAt - a.createdAt);
+  const hiddenList = sortedAll.filter((t) => t.hidden);
+  const visible = sortedAll.filter((t) => !t.hidden);
+  const funded = visible.filter((t) => balOf(t) > 0n).sort((a, b) => (balOf(b) > balOf(a) ? 1 : balOf(b) < balOf(a) ? -1 : 0));
+  const awaiting = visible.filter((t) => balOf(t) === 0n && !statuses[t.stealthAddress]?.deployed);
+  const spent = visible.filter((t) => balOf(t) === 0n && statuses[t.stealthAddress]?.deployed);
+  const total: bigint | null = statusesLoaded ? visible.reduce((acc, t) => acc + balOf(t), 0n) : null;
+
   const info = SCHEME_INFO[scheme];
   const verifier = info.verifier;
-  const rail = rails[scheme] ?? null;
-  const busy = genBusy;
 
-  return (
-    <Box sx={{ maxWidth: 520, mx: "auto", px: 2, py: 3 }}>
-      {/* Header: which rail is active (always visible), how it is served and what STEALTH changes (collapsible). */}
-      <Box sx={{ mb: 2 }}>
-        <Box sx={{ fontSize: "1.1rem", fontWeight: 600 }}>{HEGOTA.name}</Box>
-        <FrameSection id="stealth.about" title="About this rail" sx={{ mt: 0.5 }}>
-          <Box sx={label}>
-            chain {HEGOTA.chainId} · frame-native · post-quantum {scheme} · STEALTH (privacy)
-          </Box>
-          <Vs
-            a="privacy = a stealth meta-address plus a shielded Railgun pool to hide amounts/links"
-            b={`a FRESH one-time ${scheme} account per payment from an ML-KEM ticket; gas paid by a keyless paymaster`}
-          />
-        </FrameSection>
-      </Box>
+  function onSelect(s: BarSlot) {
+    // Tapping the active slot goes back to the menu, like the transparent home.
+    if (view === s) {
+      backToMenu();
+      return;
+    }
+    if (s !== "receive") setShown(null);
+    if (s !== "send") setSpendFrom(null);
+    setView(s);
+  }
+  function backToMenu() {
+    setShown(null);
+    setSpendFrom(null);
+    setView("menu");
+  }
 
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-        <FrameSchemePicker scheme={scheme} onChange={choose} disabled={genBusy} context="stealth" />
-        {/* PQ identity card: the one post-quantum primitive this stealth home uses. Collapsed by default. */}
-        <FrameSection
-          id="stealth.keys"
-          title={<Box component="span" sx={{ color: "success.main" }}>Your keys · {scheme}</Box>}
-          right={
-            <Box component="span" sx={{ fontFamily: "ui-monospace,monospace", fontSize: "0.56rem", letterSpacing: "0.08em", color: "success.main", border: "1px solid", borderColor: "success.main", borderRadius: 0.5, px: 0.5, py: 0.1 }}>
-              POST-QUANTUM
-            </Box>
-          }
-          sx={{ mb: 2 }}
-        >
-          <Box sx={{ p: 1.25, border: "1px solid", borderColor: "success.main", borderRadius: 1.5 }}>
-            <Box sx={{ fontSize: "0.84rem" }}>
-              <b>Spending</b> · {scheme}
-              <Box component="span" sx={{ opacity: 0.55, fontSize: "0.68rem" }}> · {info.family}</Box>
-            </Box>
-            <Box sx={{ fontSize: "0.64rem", opacity: 0.6 }}>
-              {scheme === "ML-DSA-44"
-                ? "one blinded ML-DSA key per one-time account (DKSAP: your base key blinded by that payment's ticket secret)"
-                : "one independent key per one-time account, from your passkey plus that payment's ticket"}{" "}
-              · a normal wallet uses ECDSA (breakable by a quantum computer)
-            </Box>
-            {meta?.metaAddress && (
-              <>
-                <Box sx={{ fontSize: "0.84rem", mt: 0.75 }}>
-                  <b>Receiving</b> · ML-KEM
-                  <Box component="span" sx={{ opacity: 0.55, fontSize: "0.68rem" }}> · key encapsulation, fresh randomness per payment</Box>
-                </Box>
-                <Box sx={{ fontSize: "0.64rem", opacity: 0.6 }}>
-                  meta-address <Box component="span" sx={{ fontFamily: "ui-monospace,monospace" }}>{shortHex(meta.metaAddress)}</Box> ·{" "}
-                  {((meta.metaAddress.length - 2) / 2).toLocaleString()} B, the key each payment&apos;s ticket is encrypted to
-                  (the same for both schemes)
-                </Box>
-              </>
-            )}
-            {verifier && (
-              <Box sx={{ fontSize: "0.64rem", opacity: 0.6, mt: 0.4, lineHeight: 1.5 }}>
-                each spend&apos;s signature is verified on-chain by{" "}
-                <Link href={`${HEGOTA.explorerUrl}/address/${verifier}`} target="_blank" rel="noopener" sx={{ fontFamily: "ui-monospace,monospace" }}>
-                  {shortHex(verifier)} ↗
-                </Link>{" "}
-                ({info.verifierText}): funds move only if it is VALID.
-              </Box>
-            )}
-            {rail && (
-              <Box sx={{ fontSize: "0.64rem", opacity: 0.6, mt: 0.4 }}>
-                gas ({scheme}): {gasLine(rail)}
-              </Box>
-            )}
-          </Box>
-        </FrameSection>
+  const bar = <ActionBar active={view === "menu" ? null : view} onSelect={onSelect} sendDisabled={funded.length === 0} />;
 
-        {/* Generate: a fresh one-time account + the ticket that spends it later. The corrupt-store
-            error is pinned (always visible, only shown when ticket data is at risk); the general
-            "tickets live on this device" note lives inside the section. */}
-        <FrameSection
-          id="stealth.receive"
-          title="Receive on a fresh stealth address"
-          pinned={
-            <>
-              {(storeIssue.unreadable || storeIssue.backups.length > 0) && (
-                <Alert severity="error" sx={{ mb: 0.5 }}>
-                  {storeIssue.unreadable
-                    ? "Some stored ticket data on this device could not be read. It is kept as-is (the next stored ticket first copies it aside). "
-                    : ""}
-                  {storeIssue.backups.length > 0
-                    ? `Unreadable ticket data was set aside, never deleted, under this site's storage key${storeIssue.backups.length > 1 ? "s" : ""} ${storeIssue.backups.join(", ")}. `
-                    : ""}
-                  Do not clear site data: it may hold the only copy of a ticket.
-                </Alert>
-              )}
-            </>
-          }
-        >
-          <Alert severity="warning" sx={{ mb: 0.5 }}>
-            Tickets are stored only on this device. Clearing site storage or changing device loses access to the funds
-            on those addresses unless you backed the ticket up (&quot;copy ticket&quot; on each address).
-          </Alert>
-          <FrameExplain id="stealth.receive.how" label="how stealth receiving works">
-            <Box sx={{ fontSize: "0.68rem", opacity: 0.55, mb: 0.5 }}>
-              Each tap encrypts a fresh secret to your ML-KEM meta-address and derives a new one-time address from it.
-              Fund it (
-              <Link href="https://faucet.privacy.ethrex.xyz/" target="_blank" rel="noopener">faucet</Link>
-              ) to receive. The ticket &#123;ct, viewTag&#125; is the off-chain note that, with your passkey, spends it.
-            </Box>
-          </FrameExplain>
-          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mt: 0.5 }}>
-            <Button variant="contained" onClick={() => void generate()} disabled={busy || !user}>
-              {genBusy ? "working..." : `Generate a ${scheme} stealth address to receive`}
-            </Button>
-          </Box>
-        </FrameSection>
-        {/* Generate progress / result / error stays visible even with the section collapsed. */}
-        {genMsg && (
-          <Alert severity={genMsg.ok ? "success" : genMsg.busy ? "info" : "error"} sx={{ mt: 1.5 }}>
-            {genMsg.text}
-          </Alert>
-        )}
+  const fundedRow = (t: LssStealthTicket) => (
+    <Box key={t.stealthAddress} onClick={() => { setSpendFrom(t); setView("send"); }} sx={clickRowSx}>
+      <Box sx={{ fontFamily: MONO, fontSize: "1rem", opacity: 0.6 }}>◈</Box>
+      <Link
+        href={`${HEGOTA.explorerUrl}/address/${t.stealthAddress}`}
+        target="_blank"
+        rel="noopener"
+        underline="hover"
+        color="inherit"
+        onClick={(e) => e.stopPropagation()}
+        sx={{ fontFamily: MONO, fontSize: "0.72rem", opacity: 0.7 }}
+      >
+        {shortAddr(t.stealthAddress)}
+      </Link>
+      <SchemeBadge scheme={t.scheme} />
+      <Typography variant="body2" sx={{ ml: "auto", fontWeight: 500 }}>
+        <Amount wei={balOf(t)} hidden={hideBal} />
+      </Typography>
+    </Box>
+  );
 
-        <Divider sx={{ my: 2 }} />
-
-        {/* The stealth accounts: one card per stored ticket, each with status + a spend.
-            The whole list collapses behind a clickable header so a long history can be tucked away;
-            rows stay mounted when collapsed, so a half-filled spend form survives. */}
-        <FrameSection id="stealth.list" title={`Your stealth addresses (${tickets.length - hiddenCount})`}>
+  // ---------------------------------------------------------------- send
+  if (view === "send") {
+    const t = spendFrom;
+    const tr = t ? rails[t.scheme] ?? null : null;
+    return (
+      <Box sx={wrapSx}>
+        <Box sx={{ pb: BAR_SPACE }}>
+          <SubHeader title="Send" onBack={backToMenu} />
           <FrameExplain id="stealth.list.recipient" label="why a raw 0x recipient">
-            <Box sx={{ fontSize: "0.68rem", opacity: 0.55, mb: 0.5 }}>
+            <Box sx={NOTE}>
               Recipient is a raw address: the 4337 pay-by-name directory does not apply on this rail (separate address
               space).
             </Box>
           </FrameExplain>
-          {hiddenCount > 0 && (
-            <Button size="small" variant="text" onClick={() => setShowHidden((v) => !v)} sx={{ mb: 0.5 }}>
-              {showHidden ? "hide hidden" : `show hidden (${hiddenCount})`}
-            </Button>
-          )}
-          {visible.length === 0 ? (
-            <Box sx={{ fontSize: "0.8rem", opacity: 0.6, py: 1 }}>
-              No stealth addresses yet: generate one above to receive.
-            </Box>
+          {t === null ? (
+            <Stack spacing={0.75} sx={{ mt: 1 }}>
+              <Typography variant="body2" sx={{ textAlign: "center", color: "text.secondary" }}>Choose a stealth UTXO to spend</Typography>
+              {funded.length === 0
+                ? <Typography variant="body2" sx={{ textAlign: "center", color: "text.secondary" }}>No funded stealth addresses yet. Tap Receive to get one.</Typography>
+                : funded.map(fundedRow)}
+            </Stack>
           ) : (
-            visible.map((t) => <StealthRow key={t.stealthAddress} entry={t} rail={rails[t.scheme] ?? null} onHide={(h) => hide(t.stealthAddress, h)} />)
+            <SendFlow
+              key={t.stealthAddress}
+              fromLabel={`${shortAddr(t.stealthAddress)} (${t.scheme})`}
+              availableWei={balOf(t)}
+              scheme={t.scheme}
+              sponsored={tr ? tr.mode === "sponsored" : true}
+              gasText={gasLine(tr)}
+              run={async (recipient, valueWei, sweep, onProgress) => {
+                const prf = await tapForPrf();
+                onProgress(`opening the ticket, deriving the ${t.scheme} key, deploying if needed and sending...`);
+                // Routed by the ticket's own scheme, not the current selection.
+                const res = await stealthSpend(prf, t, recipient, valueWei, sweep, (ev) => onProgress(sendEventText(ev)));
+                await refreshOne(t.stealthAddress);
+                return res;
+              }}
+              onClose={(res) => {
+                if (res) setLastResult(res);
+                setSpendFrom(null);
+                setView("menu");
+              }}
+            />
           )}
-        </FrameSection>
+        </Box>
+        {bar}
+      </Box>
+    );
+  }
 
-      </Paper>
+  // ---------------------------------------------------------------- receive
+  if (view === "receive") {
+    return (
+      <Box sx={wrapSx}>
+        <Box sx={{ pb: BAR_SPACE }}>
+          <SubHeader title="Receive" onBack={backToMenu} />
+          {shown ? (
+            <ReceiveBlock
+              address={shown.stealthAddress}
+              caption="One-time stealth address"
+              footnote={`Receives ${HEGOTA.symbol} on ${HEGOTA.name} only · ${shown.scheme}`}
+            >
+              <Button size="small" variant="text" onClick={() => void copyTicket(shown)}>
+                {copied ? "copied" : "copy ticket (backup)"}
+              </Button>
+              <Box sx={{ ...NOTE, textAlign: "center", mt: -1 }}>
+                The ticket plus your passkey is all that spends this address.
+              </Box>
+              <Button variant="outlined" onClick={() => { setShown(null); setGenMsg(null); }} sx={{ py: 1, borderRadius: 2 }}>
+                Generate another
+              </Button>
+            </ReceiveBlock>
+          ) : (
+            <Stack spacing={1.5}>
+              <FrameSchemePicker scheme={scheme} onChange={choose} disabled={genBusy} context="stealth" />
+              <FrameExplain id="stealth.receive.how" label="how stealth receiving works">
+                <Box sx={NOTE}>
+                  Each tap encrypts a fresh secret to your ML-KEM meta-address and derives a new one-time address from it.
+                  Fund it (
+                  <Link href="https://faucet.privacy.ethrex.xyz/" target="_blank" rel="noopener">faucet</Link>
+                  ) to receive. The ticket &#123;ct, viewTag&#125; is the off-chain note that, with your passkey, spends it.
+                </Box>
+              </FrameExplain>
+              <Alert severity="warning">
+                Tickets are stored only on this device. Clearing site storage or changing device loses access to the funds
+                on those addresses unless you backed the ticket up (&quot;copy ticket&quot; on each address).
+              </Alert>
+              <Button variant="outlined" color="primary" onClick={() => void generate()} disabled={genBusy || !user} sx={{ py: 1.5, borderRadius: 2 }}>
+                {genBusy ? "working..." : `Generate a ${scheme} stealth address`}
+              </Button>
+              {genMsg && (
+                <Alert severity={genMsg.ok ? "success" : genMsg.busy ? "info" : "error"}>{genMsg.text}</Alert>
+              )}
+            </Stack>
+          )}
+        </Box>
+        {bar}
+      </Box>
+    );
+  }
+
+  // ---------------------------------------------------------------- details
+  if (view === "details") {
+    return (
+      <Box sx={wrapSx}>
+        <Box sx={{ pb: BAR_SPACE }}>
+          <SubHeader title="Details" onBack={backToMenu} />
+          <Stack spacing={1.5}>
+            <FrameSection id="stealth.about" title="About this rail" defaultOpen>
+              <Box sx={captionSx}>
+                chain {HEGOTA.chainId} · frame-native · post-quantum {scheme} · STEALTH (privacy)
+              </Box>
+              <Vs
+                a="privacy = a stealth meta-address plus a shielded Railgun pool to hide amounts/links"
+                b={`a FRESH one-time ${scheme} account per payment from an ML-KEM ticket; gas paid by a keyless paymaster`}
+              />
+            </FrameSection>
+            <SchemeGas scheme={scheme} />
+            <FrameSection
+              id="stealth.keys"
+              title={<Box component="span" sx={{ color: "success.main" }}>Your keys · {scheme}</Box>}
+              defaultOpen
+              right={
+                <Box component="span" sx={{ fontFamily: MONO, fontSize: "0.56rem", letterSpacing: "0.08em", color: "success.main", border: "1px solid", borderColor: "success.main", borderRadius: 0.5, px: 0.5, py: 0.1 }}>
+                  POST-QUANTUM
+                </Box>
+              }
+            >
+              <Box sx={{ p: 1.25, border: "1px solid", borderColor: "success.main", borderRadius: "2px" }}>
+                <Box sx={{ fontSize: "0.84rem" }}>
+                  <b>Spending</b> · {scheme}
+                  <Box component="span" sx={{ opacity: 0.55, fontSize: "0.68rem" }}> · {info.family}</Box>
+                </Box>
+                <Box sx={{ fontSize: "0.64rem", opacity: 0.6 }}>
+                  {scheme === "ML-DSA-44"
+                    ? "one blinded ML-DSA key per one-time account (DKSAP: your base key blinded by that payment's ticket secret)"
+                    : "one independent key per one-time account, from your passkey plus that payment's ticket"}{" "}
+                  · a normal wallet uses ECDSA (breakable by a quantum computer)
+                </Box>
+                {meta?.metaAddress && (
+                  <>
+                    <Box sx={{ fontSize: "0.84rem", mt: 0.75 }}>
+                      <b>Receiving</b> · ML-KEM
+                      <Box component="span" sx={{ opacity: 0.55, fontSize: "0.68rem" }}> · key encapsulation, fresh randomness per payment</Box>
+                    </Box>
+                    <Box sx={{ fontSize: "0.64rem", opacity: 0.6 }}>
+                      meta-address <Box component="span" sx={{ fontFamily: MONO }}>{shortHex(meta.metaAddress)}</Box> ·{" "}
+                      {((meta.metaAddress.length - 2) / 2).toLocaleString()} B, the key each payment&apos;s ticket is encrypted to
+                      (the same for both schemes)
+                    </Box>
+                  </>
+                )}
+                {verifier && (
+                  <Box sx={{ fontSize: "0.64rem", opacity: 0.6, mt: 0.4, lineHeight: 1.5 }}>
+                    each spend&apos;s signature is verified on-chain by{" "}
+                    <Link href={`${HEGOTA.explorerUrl}/address/${verifier}`} target="_blank" rel="noopener" sx={{ fontFamily: MONO }}>
+                      {shortHex(verifier)} ↗
+                    </Link>{" "}
+                    ({info.verifierText}): funds move only if it is VALID.
+                  </Box>
+                )}
+              </Box>
+            </FrameSection>
+          </Stack>
+        </Box>
+        {bar}
+      </Box>
+    );
+  }
+
+  // ---------------------------------------------------------------- menu
+  return (
+    <Box sx={wrapSx}>
+      <Box sx={{ pb: BAR_SPACE }}>
+        <Stack spacing={2}>
+          <BalanceCard
+            caption="Stealth balance"
+            wei={total}
+            hidden={hideBal}
+            onToggleHide={toggleHideBal}
+            subline={`${user ?? "-"} · stealth · ${HEGOTA.name}`}
+          />
+
+          {(storeIssue.unreadable || storeIssue.backups.length > 0) && (
+            <Alert severity="error">
+              {storeIssue.unreadable
+                ? "Some stored ticket data on this device could not be read. It is kept as-is (the next stored ticket first copies it aside). "
+                : ""}
+              {storeIssue.backups.length > 0
+                ? `Unreadable ticket data was set aside, never deleted, under this site's storage key${storeIssue.backups.length > 1 ? "s" : ""} ${storeIssue.backups.join(", ")}. `
+                : ""}
+              Do not clear site data: it may hold the only copy of a ticket.
+            </Alert>
+          )}
+
+          <Box>
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 0.5, mb: 1 }}>
+              <Typography sx={{ fontWeight: 500 }}>Stealth UTXOs</Typography>
+              <IconButton size="small" onClick={() => void refreshAll()} aria-label="Refresh balances" sx={{ color: "primary.main" }}>
+                <RefreshIcon fontSize="small" />
+              </IconButton>
+            </Box>
+            {funded.length === 0 ? (
+              <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center" }}>
+                No funded stealth addresses yet. Tap Receive to get one.
+              </Typography>
+            ) : (
+              <Stack spacing={0.75} sx={{ maxHeight: 320, overflowY: "auto" }}>
+                {funded.map(fundedRow)}
+              </Stack>
+            )}
+          </Box>
+
+          {awaiting.length > 0 && (
+            <FrameSection id="stealth.awaiting" title={`Awaiting payment (${awaiting.length})`}>
+              <Box sx={{ fontSize: "0.64rem", opacity: 0.55, mb: 0.75, lineHeight: 1.5 }}>
+                &quot;faucet&quot; asks the testnet faucet to fund that address: a testing shortcut. Real stealth
+                payments come from a third party; a faucet request ties the address to your connection.
+              </Box>
+              <Stack spacing={0.75}>
+                {awaiting.map((t) => (
+                  <MiniRow
+                    key={t.stealthAddress}
+                    t={t}
+                    extra={new Date(t.createdAt).toLocaleDateString()}
+                    actions={
+                      <>
+                        <Button size="small" variant="text" onClick={() => { setShown(t); setView("receive"); }} sx={txtBtn}>view</Button>
+                        <Button
+                          size="small"
+                          variant="text"
+                          disabled={claims[t.stealthAddress]?.busy || claims[t.stealthAddress]?.ok === true}
+                          onClick={() => void doClaim(t.stealthAddress)}
+                          title={claims[t.stealthAddress]?.text}
+                          sx={{ ...txtBtn, color: claims[t.stealthAddress]?.ok === false ? "error.main" : undefined }}
+                        >
+                          {claims[t.stealthAddress]?.busy ? "claiming..." : claims[t.stealthAddress]?.ok ? "requested" : claims[t.stealthAddress]?.ok === false ? "faucet failed" : "faucet"}
+                        </Button>
+                        <Button size="small" variant="text" color="inherit" onClick={() => hide(t.stealthAddress, true)} sx={txtBtn}>hide</Button>
+                      </>
+                    }
+                  />
+                ))}
+              </Stack>
+            </FrameSection>
+          )}
+
+          {spent.length > 0 && (
+            <FrameSection id="stealth.spent" title={`Spent (${spent.length})`}>
+              <Stack spacing={0.75}>
+                {spent.map((t) => (
+                  <MiniRow
+                    key={t.stealthAddress}
+                    t={t}
+                    extra={`signatures used ${statuses[t.stealthAddress]?.signaturesUsed ?? 0}`}
+                    actions={<Button size="small" variant="text" color="inherit" onClick={() => hide(t.stealthAddress, true)} sx={txtBtn}>hide</Button>}
+                  />
+                ))}
+              </Stack>
+            </FrameSection>
+          )}
+
+          {hiddenList.length > 0 && (
+            <Box>
+              <Button size="small" variant="text" onClick={() => setShowHidden((v) => !v)}>
+                {showHidden ? "hide hidden" : `show hidden (${hiddenList.length})`}
+              </Button>
+              {showHidden && (
+                <Stack spacing={0.75} sx={{ mt: 0.5 }}>
+                  {hiddenList.map((t) => (
+                    <MiniRow
+                      key={t.stealthAddress}
+                      t={t}
+                      actions={<Button size="small" variant="text" onClick={() => hide(t.stealthAddress, false)} sx={txtBtn}>unhide</Button>}
+                    />
+                  ))}
+                </Stack>
+              )}
+            </Box>
+          )}
+
+          {lastResult && (
+            <Box>
+              <Box sx={{ ...captionSx, mb: 0.5 }}>Last transaction</Box>
+              <DecodedSection decoded={lastResult.decoded} id="stealth.last.decoded" />
+            </Box>
+          )}
+        </Stack>
+      </Box>
+      {bar}
     </Box>
   );
 }

@@ -1,45 +1,36 @@
 "use client";
 
-// FrameHome — the main wallet view when the frame-native "hegota" rail is the active network.
+// FrameHome: the transparent home of the frame-native "hegota" rail.
 //
 // Rail-owned, self-contained, removable: it drives the frame rail entirely through
-// src/lib/frame/pqClient.ts and never touches the base wallet's 4337 / Railgun stack.
-// It mirrors the normal wallet home UX (receive address, balance, send form) but every action
-// runs on the post-quantum frame-tx rail, with the scheme the user picks (leanSphincs-s hash-based,
-// the default, or ML-DSA-44 lattice; FrameSchemePicker), gas paid by that scheme's keyless on-chain
-// paymaster, and each send shows the real on-chain anatomy of the frame-tx it
-// produced (not an opaque 4337 UserOp).
+// src/lib/frame/pqClient.ts and never touches the base wallet's 4337 / Railgun stack. It looks and
+// flows like the normal wallet (balance card, persistent bottom action bar, Send / Receive / Details
+// sub-views, via FrameWalletKit) but every action runs on the post-quantum frame-tx rail, with the
+// scheme the user picks (leanSphincs-s hash-based, the default, or ML-DSA-44 lattice), gas paid by
+// that scheme's keyless on-chain paymaster, and each send shows the real on-chain anatomy of the
+// frame-tx it produced.
 //
 // Recipient is a raw 0x address: there is no name directory on this rail. Private, unlinkable
-// receiving lives in the stealth home (privacy=true), not in a reusable-address nick scheme.
+// receiving lives in the stealth home (privacy=true).
 //
 // Removable: delete this file (and the single render that mounts it in rail mode).
 import { useState, useEffect, useRef } from "react";
-import { Paper, Box, Button, Link, TextField, Alert, Divider } from "@mui/material";
-import { formatEther, parseEther, isAddress } from "viem";
+import { Box, Button, Link, Alert } from "@mui/material";
+import { parseEther } from "viem";
 import { HEGOTA } from "@/lib/frame/network";
-import { loadFromDevice } from "@/lib/passkeys";
-import { getWalletCredential } from "@/lib/credstore";
+import { claimFaucet } from "@/lib/frame/faucet";
 import { LOCAL_LAST_USER } from "@/app/constants";
 import {
   deriveAccount, readStatus, railStatus, spend, getScheme, setScheme, onSchemeChange, sendEventText,
   type PqAccount, type PqAccountStatus, type PqSpendResult, type PqRailStatus, type PqScheme,
 } from "@/lib/frame/pqClient";
-import FrameTxView, { shortHex } from "@/components/FrameTxView";
-import FrameSchemePicker, { SCHEME_INFO, gasLine } from "@/components/FrameSchemePicker";
-import FrameSection, { FrameExplain } from "@/components/FrameSection";
-
-// Reads LOCAL_LAST_USER, fetches the stored credential, and taps the authenticator to get
-// the 32-byte PRF root the rail derives its post-quantum identity from.
-async function tapForPrf(): Promise<Uint8Array> {
-  const user = typeof localStorage !== "undefined" ? localStorage.getItem(LOCAL_LAST_USER) : null;
-  if (!user) throw new Error("log in with a passkey first");
-  const cred = await getWalletCredential(user);
-  if (!cred?.rawId) throw new Error("no credential found for this wallet");
-  const prf = await loadFromDevice(cred.rawId);
-  if (!prf || prf.length !== 32) throw new Error("authenticator has no 32-byte PRF support");
-  return prf;
-}
+import { shortHex } from "@/components/FrameTxView";
+import FrameSchemePicker, { SCHEME_INFO, SchemeGas, gasLine } from "@/components/FrameSchemePicker";
+import { FrameExplain } from "@/components/FrameSection";
+import {
+  MONO, captionSx, BAR_SPACE, tapForPrf, shortAddr, useHideBalance,
+  BalanceCard, ActionBar, SubHeader, ReceiveBlock, SendFlow, DecodedSection,
+} from "@/components/FrameWalletKit";
 
 // Inline "what changes vs the 4337 wallet" note: each differing step explains itself.
 function Vs({ a, b }: { a: string; b: string }) {
@@ -51,17 +42,52 @@ function Vs({ a, b }: { a: string; b: string }) {
   );
 }
 
+// Per-scheme "how the verify works" explanation.
+function VerifyExplain({ level }: { level: PqScheme }) {
+  return (
+    <FrameExplain id="home.last.verify" label={`how the ${level} verify works`}>
+      {level === "ML-DSA-44" ? (
+        <Box sx={{ mt: 0.75, pl: 1, borderLeft: "2px solid", borderColor: "divider", fontSize: "0.68rem", opacity: 0.72, lineHeight: 1.6 }}>
+          <Box sx={{ fontWeight: 600, mb: 0.25 }}>On the ML-DSA-44 verify (the DEFAULT batch frame)</Box>
+          The verify costs ~1.25M gas, over the gas cap of the VERIFY prefix, so your account&apos;s VERIFY
+          only checks the frame layout (its own verify frame follows, atomically batched with the spend) and
+          approves. The DEFAULT frame then runs the ML-DSA verify; a bad signature reverts it and the node skips
+          the rest of the batch, so nothing moves. The witness is ~24.7 KB of calldata (expanded public key +
+          signature). The ML-DSA paymaster is a separate keyless contract with its own balance, so this
+          more expensive class cannot drain the leanSphincs-s paymaster.
+        </Box>
+      ) : (
+        <Box sx={{ mt: 0.75, pl: 1, borderLeft: "2px solid", borderColor: "divider", fontSize: "0.68rem", opacity: 0.72, lineHeight: 1.6 }}>
+          <Box sx={{ fontWeight: 600, mb: 0.25 }}>On the leanSphincs-s verify (the first VERIFY frame)</Box>
+          The signature is checked in the EVM by a stateless verifier (~55K gas incl. reading the key from
+          storage). The frame-tx cost is dominated by calldata: the signature is ~4.2 KB. The paymaster frame
+          is a keyless contract that only compares your account&apos;s code hash, so it sponsors any account of
+          this class with no operator and no off-chain service.
+          <Box sx={{ mt: 0.5 }}>
+            <b>EIP-8288</b> goes further (candidate, Buterin/Coratger; targets &ldquo;I-star&rdquo;, the fork after
+            Hegota): a SIGNATURE frame that accepts STARK proofs and aggregates many PQ signatures off-chain
+            into one recursive STARK the block verifies, so N spends cost about as much as 1, collapsing the
+            per-op gas at scale.
+          </Box>
+          <Box sx={{ mt: 0.5 }}>
+            This scheme is <b>hash-based</b>, the direction lean Ethereum / L-star favors
+            (&ldquo;believe in hashes&rdquo;) over lattices. Each key has a finite signature budget (~20K), shown
+            above.
+          </Box>
+        </Box>
+      )}
+    </FrameExplain>
+  );
+}
+
 // Unlock state of the SELECTED scheme's account (the derived accounts themselves are kept per scheme).
 type Unlock =
   | { kind: "idle" }
   | { kind: "unlocking" }
   | { kind: "error"; message: string };
 
-type Msg = { ok: boolean; busy: boolean; text: string } | null;
+type View = "menu" | "send" | "receive" | "details";
 
-const label = { fontSize: "0.72rem", opacity: 0.6, letterSpacing: "0.06em", textTransform: "uppercase" as const };
-const row = { display: "flex", justifyContent: "space-between", gap: "12px", fontSize: "0.85rem", padding: "3px 0" };
-const mono = { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.8rem", wordBreak: "break-all" as const };
 
 // `account` is derived once at login (the login already taps the passkey) with the scheme selected
 // at that time, so the PQ account shows immediately with NO separate in-view unlock tap. Switching
@@ -74,12 +100,11 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
   const [unlockState, setUnlockState] = useState<Unlock>({ kind: "idle" });
   const [acctStatus, setAcctStatus] = useState<PqAccountStatus | null>(null);
   const [rail, setRail] = useState<PqRailStatus | null>(null);
-
-  const [to, setTo] = useState("");
-  const [amount, setAmount] = useState("");
-  const [sending, setSending] = useState(false);
-  const [sendMsg, setSendMsg] = useState<Msg>(null);
-  const [decoded, setDecoded] = useState<PqSpendResult["decoded"] | null>(null);
+  const [view, setView] = useState<View>("menu");
+  const [lastResult, setLastResult] = useState<PqSpendResult | null>(null);
+  // Faucet claim for the shown account: idle, pending, or the faucet's answer.
+  const [claim, setClaim] = useState<{ busy: boolean; ok?: boolean; text?: string }>({ busy: false });
+  const [hidden, toggleHidden] = useHideBalance();
 
   const acc = accs[scheme];
   // The latest selected scheme, so a slow status read for a scheme the user already left is dropped.
@@ -114,11 +139,25 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
   useEffect(() => {
     setAcctStatus(null);
     setRail(null);
-    setDecoded(null);
-    setSendMsg(null);
+    setLastResult(null);
+    setClaim({ busy: false });
+    setView("menu");
     if (acc) void refreshStatus(acc);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [acc?.address, scheme]);
+
+  // One faucet claim per click, then poll the balance a few times until the funds land.
+  async function doClaim(a: PqAccount) {
+    setClaim({ busy: true });
+    const r = await claimFaucet(a.address);
+    setClaim({ busy: false, ok: r.ok, text: r.text || (r.ok ? "ok" : "failed") });
+    if (!r.ok) return;
+    for (let i = 0; i < 6; i++) {
+      await new Promise((res) => setTimeout(res, 5000));
+      if (schemeRef.current !== a.level) return;
+      await refreshStatus(a);
+    }
+  }
 
   async function unlock(s: PqScheme = scheme) {
     try {
@@ -139,288 +178,214 @@ export default function FrameHome({ account }: { account?: PqAccount | null }) {
     if (!accs[s]) void unlock(s);
   }
 
-  async function doSend(acc: PqAccount, sweep = false) {
-    const recipient = to.trim();
-    if (!isAddress(recipient)) {
-      setSendMsg({ ok: false, busy: false, text: "enter a valid 0x recipient address" });
-      return;
-    }
-    let valueWei = 0n;
-    if (!sweep) {
-      try {
-        valueWei = parseEther(amount.trim());
-      } catch {
-        setSendMsg({ ok: false, busy: false, text: "enter a valid amount" });
-        return;
-      }
-      if (valueWei <= 0n) {
-        setSendMsg({ ok: false, busy: false, text: "amount must be greater than zero" });
-        return;
-      }
-    }
-    try {
-      setSending(true);
-      setSendMsg({ ok: false, busy: true, text: "tap your key..." });
-      const prf = await tapForPrf();
-      setSendMsg({ ok: false, busy: true, text: `deriving + signing (${acc.level}), deploying (if needed), spending${acc.level === "ML-DSA-44" ? " (ML-DSA signing is slower)" : ""}...` });
-      const res = await spend(prf, recipient, valueWei, sweep, acc.level, (ev) => setSendMsg({ ok: false, busy: true, text: sendEventText(ev) }));
-      setSendMsg({ ok: true, busy: false, text: `${res.deployTxHash ? "deployed + spent" : "spent"} (${res.mode === "sponsored" ? "gas paid by the paymaster" : "self-pay fallback"})` });
-      setDecoded(res.decoded);
-      setAmount("");
-      await refreshStatus(acc);
-    } catch (e: unknown) {
-      setSendMsg({ ok: false, busy: false, text: e instanceof Error ? e.message : "send failed" });
-    } finally {
-      setSending(false);
-    }
-  }
-
-  const balWei = acctStatus ? BigInt(acctStatus.balanceWei) : 0n;
+  const balWei = acctStatus ? BigInt(acctStatus.balanceWei) : null;
   // Low enough that receiving is the obvious next step: surface the faucet hint.
-  const lowBalance = acctStatus ? balWei < parseEther("0.001") : false;
+  const lowBalance = balWei !== null && balWei < parseEther("0.001");
   const sponsored = rail ? rail.mode === "sponsored" : true;
-  const sendLabel = sponsored ? "Send (gas paid by paymaster)" : "Send (self-pay fallback)";
   const used = acctStatus?.signaturesUsed ?? 0;
   // Only leanSphincs-s has a signature budget (null for the stateless ML-DSA-44).
   const budget = rail?.signatureBudget ?? null;
   const budgetWarn = rail?.budgetWarn != null && used >= rail.budgetWarn;
   const info = SCHEME_INFO[scheme];
   const verifier = info.verifier;
+  const user = typeof localStorage !== "undefined" ? localStorage.getItem(LOCAL_LAST_USER) : null;
+  const unlocking = unlockState.kind === "unlocking";
 
-  return (
-    <Box sx={{ maxWidth: 520, mx: "auto", px: 2, py: 3 }}>
-      {/* Header: which rail is active (always visible) and how it is served (collapsible). */}
-      <Box sx={{ mb: 2 }}>
-        <Box sx={{ fontSize: "1.1rem", fontWeight: 600 }}>{HEGOTA.name}</Box>
-        <FrameSection id="home.about" title="About this rail" sx={{ mt: 0.5 }}>
-          <Box sx={label}>
-            chain {HEGOTA.chainId} · frame-native · post-quantum {scheme} ({scheme === "ML-DSA-44" ? "lattice" : "hash-based"})
-          </Box>
+  const unlockBlock = (
+    <Box>
+      <Box sx={{ ...captionSx, mb: 1 }}>PQ account ({scheme}, derived from your passkey)</Box>
+      <Button variant="contained" onClick={() => void unlock()} disabled={unlocking}>
+        {unlocking ? "tap your key..." : `Unlock ${scheme} account`}
+      </Button>
+      {unlockState.kind === "error" && <Alert severity="error" sx={{ mt: 2 }}>{unlockState.message}</Alert>}
+    </Box>
+  );
+
+  const budgetAlert = budgetWarn && budget !== null && (
+    <Alert severity="warning">
+      This key has used {used.toLocaleString()} of its ~{budget.toLocaleString()} signatures.
+      Spends are blocked at {(rail?.budgetBlock ?? budget).toLocaleString()}: plan to move the funds to a new account.
+    </Alert>
+  );
+
+  let body: React.ReactNode;
+  if (view === "send" && acc) {
+    body = (
+      <>
+        <SubHeader title="Send" onBack={() => setView("menu")} />
+        <FrameExplain id="home.send.vs">
           <Vs
-            a="the same passkey derives an ECDSA secp256k1 owner (quantum-vulnerable)"
-            b={`the same passkey derives ${info.keyText}`}
+            a="a bundler relays your UserOp and an off-chain paymaster fronts the gas"
+            b="frame-tx: your account approves execution, a keyless on-chain paymaster (gated by your account's code hash) pays the gas; no bundler, no relayer, no operator key"
           />
-        </FrameSection>
-      </Box>
-
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-        <FrameSchemePicker scheme={scheme} onChange={choose} disabled={sending || unlockState.kind === "unlocking"} context="transparent" />
-        {!acc ? (
-          <>
-            <Box sx={{ ...label, mb: 1 }}>PQ account ({scheme}, derived from your passkey)</Box>
-            <Button variant="contained" onClick={() => void unlock()} disabled={unlockState.kind === "unlocking"}>
-              {unlockState.kind === "unlocking" ? "tap your key..." : `Unlock ${scheme} account`}
-            </Button>
-            {unlockState.kind === "error" && (
-              <Alert severity="error" sx={{ mt: 2 }}>{unlockState.message}</Alert>
+        </FrameExplain>
+        <SendFlow
+          fromLabel={shortAddr(acc.address)}
+          availableWei={balWei ?? 0n}
+          scheme={acc.level}
+          sponsored={sponsored}
+          gasText={gasLine(rail)}
+          run={async (recipient, valueWei, sweep, onProgress) => {
+            const prf = await tapForPrf();
+            onProgress(`signing with ${acc.level} and sending${acc.level === "ML-DSA-44" ? " (ML-DSA is slower)" : ""}...`);
+            const res = await spend(prf, recipient, valueWei, sweep, acc.level, (ev) => onProgress(sendEventText(ev)));
+            await refreshStatus(acc);
+            return res;
+          }}
+          onClose={(res) => {
+            if (res) setLastResult(res);
+            setView("menu");
+          }}
+        />
+      </>
+    );
+  } else if (view === "receive") {
+    body = (
+      <>
+        <SubHeader title="Receive" onBack={() => setView("menu")} />
+        {acc && (lowBalance || claim.busy || claim.text) && (
+          <Alert
+            sx={{ mb: 2, alignItems: "center" }}
+            severity={claim.text && claim.ok === false ? "error" : claim.text && claim.ok ? "success" : "info"}
+            action={lowBalance && !claim.ok && (
+              <Button color="inherit" size="small" variant="outlined" disabled={claim.busy} onClick={() => void doClaim(acc)}>
+                {claim.busy ? "claiming..." : "Get test funds"}
+              </Button>
             )}
-          </>
-        ) : (
-          <>
-            {/* PQ identity card: make it explicit (and on-chain-verifiable) that this account
-                signs with a post-quantum scheme, not ECDSA. Collapsed by default; the budget
-                warning stays pinned under the header. */}
-            <FrameSection
-              id="home.key"
-              title={<Box component="span" sx={{ color: "success.main" }}>Your signing key · {acc.level}</Box>}
-              right={
-                <Box component="span" sx={{ fontFamily: "ui-monospace,monospace", fontSize: "0.56rem", letterSpacing: "0.08em", color: "success.main", border: "1px solid", borderColor: "success.main", borderRadius: 0.5, px: 0.5, py: 0.1 }}>
+          >
+            {claim.busy
+              ? "Asking the testnet faucet..."
+              : claim.text
+                ? claim.ok ? "Test funds requested. The balance updates when they land." : `Faucet: ${claim.text}`
+                : "Low balance."}
+          </Alert>
+        )}
+        {acc ? (
+          <ReceiveBlock
+            address={acc.address}
+            caption="Your address"
+            footnote={`Receives ${HEGOTA.symbol} on ${HEGOTA.name} only (chain ${HEGOTA.chainId})`}
+          >
+            <FrameExplain id="home.address.vs">
+              <Vs
+                a="a Safe account, deployed by a bundler through the ERC-4337 EntryPoint + factory"
+                b={`an ${info.accountClass} at a deterministic CREATE2 address, deployed by an on-chain sponsor on first spend (no bundler)`}
+              />
+            </FrameExplain>
+          </ReceiveBlock>
+        ) : unlockBlock}
+      </>
+    );
+  } else if (view === "details") {
+    body = (
+      <>
+        <SubHeader title="Details" onBack={() => setView("menu")} />
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <Box>
+            <Box sx={captionSx}>About this rail</Box>
+            <Box sx={{ ...captionSx, mt: 0.5 }}>
+              chain {HEGOTA.chainId} · frame-native · post-quantum {scheme} ({scheme === "ML-DSA-44" ? "lattice" : "hash-based"})
+            </Box>
+            <Vs
+              a="the same passkey derives an ECDSA secp256k1 owner (quantum-vulnerable)"
+              b={`the same passkey derives ${info.keyText}`}
+            />
+          </Box>
+
+          <SchemeGas scheme={scheme} />
+
+          {acc ? (
+            <Box sx={{ p: 1.25, border: "1px solid", borderColor: "success.main", borderRadius: 1.5 }}>
+              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 1, mb: 0.5 }}>
+                <Box component="span" sx={{ ...captionSx, color: "success.main", opacity: 1 }}>Your signing key</Box>
+                <Box component="span" sx={{ fontFamily: MONO, fontSize: "0.56rem", letterSpacing: "0.08em", color: "success.main", border: "1px solid", borderColor: "success.main", borderRadius: 0.5, px: 0.5, py: 0.1 }}>
                   POST-QUANTUM
                 </Box>
-              }
-              pinned={budgetWarn && budget !== null && (
-                <Alert severity="warning" sx={{ mt: 0.75 }}>
-                  This key has used {used.toLocaleString()} of its ~{budget.toLocaleString()} signatures.
-                  Spends are blocked at {(rail?.budgetBlock ?? budget).toLocaleString()}: plan to move the funds to a new account.
-                </Alert>
+              </Box>
+              <Box sx={{ fontSize: "0.95rem", fontWeight: 600 }}>
+                {acc.level}
+                <Box component="span" sx={{ opacity: 0.55, fontWeight: 400, fontSize: "0.7rem" }}> · {info.family}</Box>
+              </Box>
+              <Box sx={{ fontFamily: MONO, fontSize: "0.72rem", opacity: 0.85, mt: 0.5, wordBreak: "break-all" }}>
+                public key {acc.publicKeyBytes.toLocaleString()} B · signature {acc.signatureBytes.toLocaleString()} B
+              </Box>
+              <Box sx={{ fontSize: "0.64rem", opacity: 0.5 }}>
+                a normal wallet (ECDSA secp256k1) is 33 B / 65 B, breakable by a quantum computer
+              </Box>
+              <Box sx={{ fontFamily: MONO, fontSize: "0.7rem", opacity: 0.8, mt: 0.5 }}>account salt {shortHex(acc.salt)}</Box>
+              {acctStatus && rail && (
+                <Box sx={{ fontFamily: MONO, fontSize: "0.7rem", opacity: 0.8 }}>
+                  {budget !== null
+                    ? `signatures used ${used.toLocaleString()} / ${budget.toLocaleString()}`
+                    : `signatures used ${used.toLocaleString()} (stateless scheme, no budget)`}
+                </Box>
               )}
-              sx={{ mb: 2 }}
-            >
-              <Box sx={{ p: 1.25, border: "1px solid", borderColor: "success.main", borderRadius: 1.5 }}>
-                <Box sx={{ fontSize: "0.95rem", fontWeight: 600 }}>
-                  {acc.level}
-                  <Box component="span" sx={{ opacity: 0.55, fontWeight: 400, fontSize: "0.7rem" }}> · {info.family}</Box>
+              {verifier && (
+                <Box sx={{ fontSize: "0.64rem", opacity: 0.6, mt: 0.4, lineHeight: 1.5 }}>
+                  verified on-chain by{" "}
+                  <Link href={`${HEGOTA.explorerUrl}/address/${verifier}`} target="_blank" rel="noopener" sx={{ fontFamily: MONO }}>
+                    {shortHex(verifier)} ↗
+                  </Link>{" "}
+                  ({info.verifierText}): funds move only if your post-quantum signature is VALID.
                 </Box>
-                <Box sx={{ ...mono, fontSize: "0.72rem", opacity: 0.85, mt: 0.5 }}>
-                  public key {acc.publicKeyBytes.toLocaleString()} B · signature {acc.signatureBytes.toLocaleString()} B
-                </Box>
-                <Box sx={{ fontSize: "0.64rem", opacity: 0.5 }}>
-                  a normal wallet (ECDSA secp256k1) is 33 B / 65 B, breakable by a quantum computer
-                </Box>
-                <Box sx={{ ...mono, fontSize: "0.7rem", opacity: 0.8, mt: 0.5 }}>account salt {shortHex(acc.salt)}</Box>
-                {acctStatus && rail && (
-                  <Box sx={{ ...mono, fontSize: "0.7rem", opacity: 0.8 }}>
-                    {budget !== null
-                      ? `signatures used ${used.toLocaleString()} / ${budget.toLocaleString()}`
-                      : `signatures used ${used.toLocaleString()} (stateless scheme, no budget)`}
-                  </Box>
-                )}
-                {verifier && (
-                  <Box sx={{ fontSize: "0.64rem", opacity: 0.6, mt: 0.4, lineHeight: 1.5 }}>
-                    verified on-chain by{" "}
-                    <Link href={`${HEGOTA.explorerUrl}/address/${verifier}`} target="_blank" rel="noopener" sx={{ fontFamily: "ui-monospace,monospace" }}>
-                      {shortHex(verifier)} ↗
-                    </Link>{" "}
-                    ({info.verifierText}): funds move only if your post-quantum signature is VALID.
-                  </Box>
-                )}
-              </Box>
-            </FrameSection>
-
-            {/* Receive: the deterministic CREATE2 address funds arrive to. */}
-            <FrameSection id="home.address" title="Your address (send funds here to receive)" defaultOpen>
-              <Box sx={{ ...mono, mb: 0.5 }}>{acc.address}</Box>
-              <FrameExplain id="home.address.vs">
-                <Vs
-                  a="a Safe account, deployed by a bundler through the ERC-4337 EntryPoint + factory"
-                  b={`an ${info.accountClass} at a deterministic CREATE2 address, deployed by an on-chain sponsor on first spend (no bundler)`}
-                />
-              </FrameExplain>
-              <Box sx={{ mb: 0.5 }} />
-
-              <Box sx={row}>
-                <span>State</span>
-                <span style={mono}>
-                  {acctStatus === null
-                    ? "reading..."
-                    : acctStatus.deployed
-                      ? "deployed"
-                      : "not deployed (deploys on first spend)"}
-                </span>
-              </Box>
-              <Box sx={row}>
-                <span>Balance</span>
-                <span style={mono}>{acctStatus === null ? "-" : `${formatEther(balWei)} ${HEGOTA.symbol}`}</span>
-              </Box>
-              <Box sx={row}>
-                <span>Gas</span>
-                <span style={mono}>
-                  {gasLine(rail)}
-                </span>
-              </Box>
-
-              {/* Low balance: part of the address section, hidden when it is collapsed. */}
-              {acctStatus && lowBalance && (
-                <Alert severity="info" sx={{ mt: 1 }}>
-                  Low balance. Fund this address to receive:{" "}
-                  <Link href="https://faucet.privacy.ethrex.xyz/" target="_blank" rel="noopener">
-                    faucet
-                  </Link>
-                  .
-                </Alert>
               )}
+            </Box>
+          ) : unlockBlock}
 
-              <Box sx={{ mt: 1 }}>
-                <Button size="small" variant="text" onClick={() => refreshStatus(acc)} disabled={sending}>
-                  refresh
-                </Button>
-              </Box>
-            </FrameSection>
+          {budgetAlert}
 
-            <Divider sx={{ my: 2 }} />
+        </Box>
+      </>
+    );
+  } else {
+    body = (
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <BalanceCard
+          wei={acc ? balWei : null}
+          hidden={hidden}
+          onToggleHide={toggleHidden}
+          subline={`${user ?? "-"} · ${scheme} · ${HEGOTA.name}`}
+        >
+          {acc && (
+            <Box sx={{ fontFamily: MONO, fontSize: "0.66rem", opacity: 0.6, mt: 0.5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
+              <span>
+                {acctStatus === null ? "reading..." : acctStatus.deployed ? "deployed" : "not deployed, deploys on first spend"}
+              </span>
+              <Button size="small" variant="text" onClick={() => void refreshStatus(acc)} sx={{ fontSize: "0.66rem", minWidth: 0, py: 0 }}>
+                refresh
+              </Button>
+            </Box>
+          )}
+        </BalanceCard>
 
-            {/* Send: paymaster-sponsored spend (selected scheme) to a raw 0x address. */}
-            <FrameSection id="home.send" title={sendLabel}>
-              <FrameExplain id="home.send.vs">
-                <Vs
-                  a="a bundler relays your UserOp and an off-chain paymaster fronts the gas"
-                  b="frame-tx: your account approves execution, a keyless on-chain paymaster (gated by your account's code hash) pays the gas; no bundler, no relayer, no operator key"
-                />
-              </FrameExplain>
-              <Box sx={{ mb: 1 }} />
-              <TextField
-                fullWidth
-                size="small"
-                label="Recipient (0x address)"
-                placeholder="0x..."
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                disabled={sending}
-                error={to.trim().length > 0 && !isAddress(to.trim())}
-                sx={{ mb: 1.5 }}
-                inputProps={{ style: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.8rem" } }}
-              />
-              <TextField
-                fullWidth
-                size="small"
-                label={`Amount (${HEGOTA.symbol})`}
-                placeholder="0.0"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                disabled={sending}
-                sx={{ mb: 1.5 }}
-              />
-              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-                <Button
-                  variant="contained"
-                  onClick={() => doSend(acc)}
-                  disabled={sending || !isAddress(to.trim()) || amount.trim().length === 0}
-                >
-                  {sending ? "working..." : sendLabel}
-                </Button>
-                <Button
-                  variant="outlined"
-                  onClick={() => doSend(acc, true)}
-                  disabled={sending || !isAddress(to.trim()) || balWei === 0n}
-                  title={sponsored ? "Send the whole balance (the paymaster pays the gas, nothing is left)" : "Send the balance minus the self-pay gas reserve"}
-                >
-                  Send all
-                </Button>
-              </Box>
-            </FrameSection>
+        {!acc && unlockBlock}
 
-            {/* Send progress / result / error stays visible even with the send section collapsed. */}
-            {sendMsg && (
-              <Alert severity={sendMsg.ok ? "success" : sendMsg.busy ? "info" : "error"} sx={{ mt: 2 }}>
-                {sendMsg.text}
-              </Alert>
-            )}
+        <FrameSchemePicker scheme={scheme} onChange={choose} disabled={unlocking} context="transparent" />
 
-            {decoded && (
-              <FrameSection id="home.decoded" title="Frame-tx decoded: what you just signed" sx={{ mt: 2 }}>
-                <Box sx={{ fontSize: "0.68rem", opacity: 0.55, mb: 0.5 }}>
-                  No opaque UserOp: this is the actual EIP-8141 frame transaction, frame by frame.
-                </Box>
-                {decoded.deploy && <FrameTxView d={decoded.deploy} />}
-                <FrameTxView d={decoded.spend} />
+        {acc && budgetAlert}
 
-                <FrameExplain id="home.decoded.verify" label={`how the ${acc.level} verify works`}>
-                  {acc.level === "ML-DSA-44" ? (
-                    <Box sx={{ mt: 0.75, pl: 1, borderLeft: "2px solid", borderColor: "divider", fontSize: "0.68rem", opacity: 0.72, lineHeight: 1.6 }}>
-                      <Box sx={{ fontWeight: 600, mb: 0.25 }}>On the ML-DSA-44 verify (the DEFAULT batch frame)</Box>
-                      The verify costs ~1.25M gas, over the gas cap of the VERIFY prefix, so your account&apos;s VERIFY
-                      only checks the frame layout (its own verify frame follows, atomically batched with the spend) and
-                      approves. The DEFAULT frame then runs the ML-DSA verify; a bad signature reverts it and the node skips
-                      the rest of the batch, so nothing moves. The witness is ~24.7 KB of calldata (expanded public key +
-                      signature). The ML-DSA paymaster is a separate keyless contract with its own balance, so this
-                      more expensive class cannot drain the leanSphincs-s paymaster.
-                    </Box>
-                  ) : (
-                    <Box sx={{ mt: 0.75, pl: 1, borderLeft: "2px solid", borderColor: "divider", fontSize: "0.68rem", opacity: 0.72, lineHeight: 1.6 }}>
-                      <Box sx={{ fontWeight: 600, mb: 0.25 }}>On the leanSphincs-s verify (the first VERIFY frame)</Box>
-                      The signature is checked in the EVM by a stateless verifier (~55K gas incl. reading the key from
-                      storage). The frame-tx cost is dominated by calldata: the signature is ~4.2 KB. The paymaster frame
-                      is a keyless contract that only compares your account&apos;s code hash, so it sponsors any account of
-                      this class with no operator and no off-chain service.
-                      <Box sx={{ mt: 0.5 }}>
-                        <b>EIP-8288</b> goes further (candidate, Buterin/Coratger; targets &ldquo;I-star&rdquo;, the fork after
-                        Hegota): a SIGNATURE frame that accepts STARK proofs and aggregates many PQ signatures off-chain
-                        into one recursive STARK the block verifies, so N spends cost about as much as 1, collapsing the
-                        per-op gas at scale.
-                      </Box>
-                      <Box sx={{ mt: 0.5 }}>
-                        This scheme is <b>hash-based</b>, the direction lean Ethereum / L-star favors
-                        (&ldquo;believe in hashes&rdquo;) over lattices. Each key has a finite signature budget (~20K), shown
-                        above.
-                      </Box>
-                    </Box>
-                  )}
-                </FrameExplain>
-              </FrameSection>
-            )}
-          </>
+        {acc && lastResult && (
+          <Box>
+            <Box sx={captionSx}>Last transaction</Box>
+            <Box sx={{ fontSize: "0.72rem", opacity: 0.8, my: 0.5 }}>
+              {lastResult.mode === "sponsored" ? "sponsored by the keyless paymaster" : "self-pay"}
+            </Box>
+            <DecodedSection decoded={lastResult.decoded} id="home.last.decoded" />
+            <VerifyExplain level={acc.level} />
+          </Box>
         )}
-      </Paper>
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", maxWidth: 400, mx: "auto", width: "100%", px: 2, py: 3 }}>
+      <Box sx={{ pb: BAR_SPACE }}>{body}</Box>
+      <ActionBar
+        active={view === "menu" ? null : view}
+        onSelect={(s) => setView(view === s ? "menu" : s)}
+        sendDisabled={!acc || !balWei}
+      />
     </Box>
   );
 }
